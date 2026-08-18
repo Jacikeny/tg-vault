@@ -61,6 +61,22 @@ test('WebDAV metadata request aborts when the remote stops responding', async ()
     await assert.rejects(() => provider.getFileSize('remote/object'), /WebDAV stat timed out after 20ms/);
 });
 
+test('WebDAV connection probe uses its own short deadline', async () => {
+    const provider = new WebDAVStorageProvider('account-1', 'http://127.0.0.1:9', undefined, undefined, 500, 500, 20);
+    let signal: AbortSignal | undefined;
+    (provider as any).client = {
+        getDirectoryContents: async (_remotePath: string, options?: { signal?: AbortSignal }) => {
+            signal = options?.signal;
+            await new Promise<void>((_resolve, reject) => {
+                options?.signal?.addEventListener('abort', () => reject(options.signal?.reason || new Error('aborted')), { once: true });
+            });
+        },
+    };
+
+    await assert.rejects(() => provider.probe(), /webdav.*连接测试失败.*连接测试超时/i);
+    assert.equal(signal?.aborted, true);
+});
+
 test('WebDAV delete aborts a stalled request instead of hanging the API forever', async () => {
     const provider = new WebDAVStorageProvider('account-1', 'http://127.0.0.1:9', undefined, undefined, 20);
     (provider as any).client = {

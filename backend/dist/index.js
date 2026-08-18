@@ -780,6 +780,21 @@ function storageProbeError(provider, error) {
   const { reason, code } = summarizeStorageProbeFailure(error);
   return new StorageProbeError(provider, `${provider} \u8FDE\u63A5\u6D4B\u8BD5\u5931\u8D25\uFF1A${reason}`, code);
 }
+function configuredStorageProbeTimeoutMs() {
+  const configured2 = Number(process.env.STORAGE_PROBE_TIMEOUT_MS);
+  return Number.isFinite(configured2) && configured2 > 0 ? Math.max(1e3, configured2) : 15e3;
+}
+async function withStorageProbeDeadline(operation, provider, timeoutMs) {
+  let timeout;
+  const deadline = new Promise((_resolve, reject) => {
+    timeout = setTimeout(() => reject(new Error(`${provider} probe timed out after ${timeoutMs}ms`)), timeoutMs);
+  });
+  try {
+    return await Promise.race([operation, deadline]);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
 var StorageQuotaCooldownError, StorageProbeError, LocalStorageProvider, AliyunOSSStorageProvider, S3StorageProvider, WebDAVStorageProvider, OneDriveStorageProvider, GoogleDriveStorageProvider, StorageManager, storageManager;
 var init_storage = __esm({
   "src/services/storage.ts"() {
@@ -877,8 +892,9 @@ var init_storage = __esm({
       }
     };
     AliyunOSSStorageProvider = class {
-      constructor(id, region, accessKeyId, accessKeySecret, bucket) {
+      constructor(id, region, accessKeyId, accessKeySecret, bucket, probeTimeoutMs = configuredStorageProbeTimeoutMs()) {
         this.id = id;
+        this.probeTimeoutMs = probeTimeoutMs;
         const sanitizedRegion = this.sanitizeRegion(region);
         this.client = new OSS({
           region: sanitizedRegion,
@@ -889,6 +905,7 @@ var init_storage = __esm({
         });
       }
       id;
+      probeTimeoutMs;
       name = "aliyun_oss";
       client;
       sanitizeRegion(region) {
@@ -901,7 +918,11 @@ var init_storage = __esm({
       }
       async probe() {
         try {
-          await this.client.list({ "max-keys": 1 });
+          await withStorageProbeDeadline(
+            this.client.list({ "max-keys": 1 }, { timeout: this.probeTimeoutMs }),
+            "Aliyun OSS",
+            this.probeTimeoutMs
+          );
         } catch (error) {
           throw storageProbeError(this.name, error);
         }
@@ -955,7 +976,7 @@ var init_storage = __esm({
       }
     };
     S3StorageProvider = class {
-      constructor(id, endpoint, region, accessKeyId, secretAccessKey, bucket, forcePathStyle = false) {
+      constructor(id, endpoint, region, accessKeyId, secretAccessKey, bucket, forcePathStyle = false, probeTimeoutMs = configuredStorageProbeTimeoutMs()) {
         this.id = id;
         this.endpoint = endpoint;
         this.region = region;
@@ -963,6 +984,7 @@ var init_storage = __esm({
         this.secretAccessKey = secretAccessKey;
         this.bucket = bucket;
         this.forcePathStyle = forcePathStyle;
+        this.probeTimeoutMs = probeTimeoutMs;
         this.client = new S3Client({
           endpoint,
           region,
@@ -980,13 +1002,21 @@ var init_storage = __esm({
       secretAccessKey;
       bucket;
       forcePathStyle;
+      probeTimeoutMs;
       name = "s3";
       client;
       async probe() {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(new Error(`S3 probe timed out after ${this.probeTimeoutMs}ms`)), this.probeTimeoutMs);
         try {
-          await this.client.send(new ListObjectsV2Command({ Bucket: this.bucket, MaxKeys: 1 }));
+          await this.client.send(
+            new ListObjectsV2Command({ Bucket: this.bucket, MaxKeys: 1 }),
+            { abortSignal: controller.signal }
+          );
         } catch (error) {
-          throw storageProbeError(this.name, error);
+          throw storageProbeError(this.name, controller.signal.aborted ? controller.signal.reason : error);
+        } finally {
+          clearTimeout(timeout);
         }
       }
       async saveFile(tempPath, fileName, mimeType, folder) {
@@ -1065,6 +1095,8 @@ var init_storage = __esm({
       })(), uploadTimeoutMs = (() => {
         const configured2 = Number(process.env.WEBDAV_UPLOAD_TIMEOUT_MS);
         return Number.isFinite(configured2) && configured2 > 0 ? Math.max(6e4, configured2) : 6 * 60 * 60 * 1e3;
+      })(), probeTimeoutMs = (() => {
+        return configuredStorageProbeTimeoutMs();
       })()) {
         this.id = id;
         this.url = url;
@@ -1072,6 +1104,7 @@ var init_storage = __esm({
         this.password = password;
         this.requestTimeoutMs = requestTimeoutMs;
         this.uploadTimeoutMs = uploadTimeoutMs;
+        this.probeTimeoutMs = probeTimeoutMs;
         this.client = createClient(url, {
           username,
           password
@@ -1083,6 +1116,7 @@ var init_storage = __esm({
       password;
       requestTimeoutMs;
       uploadTimeoutMs;
+      probeTimeoutMs;
       name = "webdav";
       client;
       async withRequestTimeout(operation, label, timeoutMs = this.requestTimeoutMs) {
@@ -1108,7 +1142,8 @@ var init_storage = __esm({
         try {
           await this.withRequestTimeout(
             (signal) => this.client.getDirectoryContents("/", { deep: false, signal }),
-            "WebDAV probe"
+            "WebDAV probe",
+            this.probeTimeoutMs
           );
         } catch (error) {
           throw storageProbeError(this.name, error);
@@ -17212,6 +17247,17 @@ function sendStorageOperationError(res, error, fallback) {
   }
   res.status(500).json({ error: fallback });
 }
+function sendStorageEndpointValidationError(res, error) {
+  const message = error instanceof Error ? error.message : "";
+  const safeMessages = [
+    "\u94FE\u63A5\u683C\u5F0F\u65E0\u6548",
+    "\u4EC5\u5141\u8BB8 http/https \u94FE\u63A5",
+    "\u4E0D\u5141\u8BB8\u8BBF\u95EE\u672C\u673A\u5730\u5740",
+    "\u4E0D\u5141\u8BB8\u8BBF\u95EE\u5185\u7F51\u3001\u56DE\u73AF\u6216\u4FDD\u7559\u5730\u5740",
+    "\u5B58\u50A8\u7AEF\u70B9\u4EC5\u5141\u8BB8 https\uFF1B\u5982\u786E\u9700 http\uFF0C\u8BF7\u663E\u5F0F\u8BBE\u7F6E ALLOW_INSECURE_STORAGE_ENDPOINTS=true"
+  ];
+  res.status(400).json({ error: safeMessages.includes(message) ? message : "\u65E0\u6CD5\u89E3\u6790\u5B58\u50A8\u7AEF\u70B9\u5730\u5740" });
+}
 function sendOAuthSuccessPage(res, input) {
   const nonce = crypto20.randomBytes(16).toString("base64");
   res.setHeader("Content-Security-Policy", [
@@ -17674,7 +17720,11 @@ router5.post("/config/s3", requireAuth, async (req, res) => {
     if (!name || !endpoint || !region || !accessKeyId || !accessKeySecret || !bucket) {
       return res.status(400).json({ error: "\u7F3A\u5C11\u5FC5\u8981\u53C2\u6570" });
     }
-    await assertPublicStorageEndpoint(endpoint);
+    try {
+      await assertPublicStorageEndpoint(endpoint);
+    } catch (error) {
+      return sendStorageEndpointValidationError(res, error);
+    }
     const { storageManager: storageManager2 } = await Promise.resolve().then(() => (init_storage(), storage_exports));
     const accountId = await storageManager2.addS3Account(name, endpoint, region, accessKeyId, accessKeySecret, bucket, forcePathStyle || false);
     res.json({ success: true, message: "S3 \u5B58\u50A8\u8D26\u6237\u5DF2\u6DFB\u52A0", accountId });
@@ -17689,7 +17739,11 @@ router5.post("/config/webdav", requireAuth, async (req, res) => {
     if (!name || !url) {
       return res.status(400).json({ error: "\u7F3A\u5C11\u5FC5\u8981\u53C2\u6570 (\u540D\u79F0\u548C URL)" });
     }
-    await assertPublicStorageEndpoint(url);
+    try {
+      await assertPublicStorageEndpoint(url);
+    } catch (error) {
+      return sendStorageEndpointValidationError(res, error);
+    }
     const { storageManager: storageManager2 } = await Promise.resolve().then(() => (init_storage(), storage_exports));
     const accountId = await storageManager2.addWebDAVAccount(name, url, username, password);
     res.json({ success: true, message: "WebDAV \u5B58\u50A8\u8D26\u6237\u5DF2\u6DFB\u52A0", accountId });
@@ -19508,6 +19562,7 @@ var NUMBER_SPECS = [
   { name: "TG_DISK_WATERMARK_RECHECK_MS", fallback: 3e4, min: 5e3, max: 36e5 },
   { name: "TG_DISK_WATERMARK_MAX_WAIT_MS", fallback: 0, min: 0, max: 6048e5 },
   { name: "TG_DEBUG_LOG_MAX_MB", fallback: 5, min: 1, max: 1024 },
+  { name: "STORAGE_PROBE_TIMEOUT_MS", fallback: 15e3, min: 1e3, max: 6e4 },
   { name: "WEBDAV_INACTIVITY_TIMEOUT_MS", fallback: 3e5, min: 3e4, max: 864e5 },
   { name: "WEBDAV_UPLOAD_TIMEOUT_MS", fallback: 216e5, min: 6e4, max: 6048e5 },
   { name: "YTDLP_MAX_CONCURRENT", fallback: 1, min: 1, max: 16 }
@@ -19612,6 +19667,7 @@ function validateRuntimeConfig(env = process.env) {
       workDir: env.YTDLP_WORK_DIR || "./data/uploads/ytdlp"
     },
     storage: {
+      probeTimeoutMs: numbers.STORAGE_PROBE_TIMEOUT_MS,
       webdavInactivityTimeoutMs: numbers.WEBDAV_INACTIVITY_TIMEOUT_MS,
       webdavUploadTimeoutMs: numbers.WEBDAV_UPLOAD_TIMEOUT_MS,
       allowInsecureEndpoints

@@ -41,6 +41,7 @@ const NUMBER_SPECS: NumberSpec[] = [
     { name: 'TG_DISK_WATERMARK_RECHECK_MS', fallback: 30_000, min: 5_000, max: 3_600_000 },
     { name: 'TG_DISK_WATERMARK_MAX_WAIT_MS', fallback: 0, min: 0, max: 604_800_000 },
     { name: 'TG_DEBUG_LOG_MAX_MB', fallback: 5, min: 1, max: 1024 },
+    { name: 'STORAGE_PROBE_TIMEOUT_MS', fallback: 15_000, min: 1_000, max: 60_000 },
     { name: 'WEBDAV_INACTIVITY_TIMEOUT_MS', fallback: 300_000, min: 30_000, max: 86_400_000 },
     { name: 'WEBDAV_UPLOAD_TIMEOUT_MS', fallback: 21_600_000, min: 60_000, max: 604_800_000 },
     { name: 'YTDLP_MAX_CONCURRENT', fallback: 1, min: 1, max: 16 },
@@ -163,6 +164,7 @@ export function validateRuntimeConfig(env: RuntimeEnv = process.env): RuntimeCon
             workDir: env.YTDLP_WORK_DIR || './data/uploads/ytdlp',
         },
         storage: {
+            probeTimeoutMs: numbers.STORAGE_PROBE_TIMEOUT_MS,
             webdavInactivityTimeoutMs: numbers.WEBDAV_INACTIVITY_TIMEOUT_MS,
             webdavUploadTimeoutMs: numbers.WEBDAV_UPLOAD_TIMEOUT_MS,
             allowInsecureEndpoints,
@@ -179,4 +181,3 @@ export function validateRuntimeConfig(env: RuntimeEnv = process.env): RuntimeCon
 export function logRuntimeConfigSummary(summary: RuntimeConfigSummary): void {
     console.log(`[config] effective=${JSON.stringify(summary)}`);
 }
-

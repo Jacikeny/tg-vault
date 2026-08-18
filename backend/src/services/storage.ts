@@ -142,6 +142,23 @@ function storageProbeError(provider: string, error: unknown): StorageProbeError 
     return new StorageProbeError(provider, `${provider} 连接测试失败：${reason}`, code);
 }
 
+function configuredStorageProbeTimeoutMs(): number {
+    const configured = Number(process.env.STORAGE_PROBE_TIMEOUT_MS);
+    return Number.isFinite(configured) && configured > 0 ? Math.max(1_000, configured) : 15_000;
+}
+
+async function withStorageProbeDeadline<T>(operation: Promise<T>, provider: string, timeoutMs: number): Promise<T> {
+    let timeout: ReturnType<typeof setTimeout>;
+    const deadline = new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(() => reject(new Error(`${provider} probe timed out after ${timeoutMs}ms`)), timeoutMs);
+    });
+    try {
+        return await Promise.race([operation, deadline]);
+    } finally {
+        clearTimeout(timeout!);
+    }
+}
+
 // 本地存储实现
 export class LocalStorageProvider implements IStorageProvider {
     name = 'local';
@@ -226,7 +243,8 @@ export class AliyunOSSStorageProvider implements IStorageProvider {
         region: string,
         accessKeyId: string,
         accessKeySecret: string,
-        bucket: string
+        bucket: string,
+        private probeTimeoutMs = configuredStorageProbeTimeoutMs(),
     ) {
         const sanitizedRegion = this.sanitizeRegion(region);
         this.client = new OSS({
@@ -253,7 +271,11 @@ export class AliyunOSSStorageProvider implements IStorageProvider {
 
     async probe(): Promise<void> {
         try {
-            await this.client.list({ 'max-keys': 1 });
+            await withStorageProbeDeadline(
+                this.client.list({ 'max-keys': 1 }, { timeout: this.probeTimeoutMs }),
+                'Aliyun OSS',
+                this.probeTimeoutMs,
+            );
         } catch (error) {
             throw storageProbeError(this.name, error);
         }
@@ -325,7 +347,8 @@ export class S3StorageProvider implements IStorageProvider {
         private accessKeyId: string,
         private secretAccessKey: string,
         private bucket: string,
-        private forcePathStyle: boolean = false
+        private forcePathStyle: boolean = false,
+        private probeTimeoutMs = configuredStorageProbeTimeoutMs(),
     ) {
         this.client = new S3Client({
             endpoint: endpoint,
@@ -339,10 +362,17 @@ export class S3StorageProvider implements IStorageProvider {
     }
 
     async probe(): Promise<void> {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(new Error(`S3 probe timed out after ${this.probeTimeoutMs}ms`)), this.probeTimeoutMs);
         try {
-            await this.client.send(new ListObjectsV2Command({ Bucket: this.bucket, MaxKeys: 1 }));
+            await this.client.send(
+                new ListObjectsV2Command({ Bucket: this.bucket, MaxKeys: 1 }),
+                { abortSignal: controller.signal },
+            );
         } catch (error) {
-            throw storageProbeError(this.name, error);
+            throw storageProbeError(this.name, controller.signal.aborted ? controller.signal.reason : error);
+        } finally {
+            clearTimeout(timeout);
         }
     }
 
@@ -440,6 +470,9 @@ export class WebDAVStorageProvider implements IStorageProvider {
             const configured = Number(process.env.WEBDAV_UPLOAD_TIMEOUT_MS);
             return Number.isFinite(configured) && configured > 0 ? Math.max(60_000, configured) : 6 * 60 * 60 * 1000;
         })(),
+        private probeTimeoutMs = (() => {
+            return configuredStorageProbeTimeoutMs();
+        })(),
     ) {
         this.client = createClient(url, {
             username: username,
@@ -476,6 +509,7 @@ export class WebDAVStorageProvider implements IStorageProvider {
             await this.withRequestTimeout(
                 signal => this.client.getDirectoryContents('/', { deep: false, signal }),
                 'WebDAV probe',
+                this.probeTimeoutMs,
             );
         } catch (error) {
             throw storageProbeError(this.name, error);

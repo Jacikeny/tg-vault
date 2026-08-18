@@ -21,3 +21,11 @@ test('storage account deletion previews impact before execution', () => {
     assert.match(settings, /activeLeaseCount/);
     assert.match(settings, /不会删除云端原文件/);
 });
+
+test('cloud storage account creation cannot leave the settings form saving forever', () => {
+    assert.match(api, /setTimeout\(\(\) => controller\.abort\(\), 65_000\)/);
+    assert.match(api, /providerLabel} 连接测试超时/);
+    assert.match(api, /postStorageAccount\('\/api\/storage\/config\/aliyun-oss'/);
+    assert.match(api, /postStorageAccount\('\/api\/storage\/config\/s3'/);
+    assert.match(api, /postStorageAccount\('\/api\/storage\/config\/webdav'/);
+});

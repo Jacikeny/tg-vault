@@ -46,6 +46,18 @@ function sendStorageOperationError(res: Response, error: unknown, fallback: stri
     res.status(500).json({ error: fallback });
 }
 
+function sendStorageEndpointValidationError(res: Response, error: unknown): void {
+    const message = error instanceof Error ? error.message : '';
+    const safeMessages = [
+        '链接格式无效',
+        '仅允许 http/https 链接',
+        '不允许访问本机地址',
+        '不允许访问内网、回环或保留地址',
+        '存储端点仅允许 https；如确需 http，请显式设置 ALLOW_INSECURE_STORAGE_ENDPOINTS=true',
+    ];
+    res.status(400).json({ error: safeMessages.includes(message) ? message : '无法解析存储端点地址' });
+}
+
 function sendOAuthSuccessPage(res: Response, input: {
     provider: OAuthProvider;
     providerName: string;
@@ -560,7 +572,11 @@ router.post('/config/s3', requireAuth, async (req: Request, res: Response) => {
             return res.status(400).json({ error: '缺少必要参数' });
         }
 
-        await assertPublicStorageEndpoint(endpoint);
+        try {
+            await assertPublicStorageEndpoint(endpoint);
+        } catch (error) {
+            return sendStorageEndpointValidationError(res, error);
+        }
 
         const { storageManager } = await import('../services/storage.js');
         const accountId = await storageManager.addS3Account(name, endpoint, region, accessKeyId, accessKeySecret, bucket, forcePathStyle || false);
@@ -581,7 +597,11 @@ router.post('/config/webdav', requireAuth, async (req: Request, res: Response) =
             return res.status(400).json({ error: '缺少必要参数 (名称和 URL)' });
         }
 
-        await assertPublicStorageEndpoint(url);
+        try {
+            await assertPublicStorageEndpoint(url);
+        } catch (error) {
+            return sendStorageEndpointValidationError(res, error);
+        }
 
         const { storageManager } = await import('../services/storage.js');
         const accountId = await storageManager.addWebDAVAccount(name, url, username, password);

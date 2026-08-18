@@ -7,12 +7,17 @@ function testDefaultsMatchRuntimeContract() {
     assert.equal(summary.upload.maxUploadGiB, 20);
     assert.equal(summary.telegram.enabled, false);
     assert.equal(summary.ytdlp.maxConcurrent, 1);
+    assert.equal(summary.storage.probeTimeoutMs, 15_000);
 }
 
 function testRejectsUnsafeRangesAndPartialTelegramConfig() {
     assert.throws(
         () => validateRuntimeConfig({ MAX_UPLOAD_CHUNK_MB: '0' }),
         /MAX_UPLOAD_CHUNK_MB/,
+    );
+    assert.throws(
+        () => validateRuntimeConfig({ STORAGE_PROBE_TIMEOUT_MS: '0' }),
+        /STORAGE_PROBE_TIMEOUT_MS/,
     );
     assert.throws(
         () => validateRuntimeConfig({ MAX_CHUNK_UPLOAD_GB: '50', CHUNK_GLOBAL_BUDGET_GB: '40' }),
@@ -45,4 +50,3 @@ testDefaultsMatchRuntimeContract();
 testRejectsUnsafeRangesAndPartialTelegramConfig();
 testSummaryDoesNotExposeSecretsOrAllowedUserIds();
 console.log('runtime config ok');
-

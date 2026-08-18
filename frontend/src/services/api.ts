@@ -282,6 +282,34 @@ function getHeaders(additionalHeaders: Record<string, string> = {}): HeadersInit
     };
 }
 
+async function postStorageAccount<T>(path: string, body: unknown, providerLabel: string): Promise<T> {
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 65_000);
+    let response: Response;
+    try {
+        response = await fetch(`${API_BASE}${path}`, {
+            credentials: 'include',
+            method: 'POST',
+            headers: getHeaders({ 'Content-Type': 'application/json' }),
+            body: JSON.stringify(body),
+            signal: controller.signal,
+        });
+    } catch (error) {
+        if (controller.signal.aborted) {
+            throw new Error(`${providerLabel} 连接测试超时，请检查服务器地址和网络`);
+        }
+        throw error;
+    } finally {
+        window.clearTimeout(timeout);
+    }
+    if (response.status === 401) throw new Error('UNAUTHORIZED');
+    if (!response.ok) {
+        const error = await response.json().catch(() => null);
+        throw new Error(error?.error || `添加 ${providerLabel} 账户失败`);
+    }
+    return response.json();
+}
+
 class FileAPI {
     private uploadCapabilitiesPromise: Promise<UploadCapabilities> | null = null;
 
@@ -933,50 +961,17 @@ class FileAPI {
 
     // 添加 Aliyun OSS 账户
     async addAliyunOSSAccount(name: string, region: string, accessKeyId: string, accessKeySecret: string, bucket: string): Promise<{ success: boolean; message: string; accountId: string }> {
-        const response = await fetch(`${API_BASE}/api/storage/config/aliyun-oss`, {
-            credentials: 'include',
-            method: 'POST',
-            headers: getHeaders({ 'Content-Type': 'application/json' }),
-            body: JSON.stringify({ name, region, accessKeyId, accessKeySecret, bucket }),
-        });
-        if (response.status === 401) throw new Error('UNAUTHORIZED');
-        if (!response.ok) {
-            const error = await response.json();
-            throw new Error(error.error || '添加 Aliyun OSS 账户失败');
-        }
-        return response.json();
+        return postStorageAccount('/api/storage/config/aliyun-oss', { name, region, accessKeyId, accessKeySecret, bucket }, 'Aliyun OSS');
     }
 
     // 添加 S3 账户
     async addS3Account(name: string, endpoint: string, region: string, accessKeyId: string, accessKeySecret: string, bucket: string, forcePathStyle: boolean = false): Promise<{ success: boolean; message: string; accountId: string }> {
-        const response = await fetch(`${API_BASE}/api/storage/config/s3`, {
-            credentials: 'include',
-            method: 'POST',
-            headers: getHeaders({ 'Content-Type': 'application/json' }),
-            body: JSON.stringify({ name, endpoint, region, accessKeyId, accessKeySecret, bucket, forcePathStyle }),
-        });
-        if (response.status === 401) throw new Error('UNAUTHORIZED');
-        if (!response.ok) {
-            const error = await response.json();
-            throw new Error(error.error || '添加 S3 账户失败');
-        }
-        return response.json();
+        return postStorageAccount('/api/storage/config/s3', { name, endpoint, region, accessKeyId, accessKeySecret, bucket, forcePathStyle }, 'S3');
     }
 
     // 添加 WebDAV 账户
     async addWebDAVAccount(name: string, url: string, username?: string, password?: string): Promise<{ success: boolean; message: string; accountId: string }> {
-        const response = await fetch(`${API_BASE}/api/storage/config/webdav`, {
-            credentials: 'include',
-            method: 'POST',
-            headers: getHeaders({ 'Content-Type': 'application/json' }),
-            body: JSON.stringify({ name, url, username, password }),
-        });
-        if (response.status === 401) throw new Error('UNAUTHORIZED');
-        if (!response.ok) {
-            const error = await response.json();
-            throw new Error(error.error || '添加 WebDAV 账户失败');
-        }
-        return response.json();
+        return postStorageAccount('/api/storage/config/webdav', { name, url, username, password }, 'WebDAV');
     }
 
     // 切换存储提供商或账户
