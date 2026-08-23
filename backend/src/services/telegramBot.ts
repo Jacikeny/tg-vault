@@ -13,7 +13,7 @@ import { handleFileUpload, handleCleanupCallback, pauseDownloadTasks, resumeDown
 import { handleYtDlpCommand, setYtDlpNotifier } from './ytDlpDownload.js';
 import { runYtDlpProbe, type YtDlpProbeResult } from './ytDlpProbe.js';
 import { YtDlpConfirmationStore } from './ytDlpConfirmation.js';
-import { enqueueTelegramNotification, flushTelegramNotificationDigest, resolveNotificationOwnerUserId } from './telegramNotificationDelivery.js';
+import { enqueueTelegramNotification, flushTelegramNotificationDigest, listTelegramNotificationDigestScopes, resolveNotificationOwnerUserId } from './telegramNotificationDelivery.js';
 import {
     enqueueTelegramDateDownload,
     enqueueTelegramTagDownload,
@@ -1559,8 +1559,8 @@ export async function initTelegramBot(): Promise<void> {
         });
         const digestTimer = setInterval(() => {
             if (!client) return;
-            void getConfiguredTelegramAllowedUsers().then(users => Promise.all(users.map(userId =>
-                flushTelegramNotificationDigest(userId, String(userId), {
+            void listTelegramNotificationDigestScopes().then(scopes => Promise.all(scopes.map(scope =>
+                flushTelegramNotificationDigest(scope.userId, scope.chatId, {
                     send: async (chatId, message) => { await client!.sendMessage(chatId, { message }); },
                 }).catch(() => 0),
             ))).catch(() => undefined);

@@ -7,5 +7,5 @@ test('production yt-dlp notifications pass through preference delivery and diges
     const notifier = bot.slice(bot.indexOf('setYtDlpNotifier'), bot.indexOf('// Ensure database table exists'));
     assert.match(notifier, /enqueueTelegramNotification/);
     assert.match(notifier, /flushTelegramNotificationDigest/);
-    assert.match(notifier, /getConfiguredTelegramAllowedUsers/);
+    assert.match(notifier, /listTelegramNotificationDigestScopes/);
 });

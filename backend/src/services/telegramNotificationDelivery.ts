@@ -47,6 +47,16 @@ export async function enqueueTelegramNotification(event: TelegramNotificationEve
 
 const digestFlushInProgress = new Set<string>();
 
+export async function listTelegramNotificationDigestScopes(runQuery: RunQuery = query): Promise<Array<{ userId: number; chatId: string }>> {
+    const result = await runQuery(
+        `SELECT user_id, chat_id FROM telegram_notification_digest
+         WHERE delivered_at IS NULL
+         GROUP BY user_id, chat_id
+         ORDER BY MIN(created_at) ASC`,
+    );
+    return result.rows.map(row => ({ userId: Number(row.user_id), chatId: String(row.chat_id) }));
+}
+
 export async function claimTelegramNotificationDigest(userId: number, chatId: string, runQuery: RunQuery): Promise<any[]> {
     const claimed = await runQuery(
         `WITH candidates AS (

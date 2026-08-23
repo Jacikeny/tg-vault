@@ -8833,6 +8833,15 @@ async function enqueueTelegramNotification(event, deps) {
   return "digest";
 }
 var digestFlushInProgress = /* @__PURE__ */ new Set();
+async function listTelegramNotificationDigestScopes(runQuery = query) {
+  const result = await runQuery(
+    `SELECT user_id, chat_id FROM telegram_notification_digest
+         WHERE delivered_at IS NULL
+         GROUP BY user_id, chat_id
+         ORDER BY MIN(created_at) ASC`
+  );
+  return result.rows.map((row) => ({ userId: Number(row.user_id), chatId: String(row.chat_id) }));
+}
 async function claimTelegramNotificationDigest(userId, chatId, runQuery) {
   const claimed = await runQuery(
     `WITH candidates AS (
@@ -16115,8 +16124,8 @@ async function initTelegramBot() {
     });
     const digestTimer = setInterval(() => {
       if (!client) return;
-      void getConfiguredTelegramAllowedUsers().then((users) => Promise.all(users.map(
-        (userId) => flushTelegramNotificationDigest(userId, String(userId), {
+      void listTelegramNotificationDigestScopes().then((scopes) => Promise.all(scopes.map(
+        (scope) => flushTelegramNotificationDigest(scope.userId, scope.chatId, {
           send: async (chatId, message) => {
             await client.sendMessage(chatId, { message });
           }
