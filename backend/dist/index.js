@@ -8838,10 +8838,11 @@ async function claimTelegramNotificationDigest(userId, chatId, runQuery) {
     `WITH candidates AS (
              SELECT id FROM telegram_notification_digest
              WHERE user_id = $1 AND chat_id = $2 AND delivered_at IS NULL
+               AND (claimed_at IS NULL OR claimed_at < NOW() - INTERVAL '10 minutes')
              ORDER BY created_at ASC LIMIT 100
              FOR UPDATE SKIP LOCKED
          )
-         UPDATE telegram_notification_digest d SET delivered_at = NOW()
+         UPDATE telegram_notification_digest d SET claimed_at = NOW()
          FROM candidates c WHERE d.id = c.id
          RETURNING d.id, d.kind, d.payload`,
     [userId, chatId]
@@ -8856,8 +8857,23 @@ async function flushTelegramNotificationDigest(userId, chatId, deps) {
     const runQuery = deps.runQuery || query;
     const selected = { rows: await claimTelegramNotificationDigest(userId, chatId, runQuery) };
     if (selected.rows.length === 0) return 0;
+    const ids = selected.rows.map((row) => row.id);
     const lines = selected.rows.map((row) => `\u2022 ${String(row.payload?.message || row.kind)}`);
-    await deps.send(chatId, ["\u{1F4EC} **\u901A\u77E5\u6458\u8981**", "", ...lines].join("\n"));
+    try {
+      await deps.send(chatId, ["\u{1F4EC} **\u901A\u77E5\u6458\u8981**", "", ...lines].join("\n"));
+    } catch (error) {
+      await runQuery(
+        `UPDATE telegram_notification_digest SET claimed_at = NULL
+             WHERE id = ANY($1::uuid[]) AND delivered_at IS NULL`,
+        [ids]
+      ).catch(() => void 0);
+      throw error;
+    }
+    await runQuery(
+      `UPDATE telegram_notification_digest SET delivered_at = NOW(), claimed_at = NULL
+         WHERE id = ANY($1::uuid[]) AND delivered_at IS NULL`,
+      [ids]
+    );
     return selected.rows.length;
   } finally {
     digestFlushInProgress.delete(scope);

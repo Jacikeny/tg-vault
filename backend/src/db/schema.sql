@@ -413,12 +413,14 @@ CREATE OR REPLACE TRIGGER telegram_notification_preferences_updated_at
 CREATE TABLE IF NOT EXISTS telegram_notification_digest (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id BIGINT NOT NULL,
-    chat_id TEXT NOT NULL,
-    kind VARCHAR(30) NOT NULL,
+    chat_id VARCHAR(80) NOT NULL,
+    kind VARCHAR(40) NOT NULL,
     payload JSONB NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    delivered_at TIMESTAMPTZ
+    claimed_at TIMESTAMPTZ,
+    delivered_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+ALTER TABLE telegram_notification_digest ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ;
 CREATE INDEX IF NOT EXISTS idx_telegram_notification_digest_pending ON telegram_notification_digest(user_id, chat_id, created_at) WHERE delivered_at IS NULL;
 
 -- Telegram 后台任务表（用于重启后可见、可追踪）

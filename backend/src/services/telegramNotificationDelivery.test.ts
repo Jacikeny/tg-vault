@@ -28,6 +28,17 @@ test('delivery sends security immediately and queues digest events durably', asy
     assert.ok(calls.some(call => /INSERT INTO telegram_notification_digest/.test(call.sql)));
 });
 
+test('failed digest send releases the claim without marking it delivered', async () => {
+    const calls: string[] = [];
+    const rows = [{ id: 'a', kind: 'success', payload: { message: 'A' } }];
+    await assert.rejects(() => flushTelegramNotificationDigest(1, '1', {
+        runQuery: async (sql: string) => { calls.push(sql); return { rows: /RETURNING d\./.test(sql) ? rows : [] } as any; },
+        send: async () => { throw new Error('send failed'); },
+    }), /send failed/);
+    assert.ok(calls.some(sql => /claimed_at = NULL/.test(sql)));
+    assert.ok(calls.every(sql => !/delivered_at = NOW/.test(sql)));
+});
+
 test('digest flush claims pending events and marks them delivered after one summary', async () => {
     const sent: string[] = [];
     const calls: string[] = [];
