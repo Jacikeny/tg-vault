@@ -16,6 +16,7 @@ test('normalizes validated global query options and rejects invalid values', () 
         sort: 'name', direction: 'asc', limit: '999',
     }), {
         q: 'holiday', type: 'image', folder: null, favorite: true,
+        after: null, before: null,
         sort: 'name', direction: 'asc', limit: 500, cursor: null,
     });
 
@@ -24,6 +25,17 @@ test('normalizes validated global query options and rejects invalid values', () 
     assert.throws(() => normalizeFileQuery({ sort: 'size' }), /sort/);
     assert.throws(() => normalizeFileQuery({ direction: 'sideways' }), /direction/);
     assert.throws(() => normalizeFileQuery({ q: 'x'.repeat(201) }), /q/);
+    assert.throws(() => normalizeFileQuery({ after: 'not-a-date' }), /after/);
+    assert.throws(() => normalizeFileQuery({ before: 'not-a-date' }), /before/);
+});
+
+test('date filters use parameterized inclusive bounds', () => {
+    const options = normalizeFileQuery({ after: '2026-08-01', before: '2026-08-24' });
+    const built = buildFilePageQuery(localScope, options);
+    assert.match(built.text, /created_at >= \$2::timestamptz/);
+    assert.match(built.text, /created_at <= \$3::timestamptz/);
+    assert.equal(built.params[1], '2026-08-01T00:00:00.000Z');
+    assert.equal(built.params[2], '2026-08-24T23:59:59.999Z');
 });
 
 test('builds scoped search, type, root-folder and favorite predicates with deterministic name keyset', () => {

@@ -9,28 +9,11 @@ import { cancelYtDlpTask, retryYtDlpTask } from '../services/ytDlpDownload.js';
 import { cancelDownloadTaskGroup, retryFailedDownloadTasks, cancelChannelExecutionGroup } from '../services/telegramUpload.js';
 import { cancelTelegramBackgroundJob, retryTelegramBackgroundJob } from '../services/telegramChannelJobs.js';
 import { filterDismissedTasks, isTaskDismissible, loadTaskCenterDismissals, saveTaskCenterDismissals } from '../services/taskCenterDismissals.js';
+import { mapTelegramChannelJob, mapTransferTask } from '../services/unifiedTaskMapper.js';
 import crypto from 'node:crypto';
 
 const router = Router();
 const CHUNK_DIR = process.env.CHUNK_DIR || './data/chunks';
-
-function parseJsonObject(value: unknown): Record<string, any> {
-    if (value && typeof value === 'object' && !Array.isArray(value)) return value as Record<string, any>;
-    if (typeof value !== 'string') return {};
-    try {
-        const parsed = JSON.parse(value);
-        return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
-    } catch {
-        return {};
-    }
-}
-
-function channelStatus(status: string): string {
-    if (status === 'queued') return 'pending';
-    if (status === 'cooling') return 'waiting';
-    if (status === 'completed_with_errors') return 'failed';
-    return status;
-}
 
 async function collectUnifiedTasks(limit: number): Promise<any[]> {
         const [transfers, channels, chunks, subscriptions, accounts] = await Promise.all([
@@ -62,66 +45,8 @@ async function collectUnifiedTasks(limit: number): Promise<any[]> {
             query('SELECT id, name FROM storage_accounts'),
         ]);
         const accountNames = new Map(accounts.rows.map(row => [String(row.id), String(row.name)]));
-        const tasks: any[] = transfers.map(task => ({
-            id: task.id,
-            sourceType: task.sourceType,
-            kind: task.kind,
-            title: task.title,
-            status: task.status,
-            stage: task.stage,
-            progress: task.progress,
-            ownerUserId: task.ownerUserId,
-            chatId: task.chatId,
-            source: task.source,
-            target: {
-                provider: task.targetProvider,
-                accountId: task.targetAccountId,
-                accountName: task.targetAccountId ? accountNames.get(task.targetAccountId) || null : (task.targetProvider === 'local' ? '服务器本地目录' : null),
-                folder: task.targetFolder,
-            },
-            counts: { total: task.totalItems, completed: task.completedItems, failed: task.failedItems },
-            bytes: { total: task.totalBytes, transferred: task.transferredBytes },
-            detail: task.payload,
-            error: task.error,
-            retryable: task.retryable,
-            cancellable: ['pending', 'running', 'paused'].includes(task.status),
-            createdAt: task.createdAt,
-            updatedAt: task.updatedAt,
-            finishedAt: task.finishedAt,
-        }));
-        for (const row of channels.rows) {
-            const params = parseJsonObject(row.params);
-            const total = Math.max(Number(row.total_count || 0), Number(row.item_count || 0));
-            const completed = Number(row.completed_items || 0);
-            const failed = Number(row.failed_items || 0);
-            tasks.push({
-                id: String(row.id),
-                sourceType: 'telegram_channel',
-                kind: String(row.kind),
-                title: row.source || 'Telegram 频道任务',
-                status: channelStatus(String(row.status)),
-                stage: row.scan_status !== 'completed' ? 'scanning' : 'downloading',
-                progress: total > 0 ? Math.min(100, ((completed + failed + Number(row.skipped_count || 0)) / total) * 100) : 0,
-                ownerUserId: Number(row.user_id),
-                chatId: row.chat_id == null ? null : String(row.chat_id),
-                source: row.source,
-                target: {
-                    provider: params.storageProvider || null,
-                    accountId: params.storageAccountId || null,
-                    accountName: params.storageAccountId ? accountNames.get(String(params.storageAccountId)) || null : (params.storageProvider === 'local' ? '服务器本地目录' : null),
-                    folder: params.folderOverride || null,
-                },
-                counts: { total, completed, failed },
-                bytes: { total: Number(row.total_bytes || 0), transferred: 0 },
-                detail: { scanStatus: row.scan_status, downloadStatus: row.download_status, skipped: Number(row.skipped_count || 0) },
-                error: row.error,
-                retryable: ['failed', 'completed_with_errors'].includes(String(row.status)),
-                cancellable: ['queued', 'running', 'paused', 'cooling'].includes(String(row.status)),
-                createdAt: row.created_at,
-                updatedAt: row.updated_at,
-                finishedAt: row.finished_at,
-            });
-        }
+        const tasks: any[] = transfers.map(task => mapTransferTask(task, accountNames));
+        for (const row of channels.rows) tasks.push(mapTelegramChannelJob(row, accountNames));
         for (const row of chunks.rows) {
             const total = Number(row.total_size || 0);
             const received = Number(row.received_bytes || 0);
@@ -191,9 +116,10 @@ router.get('/', requireAuth, async (req: Request, res: Response) => {
         const filtered = tasks
             .filter(task => !source || task.sourceType === source)
             .filter(task => !status || task.status === status)
-            .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())
-            .slice(0, limit);
-        res.json({ tasks: filtered, total: filtered.length, generatedAt: new Date().toISOString() });
+            .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+        const total = filtered.length;
+        const page = filtered.slice(0, limit);
+        res.json({ tasks: page, total, returned: page.length, generatedAt: new Date().toISOString() });
     } catch (error) {
         console.error('获取统一任务列表失败:', error);
         res.status(500).json({ error: '获取任务列表失败' });

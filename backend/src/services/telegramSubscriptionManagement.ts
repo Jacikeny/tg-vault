@@ -1,3 +1,5 @@
+import type { StorageTargetSnapshot } from './storage.js';
+
 export const TELEGRAM_SUBSCRIPTION_PAGE_SIZE = 5;
 
 export type TelegramSubscriptionRow = {
@@ -30,18 +32,43 @@ export function buildTelegramSubscriptionPage<T extends TelegramSubscriptionRow>
 
 export type TelegramSubscriptionCallback =
     | { kind: 'page'; page: number }
-    | { kind: 'action'; action: 'view' | 'folder' | 'clear' | 'cancel'; id: string; page: number }
+    | { kind: 'action'; action: 'view' | 'folder' | 'clear' | 'cancel' | 'sync' | 'pause' | 'resume' | 'target' | 'from_now' | 'backfill' | 'result' | 'retry'; id: string; page: number }
     | { kind: 'confirm' | 'back'; token: string };
+
+export type TelegramSubscriptionAction = Extract<TelegramSubscriptionCallback, { kind: 'action' }>['action'];
+
+export function buildSubscriptionOperations(row: TelegramSubscriptionRow & { enabled?: boolean }): Array<{ action: TelegramSubscriptionAction; label: string }> {
+    const operations: Array<{ action: TelegramSubscriptionAction; label: string }> = [
+        { action: 'sync', label: '立即同步' },
+        { action: row.enabled ? 'pause' : 'resume', label: row.enabled ? '暂停' : '恢复' },
+        { action: 'target', label: '修改目标' },
+        { action: 'from_now', label: '从现在开始' },
+        { action: 'backfill', label: '按日期补抓' },
+        { action: 'result', label: '最近结果' },
+        { action: 'retry', label: '重试失败项' },
+    ];
+    return operations;
+}
+
+export function resolveSubscriptionTarget(
+    row: { target_mode?: string | null; target_provider?: string | null; target_account_id?: string | null },
+    getActiveTarget: () => StorageTargetSnapshot,
+    getTarget: (provider: string, accountId: string | null) => StorageTargetSnapshot,
+): StorageTargetSnapshot {
+    if (row.target_mode !== 'fixed') return getActiveTarget();
+    if (!row.target_provider) throw new Error('固定订阅目标缺少 provider');
+    return getTarget(row.target_provider, row.target_account_id || null);
+}
 
 export function parseTelegramSubscriptionCallback(data: string): TelegramSubscriptionCallback | null {
     let match = data.match(/^tsub_page_(\d{1,6})$/);
     if (match) return { kind: 'page', page: Number(match[1]) };
 
-    match = data.match(/^tsub_(view|folder|clear|cancel)_([0-9a-f-]{36})(?:_(\d{1,6}))?$/i);
+    match = data.match(/^tsub_(view|folder|clear|cancel|sync|pause|resume|target|from_now|backfill|result|retry)_([0-9a-f-]{36})(?:_(\d{1,6}))?$/i);
     if (match) {
         return {
             kind: 'action',
-            action: match[1] as 'view' | 'folder' | 'clear' | 'cancel',
+            action: match[1] as TelegramSubscriptionAction,
             id: match[2],
             page: Number(match[3] || 0),
         };

@@ -6,6 +6,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { query, pool } from '../db/index.js';
 import { storageManager, isStorageQuotaCooldownError, type StorageTargetSnapshot } from './storage.js';
+import { buildYtDlpPlaylistArgs, type YtDlpPlaylistSelectionInput } from './ytDlpPlaylistSelection.js';
 import { assertStorageTargetWritable, formatStorageCooldownNotice } from './storageCooldownGuard.js';
 import { markStorageAccountCooldown } from './storageCooldown.js';
 import { formatBytes, getFileType, getMimeTypeFromFilename, sanitizeFilename } from '../utils/telegramUtils.js';
@@ -40,7 +41,7 @@ const YTDLP_MAX_CONCURRENT = Math.max(1, parseInt(process.env.YTDLP_MAX_CONCURRE
 const activeControllers = new Map<string, AbortController>();
 let initialized = false;
 
-type YtDlpNotifier = (chatId: string, message: string) => Promise<void>;
+type YtDlpNotifier = (task: TransferTaskRecord, message: string) => Promise<void>;
 let taskNotifier: YtDlpNotifier | null = null;
 
 export function setYtDlpNotifier(notifier: YtDlpNotifier | null): void {
@@ -102,10 +103,17 @@ async function runYtDlpDownload(
     taskDir: string,
     signal: AbortSignal,
     onProgress: (progress: ParsedYtDlpProgress) => void,
+    format: 'best' | 'audio' = 'best',
+    playlist?: YtDlpPlaylistSelectionInput,
 ): Promise<void> {
     ensureDir(taskDir);
     const outputTemplate = path.join(taskDir, '%(title).200s-%(id)s.%(ext)s');
-    const args = ['--no-playlist', '--newline', '--merge-output-format', 'mp4', '-o', outputTemplate, '--', url];
+    const formatArgs = format === 'audio'
+        ? ['-x', '--audio-format', 'mp3']
+        : ['--merge-output-format', 'mp4'];
+    const args = playlist
+        ? [...buildYtDlpPlaylistArgs(url, playlist).slice(0, -2), '--newline', ...formatArgs, '-o', outputTemplate, '--', url]
+        : ['--no-playlist', '--newline', ...formatArgs, '-o', outputTemplate, '--', url];
 
     await new Promise<void>((resolve, reject) => {
         const binLower = YTDLP_BIN.toLowerCase();
@@ -289,7 +297,7 @@ function classifyYtDlpError(error: unknown): string {
 
 async function notifyTask(task: TransferTaskRecord, message: string): Promise<void> {
     if (!task.chatId || !taskNotifier) return;
-    await taskNotifier(task.chatId, message).catch(() => undefined);
+    await taskNotifier(task, message).catch(() => undefined);
 }
 
 async function executeYtDlpTask(id: string): Promise<void> {
@@ -325,7 +333,7 @@ async function executeYtDlpTask(id: string): Promise<void> {
                 console.error(`[yt-dlp] progress persistence failed: ${id}`, error);
                 controller.abort('progress_persistence_failed');
             });
-        });
+        }, String(task.payload.format || 'best') === 'audio' ? 'audio' : 'best', task.payload.playlist as YtDlpPlaylistSelectionInput | undefined);
         const primary = selectPrimaryOutputFile(taskDir);
         if (!primary) throw new Error('下载完成但未找到可上传的输出文件');
         const advancing = await updateYtDlpExecutionProgress(pool, id, execution.generation, execution.leaseToken, {
@@ -493,9 +501,14 @@ export async function retryYtDlpTask(id: string): Promise<TransferTaskRecord | n
     return getTransferTask('ytdlp', id);
 }
 
-export async function handleYtDlpCommand(message: Api.Message, url: string): Promise<void> {
+export async function handleYtDlpCommand(
+    message: Api.Message,
+    url: string,
+    explicitTarget?: StorageTargetSnapshot,
+    options: { format?: 'best' | 'audio'; folder?: string; metadata?: Record<string, unknown>; playlist?: YtDlpPlaylistSelectionInput } = {},
+): Promise<void> {
     const id = `yd-${crypto.randomBytes(8).toString('hex')}`;
-    const target = storageManager.getActiveTarget();
+    const target = explicitTarget || storageManager.getActiveTarget();
     await assertStorageTargetWritable(target);
     const client = target.accountId ? await pool.connect() : null;
     let admissionLease: Awaited<ReturnType<typeof acquireStorageAccountOperationLease>> | null = null;
@@ -521,9 +534,15 @@ export async function handleYtDlpCommand(message: Api.Message, url: string): Pro
             source: url,
             targetProvider: target.provider.name,
             targetAccountId: target.accountId,
-            targetFolder: 'ytdlp',
+            targetFolder: options.folder || 'ytdlp',
             totalItems: 1,
-            payload: { url, targetAccountName: account?.name || (target.provider.name === 'local' ? '服务器本地目录' : null) },
+            payload: {
+                url,
+                format: options.format || 'best',
+                metadata: options.metadata || {},
+                playlist: options.playlist,
+                targetAccountName: account?.name || (target.provider.name === 'local' ? '服务器本地目录' : null),
+            },
             retryable: false,
         });
         ytDlpQueue.enqueue(task.id);

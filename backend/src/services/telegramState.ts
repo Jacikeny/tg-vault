@@ -1,5 +1,7 @@
 import { query } from '../db/index.js';
+import type { QueryResult } from 'pg';
 import { getConfiguredTelegramAllowedUsers } from '../utils/authSettings.js';
+import { ScopedInteractionMap } from './scopedInteractionMap.js';
 
 // Telegram User States
 export enum TelegramUserState {
@@ -8,18 +10,21 @@ export enum TelegramUserState {
     WAITING_2FA_SETUP = 'WAITING_2FA_SETUP',
 }
 
-// User state storage
-export const userStates = new Map<number, {
+const INTERACTION_TTL_MS = Math.max(60_000, Number.parseInt(process.env.TELEGRAM_INTERACTION_TTL_MS || '900000', 10) || 900_000);
+const INTERACTION_MAX_ENTRIES = Math.max(10, Number.parseInt(process.env.TELEGRAM_INTERACTION_MAX_ENTRIES || '1000', 10) || 1_000);
+
+// PIN / TOTP states are temporary and intentionally vanish after restart.
+export const userStates = new ScopedInteractionMap<number, {
     state: TelegramUserState;
     qrMessageId?: number;
     promptMessageId?: number;
-}>();
+}>({ ttlMs: INTERACTION_TTL_MS, maxEntries: INTERACTION_MAX_ENTRIES });
 
 // Authenticated user storage (Cache)
 export const authenticatedUsers = new Map<number, { authenticatedAt: Date }>();
 
 // Password input state
-export const passwordInputState = new Map<number, { password: string }>();
+export const passwordInputState = new ScopedInteractionMap<number, { password: string }>({ ttlMs: INTERACTION_TTL_MS, maxEntries: INTERACTION_MAX_ENTRIES });
 
 export async function revokeAuthenticatedUser(userId: number): Promise<void> {
     authenticatedUsers.delete(userId);
@@ -30,7 +35,44 @@ export async function revokeAuthenticatedUser(userId: number): Promise<void> {
     }
 }
 
-// Initialize authenticated users from database
+export interface TelegramAllowlistReconciliationResult {
+    allowed: number[];
+    added: number[];
+    removed: number[];
+    revoked: number[];
+    recipients: number[];
+}
+
+type TelegramStateQuery = (sql: string, params?: unknown[]) => Promise<Pick<QueryResult, 'rows' | 'rowCount'>>;
+
+export async function reconcileTelegramAllowedUsers(
+    userIds: number[],
+    dependencies: {
+        query?: TelegramStateQuery;
+        cache?: Map<number, { authenticatedAt: Date }>;
+    } = {},
+): Promise<TelegramAllowlistReconciliationResult> {
+    const allowed = [...new Set(userIds.filter(id => Number.isSafeInteger(id) && id > 0))].sort((a, b) => a - b);
+    const runQuery: TelegramStateQuery = dependencies.query || (query as TelegramStateQuery);
+    const cache = dependencies.cache || authenticatedUsers;
+    const existing = await runQuery('SELECT user_id FROM telegram_auth ORDER BY user_id');
+    const authenticated = existing.rows.map(row => Number(row.user_id)).filter(Number.isSafeInteger);
+    const allowedSet = new Set(allowed);
+    const authenticatedSet = new Set(authenticated);
+    const added = allowed.filter(id => !authenticatedSet.has(id));
+    const removed = authenticated.filter(id => !allowedSet.has(id)).sort((a, b) => a - b);
+    const revokedResult = await runQuery(
+        `DELETE FROM telegram_auth
+         WHERE NOT (user_id = ANY($1::bigint[]))
+         RETURNING user_id`,
+        [allowed],
+    );
+    const revoked = revokedResult.rows.map(row => Number(row.user_id)).filter(Number.isSafeInteger).sort((a, b) => a - b);
+    for (const userId of new Set([...removed, ...revoked])) cache.delete(userId);
+    const recipients = [...cache.keys()].filter(id => allowedSet.has(id)).sort((a, b) => a - b);
+    return { allowed, added, removed, revoked, recipients };
+}
+
 export async function loadAuthenticatedUsers(): Promise<void> {
     try {
         const allowedUsers = await getConfiguredTelegramAllowedUsers();

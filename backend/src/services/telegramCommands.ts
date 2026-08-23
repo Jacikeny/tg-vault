@@ -16,15 +16,16 @@ import {
     getProviderDisplayName,
 } from '../utils/telegramMessages.js';
 import { authenticatedUsers, passwordInputState, isAuthenticatedAsync } from './telegramState.js';
-import { forceStopDownloadTasksForScope, getDownloadQueueStats, getDownloadTaskScopeStatus, pauseDownloadTasks, resumeDownloadTasks, retryFailedDownloadTasks, getFileDownloadConcurrency, setFileDownloadConcurrency, listDownloadTaskGroups, getDownloadTaskGroup, prioritizeDownloadTaskGroup, pauseDownloadTaskGroup, resumeDownloadTaskGroup, cancelDownloadTaskGroup, getChannelExecutionGroup, prioritizeChannelExecutionGroup, pauseChannelExecutionGroup, resumeChannelExecutionGroup, cancelChannelExecutionGroup, refreshSilentProgress } from './telegramUpload.js';
+import { forceStopDownloadTasksForScope, getDownloadQueueStats, getTaskStatus, getDownloadTaskScopeStatus, pauseDownloadTasks, resumeDownloadTasks, retryFailedDownloadTasks, getFileDownloadConcurrency, setFileDownloadConcurrency, listDownloadTaskGroups, getDownloadTaskGroup, prioritizeDownloadTaskGroup, pauseDownloadTaskGroup, resumeDownloadTaskGroup, cancelDownloadTaskGroup, getChannelExecutionGroup, prioritizeChannelExecutionGroup, pauseChannelExecutionGroup, resumeChannelExecutionGroup, cancelChannelExecutionGroup, refreshSilentProgress } from './telegramUpload.js';
 import { storageManager } from './storage.js';
 import { cancelTelegramBackgroundJob, listTelegramActiveTaskQueues, pauseTelegramBackgroundJob, resumeTelegramBackgroundJob, retryTelegramBackgroundJob } from './telegramChannelJobs.js';
 import { getSetting, setSetting } from '../utils/settings.js';
 import { DuplicateMode, getDuplicateMode } from '../utils/duplicatePolicy.js';
 import { startPeriodicCleanup, stopPeriodicCleanup } from './orphanCleanup.js';
 import { safeUnlink } from '../utils/localPath.js';
-import { getCurrentStorageScope, nextParam, removePhysicalFile } from '../utils/fileScope.js';
+import { getCurrentStorageScope, getScopedFileById, nextParam, removePhysicalFile, updateScopedFileById } from '../utils/fileScope.js';
 import { canonicalTelegramChatKey, telegramChatKeyFromPeerParts } from '../utils/telegramChatKey.js';
+import { clearTelegramTargetState, getTelegramTargetState, setTelegramTargetState, type TelegramTargetMode } from '../utils/telegramTargetStateStore.js';
 import { buildTaskCancelConfirm, buildTaskCenterDetail, buildTaskCenterPage, channelTaskCenterItem, ordinaryTaskCenterItem, parseTaskCenterCallback, ytdlpTaskCenterItem, type TaskCenterButton, type TaskCenterItem, type TaskCenterSourceType, type TaskCenterView } from './telegramTaskCenter.js';
 import { listTransferTasks } from './transferTasks.js';
 import { cancelYtDlpTask, retryYtDlpTask } from './ytDlpDownload.js';
@@ -40,6 +41,22 @@ import {
     setNextTelegramPathPersistent,
     setSessionTelegramPathPersistent,
 } from '../utils/telegramPathSettings.js';
+import {
+    buildTelegramFileActionRows,
+    buildTelegramFileBrowserText,
+    buildTelegramFileDetail,
+    encodeTelegramFileCallback,
+    parseTelegramFileCallback,
+    queryTelegramFiles,
+} from './telegramFileBrowser.js';
+import { buildTelegramStatusPanel } from './telegramStatusPanel.js';
+import { getTelegramBotStatus } from './telegramBotStatus.js';
+import { getTelegramNotificationPreferences, setTelegramNotificationPreferences } from './telegramNotificationPreferences.js';
+import { getTelegramUserClientStatus } from './telegramUserClientStatus.js';
+import crypto from 'crypto';
+import { buildStorageCapabilities } from '../utils/storageProductContract.js';
+import { getSignedUrl } from '../middleware/signedUrl.js';
+import { normalizeFolderPath } from '../utils/folderPath.js';
 
 // ESM compatibility
 const checkDiskSpace = (checkDiskSpaceModule as any).default || checkDiskSpaceModule;
@@ -60,11 +77,23 @@ interface PendingDeleteInfo {
     messageId: number;
 }
 
+interface PendingTelegramFileMutation {
+    actorId: number;
+    chatId: string;
+    messageId: number;
+    fileId: string;
+    action: 'move' | 'rename';
+    expiresAt: number;
+}
+
 interface StorageAccountSummary {
     id: string;
     name?: string | null;
     type: string;
     is_active: boolean;
+    last_probe_status?: string | null;
+    last_probe_error?: string | null;
+    last_probed_at?: string | null;
 }
 
 interface PendingStorageClearSnapshot {
@@ -87,9 +116,30 @@ interface BulkTaskImpact {
 }
 
 const pendingDeleteConfirmations = new Map<string, PendingDeleteInfo>();
+const pendingTelegramFileMutations = new Map<string, PendingTelegramFileMutation>();
 const pendingStorageClearSnapshots = new Map<string, PendingStorageClearSnapshot>();
 const pendingBulkTaskCancellations = new Map<string, PendingBulkTaskCancellation>();
 const destructiveConfirmations = new DestructiveConfirmationStore();
+
+function buildFileActionKeyboard(file: any): Api.ReplyInlineMarkup {
+    return new Api.ReplyInlineMarkup({
+        rows: buildTelegramFileActionRows(file).map(row => new Api.KeyboardButtonRow({
+            buttons: row.map(button => new Api.KeyboardButtonCallback({ text: button.text, data: Buffer.from(button.data) })),
+        })),
+    });
+}
+
+function buildFileSearchKeyboard(files: any[]): Api.ReplyInlineMarkup | undefined {
+    if (files.length === 0) return undefined;
+    return new Api.ReplyInlineMarkup({
+        rows: files.slice(0, 8).map(file => new Api.KeyboardButtonRow({
+            buttons: [new Api.KeyboardButtonCallback({
+                text: `${file.is_favorite ? '⭐ ' : ''}${String(file.name).slice(0, 38)}`,
+                data: Buffer.from(encodeTelegramFileCallback('detail', String(file.id))),
+            })],
+        })),
+    });
+}
 
 function buildDeleteConfirmKeyboard(confirmId: string): Api.ReplyInlineMarkup {
     return new Api.ReplyInlineMarkup({
@@ -475,6 +525,92 @@ export async function handleHelp(message: Api.Message): Promise<void> {
     await message.reply({ message: buildHelp() });
 }
 
+export async function handleNotifications(message: Api.Message, args: string[] = []): Promise<void> {
+    const userId = message.senderId?.toJSNumber();
+    if (!userId || !(await isAuthenticatedAsync(userId))) {
+        await message.reply({ message: MSG.AUTH_REQUIRED });
+        return;
+    }
+    const chatId = canonicalTelegramChatKey(message.chatId?.toString() || userId);
+    const current = await getTelegramNotificationPreferences(userId, chatId);
+    if (args.length === 0) {
+        await message.reply({ message: [
+            '🔔 **通知偏好**',
+            `失败：${current.failureImmediate ? '即时' : '摘要'}`,
+            `成功：${current.successMode}`,
+            `安全：始终即时（不可关闭）`,
+            `订阅：${current.subscriptionDigest ? '摘要' : '即时'}`,
+            `时区：${current.timezone}`,
+            `安静时段：${current.quietStart && current.quietEnd ? `${current.quietStart}-${current.quietEnd}` : '关闭'}`,
+            '',
+            '用法：/notifications timezone Asia/Shanghai；/notifications quiet 22:00-07:00；/notifications success digest|immediate|off；/notifications failure immediate|digest；/notifications subscription digest|immediate',
+        ].join('\n') });
+        return;
+    }
+    const [key, value = ''] = args;
+    const update: Record<string, unknown> = { ...current };
+    if (key === 'timezone') update.timezone = value;
+    else if (key === 'quiet') {
+        const match = value.match(/^([0-2]\d:[0-5]\d)-([0-2]\d:[0-5]\d)$/);
+        if (!match) throw new Error('安静时段格式必须是 HH:MM-HH:MM');
+        update.quietStart = match[1]; update.quietEnd = match[2];
+    } else if (key === 'success') update.successMode = value;
+    else if (key === 'failure') update.failureImmediate = value === 'immediate';
+    else if (key === 'subscription') update.subscriptionDigest = value !== 'immediate';
+    else throw new Error('未知通知设置');
+    const saved = await setTelegramNotificationPreferences(userId, chatId, update);
+    await message.reply({ message: `✅ 通知偏好已更新。安全告警仍始终即时。\n时区：${saved.timezone}；安静时段：${saved.quietStart || '-'}-${saved.quietEnd || '-'}` });
+}
+
+export async function handleStatus(message: Api.Message): Promise<void> {
+    const senderId = message.senderId?.toJSNumber();
+    if (!senderId || !(await isAuthenticatedAsync(senderId))) {
+        await message.reply({ message: MSG.AUTH_REQUIRED });
+        return;
+    }
+    const requestId = `tg-${crypto.randomBytes(6).toString('hex')}`;
+    try {
+        const target = storageManager.getActiveTarget();
+        const accounts = await storageManager.getAccounts() as StorageAccountSummary[];
+        const account = target.accountId ? accounts.find(row => row.id === target.accountId) : null;
+        const diskSpace = await checkDiskSpace(path.resolve(UPLOAD_DIR));
+        const queue = getDownloadQueueStats();
+        const [subscriptionRows, reconciliation] = await Promise.all([
+            query(`SELECT COUNT(*)::int AS enabled, MAX(last_scan_at) AS last_scan_at,
+                          MAX(last_error) FILTER (WHERE last_error IS NOT NULL) AS last_error
+                   FROM telegram_channel_subscriptions WHERE enabled = true`),
+            query(`SELECT COUNT(*) FILTER (WHERE status = 'pending')::int AS pending,
+                          COUNT(*) FILTER (WHERE resolution = 'operator_required')::int AS operator_required
+                   FROM (
+                       SELECT status, resolution FROM telegram_write_reconciliations
+                       UNION ALL SELECT status, resolution FROM chunk_upload_reconciliations
+                       UNION ALL SELECT status, resolution FROM ytdlp_write_reconciliations
+                   ) reconciliations`),
+        ]);
+        const subscription = subscriptionRows.rows[0] || {};
+        const reconcile = reconciliation.rows[0] || {};
+        await message.reply({ message: buildTelegramStatusPanel({
+            requestId,
+            bot: getTelegramBotStatus(),
+            userClient: getTelegramUserClientStatus(),
+            target: {
+                provider: target.provider.name,
+                accountName: account?.name || (target.provider.name === 'local' ? '服务器本地目录' : target.accountId || '默认账户'),
+                probeStatus: account?.last_probe_status || (target.provider.name === 'local' ? 'available' : null),
+                cooldownUntil: null,
+                probeError: account?.last_probe_error || null,
+            },
+            disk: { freeBytes: Number(diskSpace.free || 0), totalBytes: Number(diskSpace.size || 0) },
+            queue: { active: queue.active, pending: queue.pending, failed: getTaskStatus().history.filter(task => task.status === 'failed').length, paused: queue.paused },
+            subscriptions: { enabled: Number(subscription.enabled || 0), lastScanAt: subscription.last_scan_at || null, lastError: subscription.last_error || null },
+            reconciliation: { pending: Number(reconcile.pending || 0), operatorRequired: Number(reconcile.operator_required || 0) },
+        }) });
+    } catch (error) {
+        console.error(`🤖 status panel failed request=${requestId}:`, error);
+        await message.reply({ message: `❌ 诊断状态读取失败。操作 ID：${requestId}` });
+    }
+}
+
 export async function handleStorage(message: Api.Message): Promise<void> {
     try {
         const scope = await getCurrentStorageScope();
@@ -515,6 +651,61 @@ export async function handleStorage(message: Api.Message): Promise<void> {
         console.error('🤖 获取存储统计失败:', error);
         await message.reply({ message: MSG.ERR_STORAGE });
     }
+}
+
+export async function handleTarget(message: Api.Message, args: string[] = []): Promise<void> {
+    const senderId = message.senderId?.toJSNumber();
+    if (!senderId || !(await isAuthenticatedAsync(senderId))) {
+        await message.reply({ message: MSG.AUTH_REQUIRED });
+        return;
+    }
+    const chatId = canonicalTelegramChatKey(message.chatId?.toString() || senderId);
+    const modeInput = (args[0] || '').toLowerCase();
+    if (modeInput === 'clear') {
+        await clearTelegramTargetState(chatId);
+        await message.reply({ message: '✅ 已清除当前聊天的存储目标覆盖；后续任务使用系统默认。' });
+        return;
+    }
+    if (!modeInput) {
+        const once = await getTelegramTargetState(undefined, chatId, 'once');
+        const session = await getTelegramTargetState(undefined, chatId, 'session');
+        const active = storageManager.getActiveTarget();
+        await message.reply({
+            message: [
+                '🎯 **当前聊天存储目标**',
+                `下一次：${once ? `${once.provider} / ${once.accountId || 'local'}` : '未设置'}`,
+                `会话：${session ? `${session.provider} / ${session.accountId || 'local'}` : '未设置'}`,
+                `系统默认：${active.provider.name} / ${active.accountId || 'local'}`,
+                '',
+                '用法：`/target once <local|账户ID>`、`/target session <local|账户ID>`、`/target clear`',
+            ].join('\n'),
+        });
+        return;
+    }
+    if (!['once', 'session'].includes(modeInput) || !args[1]) {
+        await message.reply({ message: '❌ 用法：/target once <local|账户ID>、/target session <local|账户ID>、/target clear' });
+        return;
+    }
+    const mode = modeInput as TelegramTargetMode;
+    const selector = String(args[1]);
+    let provider = 'local';
+    let accountId: string | null = null;
+    let accountName = '服务器本地目录';
+    if (selector !== 'local') {
+        const accounts = await storageManager.getAccounts() as StorageAccountSummary[];
+        const account = accounts.find(row => String(row.id) === selector || String(row.id).startsWith(selector));
+        if (!account) {
+            await message.reply({ message: '❌ 未找到该存储账户；请从 /storage_switch 查看完整账户列表。' });
+            return;
+        }
+        provider = account.type;
+        accountId = account.id;
+        accountName = account.name || account.type;
+        storageManager.getTarget(provider, accountId);
+    }
+    const expiresAt = new Date(Date.now() + (mode === 'once' ? 24 * 60 * 60 * 1000 : 7 * 24 * 60 * 60 * 1000));
+    await setTelegramTargetState(undefined, chatId, mode, provider, accountId, expiresAt);
+    await message.reply({ message: `✅ 已设置${mode === 'once' ? '下一次' : '当前聊天会话'}目标：${provider} / ${accountName}\n不会修改系统全局默认。` });
 }
 
 export async function handleStorageSwitch(message: Api.Message): Promise<void> {
@@ -701,6 +892,34 @@ export async function handleStorageCleanupCallback(client: TelegramClient, updat
     }
 }
 
+export async function handleFind(message: Api.Message, args: string[] = []): Promise<void> {
+    const senderId = message.senderId?.toJSNumber();
+    if (!senderId || !(await isAuthenticatedAsync(senderId))) {
+        await message.reply({ message: MSG.AUTH_REQUIRED });
+        return;
+    }
+    const rawOptions: Record<string, string> = { limit: '8', sort: 'date', direction: 'desc' };
+    const queryParts: string[] = [];
+    for (const arg of args) {
+        if (arg.startsWith('type:')) rawOptions.type = arg.slice(5);
+        else if (arg.startsWith('folder:')) rawOptions.folder = arg.slice(7);
+        else if (arg.startsWith('after:')) rawOptions.after = arg.slice(6);
+        else if (arg.startsWith('before:')) rawOptions.before = arg.slice(7);
+        else if (arg === 'fav' || arg === 'favorite') rawOptions.favorite = 'true';
+        else queryParts.push(arg);
+    }
+    if (queryParts.length > 0) rawOptions.q = queryParts.join(' ');
+    try {
+        const page = await queryTelegramFiles(rawOptions);
+        await message.reply({
+            message: buildTelegramFileBrowserText(page, rawOptions.q || ''),
+            buttons: buildFileSearchKeyboard(page.files),
+        });
+    } catch (error) {
+        await message.reply({ message: `❌ 搜索失败：${(error as Error).message}` });
+    }
+}
+
 export async function handleList(message: Api.Message, args: string[]): Promise<void> {
     try {
         let limit = 10;
@@ -739,6 +958,103 @@ export async function handleList(message: Api.Message, args: string[]): Promise<
         console.error('🤖 获取文件列表失败:', error);
         await message.reply({ message: MSG.ERR_FILE_LIST });
     }
+}
+
+export async function handleTelegramFileBrowserCallback(client: TelegramClient, update: Api.UpdateBotCallbackQuery, data: string): Promise<void> {
+    const actorId = update.userId.toJSNumber();
+    if (!(await isAuthenticatedAsync(actorId))) {
+        await client.invoke(new Api.messages.SetBotCallbackAnswer({ queryId: update.queryId, message: MSG.AUTH_REQUIRED, alert: true }));
+        return;
+    }
+    const parsed = parseTelegramFileCallback(data);
+    if (!parsed) return;
+    const file = await getScopedFileById(parsed.fileId);
+    if (!file) {
+        await client.invoke(new Api.messages.SetBotCallbackAnswer({ queryId: update.queryId, message: '文件已不存在或不在当前存储范围内', alert: true }));
+        return;
+    }
+    const chatId = getCallbackChatKey(update);
+    const messageId = Number(update.msgId);
+    if (parsed.action === 'detail') {
+        await client.editMessage(update.peer, { message: messageId, text: buildTelegramFileDetail(file), buttons: buildFileActionKeyboard(file) });
+        await client.invoke(new Api.messages.SetBotCallbackAnswer({ queryId: update.queryId, message: '文件详情' }));
+        return;
+    }
+    if (parsed.action === 'copy') {
+        await client.invoke(new Api.messages.SetBotCallbackAnswer({ queryId: update.queryId, message: String(file.id), alert: true }));
+        return;
+    }
+    if (parsed.action === 'favorite') {
+        await updateScopedFileById(String(file.id), 'is_favorite = $1, updated_at = NOW()', [!file.is_favorite]);
+        file.is_favorite = !file.is_favorite;
+        await client.editMessage(update.peer, { message: messageId, text: buildTelegramFileDetail(file), buttons: buildFileActionKeyboard(file) });
+        await client.invoke(new Api.messages.SetBotCallbackAnswer({ queryId: update.queryId, message: file.is_favorite ? '已收藏' : '已取消收藏' }));
+        return;
+    }
+    if (parsed.action === 'link') {
+        const capabilities = buildStorageCapabilities(String(file.source));
+        if (!capabilities.share && String(file.source) !== 'local') {
+            await client.invoke(new Api.messages.SetBotCallbackAnswer({ queryId: update.queryId, message: '当前 provider 不支持分享；可在 Web 中下载', alert: true }));
+            return;
+        }
+        const relative = getSignedUrl(String(file.id), 'download', 3600);
+        const base = (process.env.VITE_API_URL || process.env.OAUTH_CALLBACK_BASE_URL || '').replace(/\/$/, '');
+        const link = base ? `${base}${relative}` : relative;
+        await client.sendMessage(update.peer, { message: `🔗 1 小时签名链接：\n${link}` });
+        await client.invoke(new Api.messages.SetBotCallbackAnswer({ queryId: update.queryId, message: '已生成签名链接' }));
+        return;
+    }
+    if (parsed.action === 'move' || parsed.action === 'rename') {
+        const key = `${actorId}:${chatId}`;
+        pendingTelegramFileMutations.set(key, { actorId, chatId, messageId, fileId: String(file.id), action: parsed.action, expiresAt: Date.now() + 5 * 60 * 1000 });
+        await client.sendMessage(update.peer, { message: parsed.action === 'move' ? '请发送目标目录；发送“取消”退出。' : '请发送新文件名（必须保留原扩展名）；发送“取消”退出。' });
+        await client.invoke(new Api.messages.SetBotCallbackAnswer({ queryId: update.queryId, message: parsed.action === 'move' ? '等待目标目录' : '等待新文件名' }));
+        return;
+    }
+    const sent = await client.sendMessage(update.peer, {
+        message: ['⚠️ **确认删除这个文件？**', '', `📄 ${file.name}`, `🆔 ${String(file.id).slice(0, 13)}`, '', '该操作会删除实体文件和索引。'].join('\n'),
+    }) as Api.Message;
+    const confirmId = destructiveConfirmations.issue({ actorId, chatId, messageId: sent.id, action: 'delete_file', objectId: String(file.id) });
+    pendingDeleteConfirmations.set(confirmId, { fileId: String(file.id), name: String(file.name), size: Number(file.size || 0), selector: String(file.id), actorId, chatId, messageId: sent.id });
+    await sent.edit({ text: sent.message, buttons: buildDeleteConfirmKeyboard(confirmId) });
+    await client.invoke(new Api.messages.SetBotCallbackAnswer({ queryId: update.queryId, message: '需要二次确认' }));
+}
+
+export async function applyPendingTelegramFileMutation(message: Api.Message, actorId: number, input: string): Promise<boolean> {
+    const chatId = canonicalTelegramChatKey(message.chatId?.toString());
+    const key = `${actorId}:${chatId}`;
+    const pending = pendingTelegramFileMutations.get(key);
+    if (!pending) return false;
+    if (pending.expiresAt < Date.now()) {
+        pendingTelegramFileMutations.delete(key);
+        await message.reply({ message: '操作已过期，请重新打开文件详情。' });
+        return true;
+    }
+    if (input.trim() === '取消') {
+        pendingTelegramFileMutations.delete(key);
+        await message.reply({ message: '已取消文件操作。' });
+        return true;
+    }
+    const file = await getScopedFileById(pending.fileId);
+    if (!file) {
+        pendingTelegramFileMutations.delete(key);
+        await message.reply({ message: '文件已不存在或不在当前存储范围内。' });
+        return true;
+    }
+    if (pending.action === 'move') {
+        const folder = normalizeFolderPath(input);
+        await updateScopedFileById(pending.fileId, 'folder = $1, updated_at = NOW()', [folder]);
+        await message.reply({ message: `✅ 已移动到：${folder}` });
+    } else {
+        const name = input.trim();
+        if (!name || /[\/\\:*?"<>|]/.test(name)) throw new Error('文件名包含非法字符');
+        const extension = (value: string) => path.extname(value).toLowerCase();
+        if (extension(name) !== extension(String(file.name))) throw new Error('不允许修改文件后缀');
+        await updateScopedFileById(pending.fileId, 'name = $1, updated_at = NOW()', [name]);
+        await message.reply({ message: `✅ 已重命名为：${name}` });
+    }
+    pendingTelegramFileMutations.delete(key);
+    return true;
 }
 
 export async function handleDelete(message: Api.Message, args: string[]): Promise<void> {

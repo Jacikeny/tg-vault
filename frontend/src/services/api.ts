@@ -4,6 +4,7 @@ import { sha256Hex } from './chunkHash';
 import { API_BASE } from './config';
 import { classifyBatchDeleteResponse, type BatchDeleteResult } from './batchDeleteContract';
 import { chunkBounds, parseChunkUploadInit } from './chunkUploadProtocol';
+import { apiActionErrorFromResponse } from './apiActionError';
 
 export interface FileData {
     id: string;
@@ -143,6 +144,7 @@ export interface UnifiedTask {
 export interface UnifiedTaskList {
     tasks: UnifiedTask[];
     total: number;
+    returned: number;
     generatedAt: string;
 }
 
@@ -811,11 +813,7 @@ class FileAPI {
             body: JSON.stringify({ password, expiration }),
         });
 
-        if (response.status === 401) throw new Error('UNAUTHORIZED');
-        if (!response.ok) {
-            const error = await response.json();
-            throw new Error(error.error || '创建分享链接失败');
-        }
+        if (!response.ok) throw await apiActionErrorFromResponse(response, '创建分享链接失败');
         return response.json();
     }
 
@@ -825,14 +823,19 @@ class FileAPI {
             credentials: 'include',
             headers: getHeaders(),
         });
-        if (response.status === 401) throw new Error('UNAUTHORIZED');
-        if (!response.ok) throw new Error('获取下载链接失败');
+        if (!response.ok) throw await apiActionErrorFromResponse(response, '获取下载链接失败');
 
         const data = await response.json();
         if (data.isRelative) {
             return `${API_BASE}${data.url}`;
         }
         return data.url;
+    }
+
+    async getOriginalFileLink(id: string): Promise<string> {
+        const response = await fetch(`${API_BASE}/api/files/${id}/original`, { credentials: 'include', headers: getHeaders(), redirect: 'manual' });
+        if (!response.ok && response.type !== 'opaqueredirect') throw await apiActionErrorFromResponse(response, '打开原文件失败');
+        return response.headers.get('Location') || `${API_BASE}/api/files/${id}/original`;
     }
 
     // 安全下载文件（使用直接链接，不经过 Blob 缓冲）

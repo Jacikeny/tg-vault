@@ -1,0 +1,43 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import {
+    enqueueTelegramNotification,
+    flushTelegramNotificationDigest,
+} from './telegramNotificationDelivery.js';
+
+const preferences = {
+    failureImmediate: true,
+    successMode: 'digest' as const,
+    security: true as const,
+    subscriptionDigest: true,
+    timezone: 'UTC', quietStart: null, quietEnd: null,
+};
+
+test('delivery sends security immediately and queues digest events durably', async () => {
+    const calls: Array<{ sql: string; params?: unknown[] }> = [];
+    const sent: string[] = [];
+    const deps = {
+        getPreferences: async () => preferences,
+        runQuery: async (sql: string, params?: unknown[]) => { calls.push({ sql, params }); return { rows: [] } as any; },
+        send: async (_chatId: string, text: string) => { sent.push(text); },
+        now: () => new Date('2026-08-24T12:00:00Z'),
+    };
+    await enqueueTelegramNotification({ userId: 1, chatId: '1', kind: 'security', message: '安全告警' }, deps);
+    await enqueueTelegramNotification({ userId: 1, chatId: '1', kind: 'success', message: '成功' }, deps);
+    assert.deepEqual(sent, ['安全告警']);
+    assert.ok(calls.some(call => /INSERT INTO telegram_notification_digest/.test(call.sql)));
+});
+
+test('digest flush claims pending events and marks them delivered after one summary', async () => {
+    const sent: string[] = [];
+    const calls: string[] = [];
+    const rows = [{ id: 'a', kind: 'success', payload: { message: '完成 A' } }, { id: 'b', kind: 'subscription', payload: { message: '同步 B' } }];
+    const result = await flushTelegramNotificationDigest(1, '1', {
+        runQuery: async (sql: string) => { calls.push(sql); return { rows: /RETURNING d\./.test(sql) ? rows : [] } as any; },
+        send: async (_chat, text) => { sent.push(text); },
+    });
+    assert.equal(result, 2);
+    assert.equal(sent.length, 1);
+    assert.match(sent[0], /完成 A/);
+    assert.ok(calls.some(sql => /delivered_at = NOW/.test(sql)));
+});

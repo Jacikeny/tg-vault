@@ -3,7 +3,8 @@ import crypto from 'node:crypto';
 import type { PoolClient } from 'pg';
 import { getPeerId } from 'telegram/Utils.js';
 import { pool, query } from '../db/index.js';
-import { storageManager, isStorageQuotaCooldownError } from './storage.js';
+import { storageManager, isStorageQuotaCooldownError, type StorageTargetSnapshot } from './storage.js';
+import { resolveChannelJobTargetSnapshot } from './telegramChannelJobAdmission.js';
 import { formatStorageCooldownNotice } from './storageCooldownGuard.js';
 import {
     clearExpiredStorageCooldowns,
@@ -20,6 +21,9 @@ import { extractFileInfo, getEstimatedFileSize, type TelegramFileInfo } from '..
 import { annotateTelegramMediaGroup } from '../utils/telegramMediaGroup.js';
 import { lockStorageAccountForUse } from './storageAccountLifecycle.js';
 import { resolveTelegramWriteCommittedWithQuery, claimTelegramWriteReconciliations, resolveClaimedTelegramWrite } from './telegramWriteReconciliation.js';
+import { parseDateOnlyStrict, parseTelegramDateRange } from './telegramDateRange.js';
+import { enqueueTelegramNotification } from './telegramNotificationDelivery.js';
+import { resolveSubscriptionTarget } from './telegramSubscriptionManagement.js';
 
 const SUBSCRIPTION_INTERVAL_MS = Math.max(60_000, parseInt(process.env.TELEGRAM_SUBSCRIPTION_INTERVAL_MS || '300000', 10) || 300_000);
 const SUBSCRIPTION_SCAN_LIMIT = Math.max(1, parseInt(process.env.TELEGRAM_SUBSCRIPTION_SCAN_LIMIT || '100', 10) || 100);
@@ -308,8 +312,44 @@ interface TelegramCommentScanOptions {
     onScanComplete?: (summary: TelegramDownloadScanSummary) => Promise<void> | void;
     onProgress?: (summary: TelegramJobProgressSummary) => Promise<void> | void;
     onRefDiscovered?: (ref: TelegramDownloadMessageRef) => Promise<void> | void;
-    targetProvider?: string;
-    targetAccountId?: string | null;
+    target?: StorageTargetSnapshot;
+}
+
+export interface ChannelJobAdmissionInput {
+    userId: number;
+    chatId?: string;
+    kind: string;
+    source: string;
+    params: Record<string, unknown>;
+    target?: StorageTargetSnapshot;
+}
+
+export interface ChannelJobAdmissionDependencies {
+    getActiveTarget: () => StorageTargetSnapshot;
+    withTransaction: <T>(operation: (client: Pick<PoolClient, 'query'>) => Promise<T>) => Promise<T>;
+    lockStorageAccount: (client: Pick<PoolClient, 'query'>, accountId: string) => Promise<unknown>;
+}
+
+export async function persistChannelJobAdmission(
+    input: ChannelJobAdmissionInput,
+    dependencies: ChannelJobAdmissionDependencies,
+): Promise<string> {
+    const target = resolveChannelJobTargetSnapshot(input.target, dependencies.getActiveTarget);
+    const persistedParams = {
+        ...input.params,
+        storageProvider: target.provider.name,
+        storageAccountId: target.accountId,
+    };
+    return dependencies.withTransaction(async client => {
+        if (target.accountId) await dependencies.lockStorageAccount(client, target.accountId);
+        const result = await client.query(
+            `INSERT INTO telegram_background_jobs (user_id, chat_id, kind, source, params, status, scan_status, download_status, scan_cursor)
+             VALUES ($1, $2, $3, $4, $5, 'queued', 'pending', 'pending', '{}'::jsonb)
+             RETURNING id`,
+            [input.userId, input.chatId || null, input.kind, input.source, JSON.stringify(persistedParams)],
+        );
+        return String(result.rows[0].id);
+    });
 }
 
 export interface TelegramJobProgressSummary {
@@ -609,50 +649,27 @@ async function updateDownloadItemsStatus(jobId: string, messageIds: number[] | u
     );
 }
 
-export function parseDateOnly(value: string, endOfDay = false): Date {
-    const match = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-    if (!match) throw new Error('日期格式必须是 YYYY-MM-DD');
-    const [, yearText, monthText, dayText] = match;
-    const year = Number(yearText);
-    const month = Number(monthText);
-    const day = Number(dayText);
+export const parseDateOnly = parseDateOnlyStrict;
 
-    return new Date(Date.UTC(
-        year,
-        month - 1,
-        day,
-        endOfDay ? 23 : 0,
-        endOfDay ? 59 : 0,
-        endOfDay ? 59 : 0,
-        endOfDay ? 999 : 0,
-    ));
-}
-
-async function createJob(userId: number, chatId: string | undefined, kind: string, source: string, params: Record<string, unknown>) {
-    const target = storageManager.getActiveTarget();
-    const persistedParams = {
-        ...params,
-        storageProvider: target.provider.name,
-        storageAccountId: target.accountId,
-    };
-    const client = await pool.connect();
-    try {
-        await client.query('BEGIN');
-        if (target.accountId) await lockStorageAccountForUse(client, target.accountId);
-        const result = await client.query(
-            `INSERT INTO telegram_background_jobs (user_id, chat_id, kind, source, params, status, scan_status, download_status, scan_cursor)
-             VALUES ($1, $2, $3, $4, $5, 'queued', 'pending', 'pending', '{}'::jsonb)
-             RETURNING id`,
-            [userId, chatId || null, kind, source, JSON.stringify(persistedParams)]
-        );
-        await client.query('COMMIT');
-        return result.rows[0].id as string;
-    } catch (error) {
-        await client.query('ROLLBACK').catch(() => undefined);
-        throw error;
-    } finally {
-        client.release();
-    }
+async function createJob(input: ChannelJobAdmissionInput) {
+    return persistChannelJobAdmission(input, {
+        getActiveTarget: () => storageManager.getActiveTarget(),
+        lockStorageAccount: (client, accountId) => lockStorageAccountForUse(client as PoolClient, accountId),
+        withTransaction: async operation => {
+            const client = await pool.connect();
+            try {
+                await client.query('BEGIN');
+                const result = await operation(client);
+                await client.query('COMMIT');
+                return result;
+            } catch (error) {
+                await client.query('ROLLBACK').catch(() => undefined);
+                throw error;
+            } finally {
+                client.release();
+            }
+        },
+    });
 }
 
 async function getJob(jobId: string) {
@@ -739,8 +756,8 @@ export async function subscribeTelegramChannel(userId: number, chatId: string | 
     const title = resolved.title || getEntityTitle(resolved.entity, resolved.source);
 
     const result = await query(
-        `INSERT INTO telegram_channel_subscriptions (user_id, chat_id, source, source_original, source_type, title, last_message_id, folder_override, enabled, disabled_reason, disabled_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, true, NULL, NULL)
+        `INSERT INTO telegram_channel_subscriptions (user_id, chat_id, source, source_original, source_type, title, last_message_id, folder_override, enabled, disabled_reason, disabled_at, target_mode, target_provider, target_account_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, true, NULL, NULL, 'follow_global', NULL, NULL)
          ON CONFLICT (user_id, source)
          DO UPDATE SET chat_id = EXCLUDED.chat_id, source_original = EXCLUDED.source_original, source_type = EXCLUDED.source_type, title = EXCLUDED.title, folder_override = EXCLUDED.folder_override, enabled = true, disabled_reason = NULL, disabled_at = NULL, updated_at = NOW()
          RETURNING id, source, source_original, source_type, title, last_message_id, folder_override, enabled, disabled_reason, disabled_at`,
@@ -752,6 +769,7 @@ export async function subscribeTelegramChannel(userId: number, chatId: string | 
 export async function listTelegramSubscriptions(userId: number, includeDisabled = false) {
     const result = await query(
         `SELECT id, source, source_original, source_type, title, last_message_id, folder_override, enabled, disabled_reason, disabled_at,
+                target_mode, target_provider, target_account_id,
                 last_scan_at, last_success_at, last_error, last_result,
                 CASE WHEN enabled THEN NOW() + ($3::int * INTERVAL '1 millisecond') ELSE NULL END AS next_scan_at,
                 updated_at
@@ -775,6 +793,66 @@ async function resolveUniqueTelegramSubscriptionId(userId: number, selector: str
         [userId, `${normalized}%`],
     );
     return result.rows.length === 1 ? String(result.rows[0].id) : null;
+}
+
+export async function setTelegramSubscriptionEnabled(userId: number, selector: string, enabled: boolean) {
+    const subscriptionId = await resolveUniqueTelegramSubscriptionId(userId, selector);
+    if (!subscriptionId) return null;
+    const result = await query(
+        `UPDATE telegram_channel_subscriptions
+         SET enabled = $3, disabled_reason = CASE WHEN $3 THEN NULL ELSE '用户手动暂停订阅' END,
+             disabled_at = CASE WHEN $3 THEN NULL ELSE NOW() END, updated_at = NOW()
+         WHERE user_id = $1 AND id = $2::uuid RETURNING *`,
+        [userId, subscriptionId, enabled],
+    );
+    return result.rows[0] || null;
+}
+
+export async function updateTelegramSubscriptionTarget(
+    userId: number,
+    selector: string,
+    input: { mode: 'follow_global' | 'fixed'; provider?: string | null; accountId?: string | null },
+) {
+    const subscriptionId = await resolveUniqueTelegramSubscriptionId(userId, selector);
+    if (!subscriptionId) return null;
+    if (input.mode === 'fixed') {
+        if (!input.provider) throw new Error('固定订阅目标缺少 provider');
+        storageManager.getTarget(input.provider, input.accountId || null);
+    }
+    const result = await query(
+        `UPDATE telegram_channel_subscriptions
+         SET target_mode = $3, target_provider = CASE WHEN $3 = 'fixed' THEN $4 ELSE NULL END,
+             target_account_id = CASE WHEN $3 = 'fixed' THEN $5::uuid ELSE NULL END, updated_at = NOW()
+         WHERE user_id = $1 AND id = $2::uuid RETURNING *`,
+        [userId, subscriptionId, input.mode, input.provider || null, input.accountId || null],
+    );
+    return result.rows[0] || null;
+}
+
+export async function setTelegramSubscriptionFromNow(userId: number, selector: string) {
+    const subscriptionId = await resolveUniqueTelegramSubscriptionId(userId, selector);
+    if (!subscriptionId) return null;
+    const target = await findTelegramSubscription(userId, subscriptionId);
+    if (!target) return null;
+    const latestMessageId = await getLatestMessageId(requireUserClient(), target.source);
+    const result = await query(
+        `UPDATE telegram_channel_subscriptions SET last_message_id = $3, updated_at = NOW()
+         WHERE user_id = $1 AND id = $2::uuid RETURNING *`,
+        [userId, subscriptionId, latestMessageId],
+    );
+    return result.rows[0] || null;
+}
+
+export async function requestTelegramSubscriptionSync(userId: number, selector: string) {
+    const subscriptionId = await resolveUniqueTelegramSubscriptionId(userId, selector);
+    if (!subscriptionId) return null;
+    const result = await query(
+        `UPDATE telegram_channel_subscriptions
+         SET next_scan_at = NOW(), enabled = true, disabled_reason = NULL, disabled_at = NULL, updated_at = NOW()
+         WHERE user_id = $1 AND id = $2::uuid RETURNING *`,
+        [userId, subscriptionId],
+    );
+    return result.rows[0] || null;
 }
 
 export async function updateTelegramSubscriptionFolder(userId: number, selector: string, folderOverride: string | null) {
@@ -1451,21 +1529,28 @@ export async function enqueueTelegramDateDownload(botClient: TelegramClient, req
     const resolved = await resolveTelegramSource(userClient, sourceInput);
     await assertTelegramSourceAllowed(resolved.source, [resolved.originalSource]);
     const source = resolved.source;
-    const startDate = parseDateOnly(startDateText);
-    const endDate = parseDateOnly(endDateText, true);
-    if (startDate > endDate) throw new Error('开始日期不能晚于结束日期');
+    const range = parseTelegramDateRange(startDateText, endDateText);
+    const { startDate, endDate } = range;
 
-    const jobId = await createJob(userId, requestMessage.chatId?.toString(), 'date_range', source, {
-        mode: 'date',
-        startDate: startDateText,
-        endDate: endDateText,
-        startDateIso: startDate.toISOString(),
-        endDateIso: endDate.toISOString(),
-        folderOverride: folderOverride || null,
-        includeComments: Boolean(options.includeComments),
-        commentsMaxPerPost: options.commentsMaxPerPost || TELEGRAM_COMMENTS_MAX_PER_POST,
-        storageProvider: options.targetProvider || null,
-        storageAccountId: options.targetAccountId || null,
+    const target = resolveChannelJobTargetSnapshot(options.target, () => storageManager.getActiveTarget());
+    const jobId = await createJob({
+        userId,
+        chatId: requestMessage.chatId?.toString(),
+        kind: 'date_range',
+        source,
+        target,
+        params: {
+            mode: 'date',
+            startDate: startDateText,
+            endDate: endDateText,
+            startDateIso: startDate.toISOString(),
+            endDateIso: endDate.toISOString(),
+            dayCount: range.dayCount,
+            largeRange: range.requiresLargeRangeConfirmation,
+            folderOverride: folderOverride || null,
+            includeComments: Boolean(options.includeComments),
+            commentsMaxPerPost: options.commentsMaxPerPost || TELEGRAM_COMMENTS_MAX_PER_POST,
+        },
     });
     return runSegmentedTelegramJob(botClient, requestMessage, jobId, source, folderOverride, options);
 }
@@ -1501,14 +1586,20 @@ export async function enqueueTelegramTagDownload(botClient: TelegramClient, requ
     const source = resolved.source;
     const tag = normalizeHashtag(tagInput);
 
-    const jobId = await createJob(userId, requestMessage.chatId?.toString(), 'tag_download', source, {
-        mode: 'tag',
-        tag,
-        folderOverride: folderOverride || null,
-        includeComments: Boolean(options.includeComments),
-        commentsMaxPerPost: options.commentsMaxPerPost || TELEGRAM_COMMENTS_MAX_PER_POST,
-        storageProvider: options.targetProvider || null,
-        storageAccountId: options.targetAccountId || null,
+    const target = resolveChannelJobTargetSnapshot(options.target, () => storageManager.getActiveTarget());
+    const jobId = await createJob({
+        userId,
+        chatId: requestMessage.chatId?.toString(),
+        kind: 'tag_download',
+        source,
+        target,
+        params: {
+            mode: 'tag',
+            tag,
+            folderOverride: folderOverride || null,
+            includeComments: Boolean(options.includeComments),
+            commentsMaxPerPost: options.commentsMaxPerPost || TELEGRAM_COMMENTS_MAX_PER_POST,
+        },
     });
     const result = await runSegmentedTelegramJob(botClient, requestMessage, jobId, source, folderOverride, options);
     return { ...result, tag };
@@ -1823,9 +1914,11 @@ async function runSubscriptionScan(botClient: TelegramClient) {
         if (!userClient || !isTelegramUserClientReady()) return;
 
         const result = await query(
-        `SELECT id, user_id, chat_id, source, source_original, source_type, last_message_id, folder_override
+        `SELECT id, user_id, chat_id, source, source_original, source_type, last_message_id, folder_override,
+                target_mode, target_provider, target_account_id, next_scan_at
          FROM telegram_channel_subscriptions
          WHERE enabled = true
+           AND (next_scan_at IS NULL OR next_scan_at <= NOW())
          ORDER BY updated_at ASC`
     );
 
@@ -1835,15 +1928,27 @@ async function runSubscriptionScan(botClient: TelegramClient) {
             const latestMessageId = await getLatestMessageId(userClient, row.source);
             const lastMessageId = Number(row.last_message_id || 0);
             await query(`UPDATE telegram_channel_subscriptions
-                         SET last_scan_at = NOW(), last_error = NULL,
+                         SET last_scan_at = NOW(), next_scan_at = NOW() + ($4::int * INTERVAL '1 millisecond'), last_error = NULL,
                              last_result = jsonb_build_object('status', CASE WHEN $2::int > $3::int THEN 'updates_found' ELSE 'no_updates' END,
                                                               'latestMessageId', $2::int, 'previousMessageId', $3::int)
-                         WHERE id = $1`, [row.id, latestMessageId || 0, lastMessageId]);
+                         WHERE id = $1`, [row.id, latestMessageId || 0, lastMessageId, SUBSCRIPTION_INTERVAL_MS]);
             if (!latestMessageId || latestMessageId <= lastMessageId) continue;
 
             const count = Math.min(SUBSCRIPTION_SCAN_LIMIT, latestMessageId - lastMessageId);
             const ids = Array.from({ length: count }, (_, index) => lastMessageId + index + 1);
-            const jobId = await createJob(Number(row.user_id), row.chat_id?.toString(), 'subscription_sync', row.source, { subscriptionId: String(row.id), fromId: lastMessageId + 1, toId: latestMessageId });
+            const subscriptionTarget = resolveSubscriptionTarget(
+                row,
+                () => storageManager.getActiveTarget(),
+                (provider, accountId) => storageManager.getTarget(provider, accountId),
+            );
+            const jobId = await createJob({
+                userId: Number(row.user_id),
+                chatId: row.chat_id?.toString(),
+                kind: 'subscription_sync',
+                source: row.source,
+                target: subscriptionTarget,
+                params: { subscriptionId: String(row.id), fromId: lastMessageId + 1, toId: latestMessageId, targetMode: row.target_mode || 'follow_global' },
+            });
             const candidateMessages = await expandMessagesWithMediaGroups(userClient, row.source, (await userClient.getMessages(row.source as any, { ids })).filter(Boolean) as Api.Message[]);
             await persistDownloadMessages(jobId, row.source, candidateMessages, row.folder_override || null);
             await updateJob(jobId, { status: 'running', started_at: new Date(), total_count: ids.length });
@@ -1894,7 +1999,10 @@ async function runSubscriptionScan(botClient: TelegramClient) {
                              last_result = jsonb_build_object('status', $3::text, 'found', $4::int, 'skipped', $5::int, 'failed', $6::int)
                          WHERE id = $1`, [row.id, downloadResult.failed > 0 ? `${downloadResult.failed} 个文件下载失败` : null, downloadResult.failed > 0 ? 'partial_failure' : 'success', downloadResult.found, downloadResult.skipped, downloadResult.failed]);
             if (downloadResult.found > 0) {
-                await botClient.sendMessage(targetChat, { message: `✅ 订阅 ${row.source} 已同步 ${downloadResult.found} 个新文件，跳过 ${downloadResult.skipped} 条${downloadResult.failed ? `，失败 ${downloadResult.failed} 条` : ''}${safeAdvanceId < latestMessageId ? '。本轮达到扫描上限或存在失败项，剩余将在后续继续处理。' : '。'}` }).catch(() => undefined);
+                const notificationMessage = `✅ 订阅 ${row.source} 已同步 ${downloadResult.found} 个新文件，跳过 ${downloadResult.skipped} 条${downloadResult.failed ? `，失败 ${downloadResult.failed} 条` : ''}${safeAdvanceId < latestMessageId ? '。本轮达到扫描上限或存在失败项，剩余将在后续继续处理。' : '。'}`;
+                await enqueueTelegramNotification({ userId: Number(row.user_id), chatId: String(targetChat), kind: 'subscription', message: notificationMessage }, {
+                    send: async (chatId, message) => { await botClient.sendMessage(chatId, { message }); },
+                }).catch(() => undefined);
             }
         } catch (error) {
             console.error('🤖 Telegram 订阅同步失败:', error);
@@ -1908,8 +2016,9 @@ async function runSubscriptionScan(botClient: TelegramClient) {
                 const reason = subscriptionDisabledReason(error);
                 await pauseTelegramSubscriptionForError(row.id, reason).catch(updateError => console.error('🤖 暂停不可访问的 Telegram 订阅失败:', updateError));
                 const targetChat = row.chat_id || row.user_id;
-                await botClient.sendMessage(targetChat, {
-                    message: `⚠️ 已暂停订阅 ${row.source_original || row.source}\n${reason}\n\n你可以在 /tg_subs 或 /tg_sub 订阅列表中查看提醒；确认账号可访问后重新添加订阅即可。`,
+                const pausedMessage = `⚠️ 已暂停订阅 ${row.source_original || row.source}\n${reason}\n\n你可以在 /tg_subs 或 /tg_sub 订阅列表中查看提醒；确认账号可访问后重新添加订阅即可。`;
+                await enqueueTelegramNotification({ userId: Number(row.user_id), chatId: String(targetChat), kind: 'failure', message: pausedMessage }, {
+                    send: async (chatId, message) => { await botClient.sendMessage(chatId, { message }); },
                 }).catch(() => undefined);
             }
         }

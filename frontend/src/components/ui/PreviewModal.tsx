@@ -5,9 +5,10 @@ import type { FileData } from "./FileCard";
 import { Button } from "./Button";
 import { useEffect, useRef, useState } from "react";
 import { fileApi } from "../../services/api";
-import { API_BASE } from "../../services/config";
 import { MobileMenu } from "./MobileMenu";
 import { IndeterminateSpinner } from "./IndeterminateSpinner";
+import { ApiActionError, describeActionFailure } from "../../services/apiActionError";
+import { authService } from "../../services/auth";
 
 interface PreviewModalProps {
     file: FileData | null;
@@ -197,6 +198,7 @@ export const PreviewModal = ({ file, onClose, onToggleFavorite, files = [], onNa
     const [imageReloadKey, setImageReloadKey] = useState(0);
     const [detailsOpen, setDetailsOpen] = useState(false);
     const [idCopied, setIdCopied] = useState(false);
+    const [actionError, setActionError] = useState<string | null>(null);
     const touchStartXRef = useRef<number | null>(null);
     const openedAtRef = useRef<number>(0);
     const [mobileMenu, setMobileMenu] = useState<{
@@ -250,9 +252,12 @@ export const PreviewModal = ({ file, onClose, onToggleFavorite, files = [], onNa
         e?.stopPropagation();
         if (!file) return;
         try {
+            setActionError(null);
             await fileApi.downloadFile(file.id, file.name);
         } catch (error) {
             console.error("下载失败", error);
+            if (error instanceof ApiActionError && error.kind === 'unauthorized') authService.clearToken();
+            setActionError(describeActionFailure('下载', error));
         }
     };
 
@@ -275,18 +280,30 @@ export const PreviewModal = ({ file, onClose, onToggleFavorite, files = [], onNa
         setScale(1);
     };
 
-    const handleOpenOriginal = (e: React.MouseEvent) => {
+    const handleOpenOriginal = async (e: React.MouseEvent) => {
         e.stopPropagation();
         if (!file) return;
-        window.open(`${API_BASE}/api/files/${file.id}/original`, '_blank', 'noopener,noreferrer');
+        try {
+            setActionError(null);
+            const url = await fileApi.getOriginalFileLink(file.id);
+            window.open(url, '_blank', 'noopener,noreferrer');
+        } catch (error) {
+            if (error instanceof ApiActionError && error.kind === 'unauthorized') authService.clearToken();
+            setActionError(describeActionFailure('打开原文件', error));
+        }
     };
 
     const handleCopyId = async (e: React.MouseEvent) => {
         e.stopPropagation();
         if (!file) return;
-        await navigator.clipboard.writeText(file.id);
-        setIdCopied(true);
-        window.setTimeout(() => setIdCopied(false), 1500);
+        try {
+            setActionError(null);
+            await navigator.clipboard.writeText(file.id);
+            setIdCopied(true);
+            window.setTimeout(() => setIdCopied(false), 1500);
+        } catch (error) {
+            setActionError(describeActionFailure('复制文件 ID', error));
+        }
     };
 
     const handleTouchStart = (e: React.TouchEvent) => {
@@ -505,6 +522,12 @@ export const PreviewModal = ({ file, onClose, onToggleFavorite, files = [], onNa
                             </Button>
                         </div>
                     </div>
+
+                    {actionError && (
+                        <div role="alert" className="absolute left-1/2 top-16 z-50 max-w-[calc(100vw-2rem)] -translate-x-1/2 rounded-lg border border-red-300/40 bg-red-950/90 px-4 py-3 text-sm text-red-100 shadow-xl">
+                            {actionError}
+                        </div>
+                    )}
 
                     <AnimatePresence>
                         {detailsOpen && (

@@ -8,6 +8,13 @@ const compose = fs.readFileSync(new URL('../../../docker-compose.yml', import.me
 const workflow = fs.readFileSync(new URL('../../../.github/workflows/docker-publish.yml', import.meta.url), 'utf8');
 const backendPackage = JSON.parse(fs.readFileSync(new URL('../../package.json', import.meta.url), 'utf8'));
 const frontendPackage = JSON.parse(fs.readFileSync(new URL('../../../frontend/package.json', import.meta.url), 'utf8'));
+const installScript = fs.readFileSync(new URL('../../../deploy/install.sh', import.meta.url), 'utf8');
+const deployGuide = fs.readFileSync(new URL('../../../deploy/DEPLOY.md', import.meta.url), 'utf8');
+
+function assertRequiredBuildMetadata(source: string): void {
+    assert.match(source, /required_keys=.*SOURCE_REVISION.*SOURCE_VERSION/);
+    assert.match(source, /\.env 缺少必填项/);
+}
 
 test('release images use locked dependencies, pinned bases, verified yt-dlp and source labels', () => {
     assert.equal(backendPackage.version, '2.0.1');
@@ -35,4 +42,17 @@ test('release images use locked dependencies, pinned bases, verified yt-dlp and 
     assert.ok(actionRefs.every(ref => /@[0-9a-f]{40}$/.test(ref)));
     assert.match(workflow, /Generate CycloneDX SBOM release assets/);
     assert.match(workflow, /actions\/upload-artifact@[0-9a-f]{40}/);
+});
+
+test('local release builds fail closed without traceable source metadata', () => {
+    assert.equal((compose.match(/\$\{SOURCE_REVISION:\?SOURCE_REVISION is required\}/g) || []).length, 2);
+    assert.equal((compose.match(/\$\{SOURCE_VERSION:\?SOURCE_VERSION is required\}/g) || []).length, 2);
+    assert.doesNotMatch(compose, /SOURCE_REVISION:-unknown/);
+    assert.doesNotMatch(compose, /SOURCE_VERSION:-worktree/);
+    assertRequiredBuildMetadata(installScript);
+    assert.match(installScript, /IMAGE_VERSION=/);
+    assert.match(installScript, /OAUTH_CALLBACK_BASE_URL=/);
+    assert.match(installScript, /OAUTH_FRONTEND_ORIGIN=/);
+    assert.match(deployGuide, /docker inspect/);
+    assert.match(deployGuide, /assets\//);
 });

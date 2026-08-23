@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import fs from 'node:fs';
 
-const bot = fs.readFileSync(new URL('./telegramBot.ts', import.meta.url), 'utf8');
+const presentation = fs.readFileSync(new URL('../bot/presentation/subscription.ts', import.meta.url), 'utf8');
 const jobs = fs.readFileSync(new URL('./telegramChannelJobs.ts', import.meta.url), 'utf8');
 const schema = fs.readFileSync(new URL('../db/schema.sql', import.meta.url), 'utf8');
 
@@ -11,7 +11,7 @@ test('subscription health records scan, success, failure and next-scan visibilit
     assert.match(jobs, /last_scan_at = NOW\(\)/);
     assert.match(jobs, /last_success_at = NOW\(\)/);
     assert.match(jobs, /next_scan_at/);
-    assert.match(bot, /上次扫描/);
-    assert.match(bot, /下次扫描约/);
-    assert.match(bot, /最近结果/);
+    assert.match(presentation, /上次扫描/);
+    assert.match(presentation, /下次扫描约/);
+    assert.match(presentation, /最近结果/);
 });

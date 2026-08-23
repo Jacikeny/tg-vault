@@ -1,7 +1,7 @@
 import crypto from 'crypto';
 import type { PoolClient } from 'pg';
 import { pool } from '../db/index.js';
-import { getSetting, setSetting } from './settings.js';
+import { getSetting } from './settings.js';
 
 const WEB_PASSWORD_KEY = 'admin_password_hash';
 const TELEGRAM_PIN_KEY = 'telegram_pin_hash';
@@ -181,10 +181,37 @@ export async function countAuthenticatedTelegramUsers(): Promise<number> {
     return Number(result.rows[0]?.count || 0);
 }
 
-export async function setTelegramAllowedUsers(userIds: number[]): Promise<number[]> {
+export async function setTelegramAllowedUsersAndReconcile(userIds: number[]) {
+    const previous = await getConfiguredTelegramAllowedUsers();
     const users = parseTelegramAllowedUserIds(userIds.join(','));
-    await setSetting(TELEGRAM_ALLOWED_USERS_KEY, users.join(','));
-    return users;
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+        await client.query(`SELECT pg_advisory_xact_lock(hashtext('tg-vault:telegram-allowlist'))`);
+        await client.query(
+            `INSERT INTO system_settings (key, value, updated_at)
+             VALUES ($1, $2, NOW())
+             ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+            [TELEGRAM_ALLOWED_USERS_KEY, users.join(',')],
+        );
+        const { reconcileTelegramAllowedUsers } = await import('../services/telegramState.js');
+        const reconciliation = await reconcileTelegramAllowedUsers(users, { query: client.query.bind(client) as any });
+        await client.query('COMMIT');
+        const previousSet = new Set(previous);
+        return {
+            ...reconciliation,
+            added: users.filter(id => !previousSet.has(id)),
+        };
+    } catch (error) {
+        await client.query('ROLLBACK').catch(() => undefined);
+        throw error;
+    } finally {
+        client.release();
+    }
+}
+
+export async function setTelegramAllowedUsers(userIds: number[]): Promise<number[]> {
+    return (await setTelegramAllowedUsersAndReconcile(userIds)).allowed;
 }
 
 export async function addTelegramAllowedUser(userId: number): Promise<number[]> {

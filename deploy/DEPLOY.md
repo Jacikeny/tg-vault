@@ -21,6 +21,8 @@ nano .env
 ```dotenv
 DB_PASSWORD=使用 openssl rand -hex 32 生成的随机值
 IMAGE_VERSION=v2.0.1
+SOURCE_REVISION=当前部署提交的完整 SHA（运行 git rev-parse HEAD 获取）
+SOURCE_VERSION=v2.0.1
 VITE_API_URL=https://api.example.com
 OAUTH_CALLBACK_BASE_URL=https://api.example.com
 OAUTH_FRONTEND_ORIGIN=https://cloud.example.com
@@ -39,6 +41,13 @@ STORAGE_CREDENTIALS_SECRET=至少32字符；可用 openssl rand -hex 32
 如果这两个值留空，后端会在 `file-storage` 卷的 `/data/secrets` 中持久生成。迁移与恢复时必须同时备份该卷，否则已加密的 2FA 和存储凭证可能无法读取。
 
 ## 3. 构建并启动
+
+Compose 会拒绝缺失的 `IMAGE_VERSION`、`SOURCE_REVISION` 或 `SOURCE_VERSION`，避免生成 `unknown/worktree` 标签的不可审计镜像。每次发布前更新：
+
+```bash
+revision=$(git rev-parse HEAD)
+# 将 .env 中 SOURCE_REVISION 更新为 $revision；IMAGE_VERSION 与 SOURCE_VERSION 必须等于发布版本。
+```
 
 ```bash
 docker compose config --quiet
@@ -77,7 +86,18 @@ docker compose ps
 curl -fsS http://127.0.0.1:51947/livez
 curl -fsS http://127.0.0.1:51947/readyz
 docker compose logs --tail=100 backend frontend postgres
+
+expected_revision=$(git rev-parse HEAD)
+expected_version=$(grep '^SOURCE_VERSION=' .env | cut -d= -f2-)
+docker inspect --format='{{index .Config.Labels "org.opencontainers.image.revision"}} {{index .Config.Labels "org.opencontainers.image.version"}}' tg-vault-backend tg-vault-frontend
+# 两个容器都必须输出 "$expected_revision $expected_version"。
+
+# 验证运行中的前端入口 asset；必须与刚构建镜像中的 index.html 一致。
+docker exec tg-vault-frontend sh -c 'grep -oE "assets/[^\"]+\.(js|css)" /usr/share/nginx/html/index.html | sort'
+curl -fsS http://127.0.0.1:47832/ | grep -oE 'assets/[^\"]+\.(js|css)' | sort
 ```
+
+只有 OCI revision/version、镜像内 `assets/` 入口与 HTTP 返回的入口全部一致，才可宣称部署成功。
 
 ## 6. 常用运维命令
 

@@ -13,6 +13,7 @@ import tasksRouter from './routes/tasks.js';
 import authRouter, { requireAuth } from './routes/auth.js';
 import { requireAuthOrSignedUrl } from './middleware/signedUrl.js';
 import { initTelegramBot } from './services/telegramBot.js';
+import { getTelegramBotStatus, markTelegramBotError, telegramBotBlocksReadiness } from './services/telegramBotStatus.js';
 import { initTelegramUserClient, isTelegramUserClientReady } from './services/telegramUserClient.js';
 import { isInitialSetupRequired } from './utils/authSettings.js';
 import { get2FAReadiness } from './utils/security.js';
@@ -158,7 +159,15 @@ app.get('/readyz', async (_req, res) => {
         await storageManager.assertReady();
         const twoFactor = await get2FAReadiness();
         if (!twoFactor.ready) throw new Error('2FA 密钥不可读取');
-        res.json({ status: 'ready', timestamp: new Date().toISOString() });
+        const bot = getTelegramBotStatus();
+        if (telegramBotBlocksReadiness(bot)) {
+            throw new Error(`Telegram Bot 未就绪：${bot.status}${bot.action ? `；${bot.action}` : ''}`);
+        }
+        res.json({
+            status: bot.degraded ? 'degraded' : 'ready',
+            timestamp: new Date().toISOString(),
+            components: { telegramBot: bot },
+        });
     } catch (error) {
         res.status(503).json({ status: 'not_ready', error: error instanceof Error ? error.message : String(error) });
     }
@@ -186,7 +195,14 @@ async function initializeApplication(): Promise<void> {
     if (!twoFactor.ready) throw new Error('2FA 已启用但密钥不可读取');
     if (telegramEnabled) {
         await initTelegramUserClient();
-        await initTelegramBot();
+        try {
+            await initTelegramBot();
+        } catch (error) {
+            if (/^(1|true|yes|on)$/i.test(process.env.TELEGRAM_REQUIRED || 'false')) throw error;
+            const message = error instanceof Error ? error.message : String(error);
+            markTelegramBotError('error', message, '检查 Telegram 凭证/网络并重启后端');
+            console.warn('Telegram Bot 可选组件启动失败，应用以 degraded 状态继续:', message);
+        }
     }
     await initializeYtDlpQueue();
     applicationReady = true;

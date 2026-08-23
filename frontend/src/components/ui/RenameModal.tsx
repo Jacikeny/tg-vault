@@ -7,7 +7,7 @@ import { Button } from "./Button";
 interface RenameModalProps {
     isOpen: boolean;
     onClose: () => void;
-    onConfirm: (newName: string) => void;
+    onConfirm: (newName: string) => void | Promise<void>;
     currentName: string;
     type: "file" | "folder";
 }
@@ -30,6 +30,7 @@ export const RenameModal = ({ isOpen, onClose, onConfirm, currentName, type }: R
 
     const [baseName, setBaseName] = useState(getBaseName(currentName));
     const [error, setError] = useState("");
+    const [isSubmitting, setIsSubmitting] = useState(false);
     const extension = getExtension(currentName);
     const inputRef = useRef<HTMLInputElement>(null);
 
@@ -37,6 +38,7 @@ export const RenameModal = ({ isOpen, onClose, onConfirm, currentName, type }: R
         if (isOpen) {
             setBaseName(getBaseName(currentName));
             setError("");
+            setIsSubmitting(false);
             // Auto-focus and select text
             setTimeout(() => {
                 if (inputRef.current) {
@@ -47,7 +49,8 @@ export const RenameModal = ({ isOpen, onClose, onConfirm, currentName, type }: R
         }
     }, [isOpen, currentName]);
 
-    const handleConfirm = () => {
+    const handleConfirm = async () => {
+        if (isSubmitting) return;
         const trimmed = baseName.trim();
         if (trimmed.length === 0) {
             setError(type === "file" ? "文件名不能为空" : "文件夹名不能为空");
@@ -62,13 +65,23 @@ export const RenameModal = ({ isOpen, onClose, onConfirm, currentName, type }: R
             onClose();
             return;
         }
-        onConfirm(newName);
+        setIsSubmitting(true);
+        setError("");
+        try {
+            await onConfirm(newName);
+        } catch (confirmError) {
+            setError(confirmError instanceof Error ? confirmError.message : "重命名失败");
+        } finally {
+            setIsSubmitting(false);
+            requestAnimationFrame(() => inputRef.current?.focus());
+        }
     };
 
     const handleKeyDown = (e: React.KeyboardEvent) => {
+        if (isSubmitting) return;
         if (e.key === "Enter") {
             e.preventDefault();
-            handleConfirm();
+            void handleConfirm();
         } else if (e.key === "Escape") {
             onClose();
         }
@@ -84,7 +97,7 @@ export const RenameModal = ({ isOpen, onClose, onConfirm, currentName, type }: R
                         animate={{ opacity: 1 }}
                         exit={{ opacity: 0 }}
                         className="absolute inset-0 bg-black/50 backdrop-blur-sm"
-                        onClick={onClose}
+                        onClick={isSubmitting ? undefined : onClose}
                     />
 
                     {/* Modal */}
@@ -143,15 +156,17 @@ export const RenameModal = ({ isOpen, onClose, onConfirm, currentName, type }: R
                             <Button
                                 variant="ghost"
                                 className="rounded-xl px-5"
-                                onClick={onClose}
+                                onClick={isSubmitting ? undefined : onClose}
+                                disabled={isSubmitting}
                             >
                                 {t("delete.cancel") || "取消"}
                             </Button>
                             <Button
                                 className="rounded-xl px-5 bg-primary text-primary-foreground hover:bg-primary/90"
-                                onClick={handleConfirm}
+                                onClick={() => void handleConfirm()}
+                                disabled={isSubmitting}
                             >
-                                {t("file.renameConfirm") || "确认"}
+                                {isSubmitting ? "重命名中..." : (t("file.renameConfirm") || "确认")}
                             </Button>
                         </div>
                     </motion.div>

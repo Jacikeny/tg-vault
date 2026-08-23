@@ -39,6 +39,7 @@ import { buildStorageFolderWithRules, getStoragePathRules, getTelegramBatchFolde
 import { resolveTelegramGeneratedFileName } from '../utils/telegramNaming.js';
 import { annotateTelegramMediaGroup, createTelegramMediaGroupDebouncer, getForwardedSourceLookup, prefetchForwardedSourceMessages, takePendingMediaGroupSnapshot, telegramMediaGroupQueueKey, type ForwardedSourceMessageCache } from '../utils/telegramMediaGroup.js';
 import { resolveTelegramStorageFolderPersistent, resolveTelegramTaskStorageFolderPersistent, previewTelegramStorageFolderPersistent } from '../utils/telegramPathSettings.js';
+import { consumeOrGetTelegramTargetState } from '../utils/telegramTargetStateStore.js';
 import { findDuplicateFile, getDuplicateMode } from '../utils/duplicatePolicy.js';
 import { DownloadTaskQueue, type DownloadTaskGroupInput, type DownloadTaskGroupSnapshot } from './downloadTaskQueue.js';
 import { persistOrdinaryTransferTask } from './transferTasks.js';
@@ -676,7 +677,7 @@ async function finalizeSilentSessionIfDone(client: TelegramClient, chatId: Api.T
         const controls = s?.failed
             ? (() => {
                 const queueStats = getDownloadQueueStats();
-                return buildTaskControlButtons(s?.taskId, queueStats.paused, queueStats.systemPause);
+                return buildTaskControlButtons(s?.taskId, queueStats.paused, queueStats.systemPause, false, queueStats.userPaused, s?.failed || 0);
             })()
             : undefined;
         const edited = await safeEditMessage(client, chatId, { message: silentMsgId, text, buttons: controls });
@@ -1044,7 +1045,7 @@ export async function refreshSilentProgress(client: TelegramClient, chatId: Api.
     );
     const controls = isComplete && session.failed === 0
         ? undefined
-        : buildTaskControlButtons(session.taskId, cardPaused, cardSystemPause, cardPausing, cardUserPaused);
+        : buildTaskControlButtons(session.taskId, cardPaused, cardSystemPause, cardPausing, cardUserPaused, session.failed);
     const buttons = controls;
     await safeEditMessage(client, chatId, { message: silentMsgId, text, buttons });
 }
@@ -1327,6 +1328,17 @@ export async function cancelSilentTask(client: TelegramClient, chatId: Api.TypeE
     resetChatTransferSession(chatIdStr);
 
     return result;
+}
+
+export function listFailedDownloadTaskDetails(taskId: string, chatId: string, userId: number): string[] {
+    if (!canControlTask(taskId, chatId, userId)) return [];
+    const files = getConsolidatedFiles(chatId)
+        .filter(file => file.phase === 'failed')
+        .map(file => `${file.fileName}: ${file.error || '未知错误'}`);
+    const batches = getConsolidatedBatches(chatId)
+        .filter(batch => batch.failed > 0)
+        .map(batch => `${batch.folderPath || batch.folderName}: ${batch.failed} 项失败`);
+    return [...files, ...batches];
 }
 
 export function retryFailedDownloadTasks(limit = 10, taskId?: string, chatId?: string, userId?: number) {
@@ -2576,6 +2588,11 @@ export async function handleFileUpload(client: TelegramClient, event: NewMessage
         const queueKey = telegramMediaGroupQueueKey(message.chatId, mediaGroupId);
         let queue = mediaGroupQueues.get(queueKey);
         if (!queue) {
+            const chatKey = message.chatId?.toString() || String(senderId);
+            const selectedTarget = await consumeOrGetTelegramTargetState(chatKey);
+            const storageTarget = selectedTarget
+                ? storageManager.getTarget(selectedTarget.provider, selectedTarget.accountId)
+                : storageManager.getActiveTarget();
             queue = {
                 mediaGroupId,
                 queueKey,
@@ -2584,7 +2601,7 @@ export async function handleFileUpload(client: TelegramClient, event: NewMessage
                 client,
                 files: [],
                 processingStarted: false,
-                storageTarget: storageManager.getActiveTarget(),
+                storageTarget,
                 createdAt: Date.now(),
                 lastAddedAt: Date.now(),
             };
@@ -2645,7 +2662,10 @@ export async function handleFileUpload(client: TelegramClient, event: NewMessage
         const chatIdStr = chatId.toString();
         const chatName = await getTelegramChatName(message);
         const previewRules = await getStoragePathRules();
-        const singleStorageTarget = storageManager.getActiveTarget();
+        const selectedTarget = await consumeOrGetTelegramTargetState(chatIdStr);
+        const singleStorageTarget = selectedTarget
+            ? storageManager.getTarget(selectedTarget.provider, selectedTarget.accountId)
+            : storageManager.getActiveTarget();
         const previewFolder = await resolveTelegramStorageFolderPersistent(chatIdStr, buildStorageFolderWithRules({
             source: 'telegram',
             chatName,
@@ -2886,7 +2906,7 @@ export async function handleFileUpload(client: TelegramClient, event: NewMessage
                     await runStatusAction(chatId, async () => {
                         await client.editMessage(chatId, {
                             message: statusMsg!.id,
-                            text: buildUploadSuccess(finalFileName, actualSize, fileType, provider.name, storageFolder),
+                            text: buildUploadSuccess(finalFileName, actualSize, fileType, provider.name, storageFolder, indexedFileId, duplicateMode === 'copy' ? 'copied' : null),
                         });
                     });
                 }

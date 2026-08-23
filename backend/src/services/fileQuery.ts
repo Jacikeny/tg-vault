@@ -7,6 +7,8 @@ export interface NormalizedFileQuery {
     type: 'image' | 'video' | 'audio' | 'document' | 'other' | 'media' | null;
     folder: string | null | undefined;
     favorite: boolean | null;
+    after: string | null;
+    before: string | null;
     sort: FileQuerySort;
     direction: FileQueryDirection;
     limit: number;
@@ -33,6 +35,22 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3
 function single(value: unknown): string | undefined {
     if (Array.isArray(value)) throw new Error('query parameter must be singular');
     return typeof value === 'string' ? value : undefined;
+}
+
+function normalizeDateBound(value: unknown, field: 'after' | 'before'): string | null {
+    const raw = single(value)?.trim();
+    if (!raw) return null;
+    const dateOnly = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (dateOnly) {
+        const [, year, month, day] = dateOnly;
+        const timestamp = Date.UTC(Number(year), Number(month) - 1, Number(day), field === 'before' ? 23 : 0, field === 'before' ? 59 : 0, field === 'before' ? 59 : 0, field === 'before' ? 999 : 0);
+        const parsed = new Date(timestamp);
+        if (parsed.getUTCFullYear() !== Number(year) || parsed.getUTCMonth() !== Number(month) - 1 || parsed.getUTCDate() !== Number(day)) throw new Error(`invalid ${field}`);
+        return parsed.toISOString();
+    }
+    const timestamp = Date.parse(raw);
+    if (!Number.isFinite(timestamp)) throw new Error(`invalid ${field}`);
+    return new Date(timestamp).toISOString();
 }
 
 export function normalizeFileQuery(input: Record<string, unknown>): NormalizedFileQuery {
@@ -66,6 +84,8 @@ export function normalizeFileQuery(input: Record<string, unknown>): NormalizedFi
         type: rawType as NormalizedFileQuery['type'],
         folder,
         favorite,
+        after: normalizeDateBound(input.after, 'after'),
+        before: normalizeDateBound(input.before, 'before'),
         sort: rawSort as FileQuerySort,
         direction: rawDirection as FileQueryDirection,
         limit,
@@ -135,6 +155,14 @@ function addFilters(options: NormalizedFileQuery, where: string[], params: unkno
     if (options.favorite !== null) {
         params.push(options.favorite);
         where.push(`${prefix}is_favorite = $${params.length}`);
+    }
+    if (options.after) {
+        params.push(options.after);
+        where.push(`${prefix}created_at >= $${params.length}::timestamptz`);
+    }
+    if (options.before) {
+        params.push(options.before);
+        where.push(`${prefix}created_at <= $${params.length}::timestamptz`);
     }
 }
 

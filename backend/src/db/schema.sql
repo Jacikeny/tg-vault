@@ -1,3 +1,11 @@
+-- Canonical migration ledger. Version 2026082401 is the idempotent expand schema below.
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    version BIGINT PRIMARY KEY,
+    name TEXT NOT NULL,
+    checksum VARCHAR(64),
+    applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 -- TG Vault 数据库表结构
 
 -- 启用 UUID 扩展
@@ -327,6 +335,25 @@ CREATE OR REPLACE TRIGGER telegram_path_states_updated_at
     FOR EACH ROW
     EXECUTE FUNCTION update_updated_at();
 
+-- 每聊天的下一次/会话级存储目标；不会切换系统全局默认。
+CREATE TABLE IF NOT EXISTS telegram_target_states (
+    chat_id TEXT NOT NULL,
+    mode VARCHAR(10) NOT NULL CHECK (mode IN ('once', 'session')),
+    provider VARCHAR(50) NOT NULL,
+    account_id UUID REFERENCES storage_accounts(id) ON DELETE RESTRICT,
+    expires_at TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (chat_id, mode),
+    CHECK ((provider = 'local' AND account_id IS NULL) OR (provider <> 'local' AND account_id IS NOT NULL))
+);
+CREATE INDEX IF NOT EXISTS idx_telegram_target_states_expiry ON telegram_target_states(expires_at);
+CREATE INDEX IF NOT EXISTS idx_telegram_target_states_account ON telegram_target_states(account_id) WHERE account_id IS NOT NULL;
+CREATE OR REPLACE TRIGGER telegram_target_states_updated_at
+    BEFORE UPDATE ON telegram_target_states
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at();
+
 -- Telegram 频道订阅表
 CREATE TABLE IF NOT EXISTS telegram_channel_subscriptions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -357,11 +384,42 @@ ALTER TABLE telegram_channel_subscriptions ADD COLUMN IF NOT EXISTS last_scan_at
 ALTER TABLE telegram_channel_subscriptions ADD COLUMN IF NOT EXISTS last_success_at TIMESTAMPTZ;
 ALTER TABLE telegram_channel_subscriptions ADD COLUMN IF NOT EXISTS last_error TEXT;
 ALTER TABLE telegram_channel_subscriptions ADD COLUMN IF NOT EXISTS last_result JSONB;
+ALTER TABLE telegram_channel_subscriptions ADD COLUMN IF NOT EXISTS next_scan_at TIMESTAMPTZ;
+ALTER TABLE telegram_channel_subscriptions ADD COLUMN IF NOT EXISTS target_mode VARCHAR(20) NOT NULL DEFAULT 'follow_global';
+ALTER TABLE telegram_channel_subscriptions ADD COLUMN IF NOT EXISTS target_provider VARCHAR(50);
+ALTER TABLE telegram_channel_subscriptions ADD COLUMN IF NOT EXISTS target_account_id UUID REFERENCES storage_accounts(id) ON DELETE RESTRICT;
+DO $$ BEGIN
+    ALTER TABLE telegram_channel_subscriptions ADD CONSTRAINT telegram_subscription_target_mode_check CHECK (target_mode IN ('follow_global', 'fixed'));
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+CREATE INDEX IF NOT EXISTS idx_tg_channel_subscriptions_target_account ON telegram_channel_subscriptions(target_account_id) WHERE target_account_id IS NOT NULL;
 
 CREATE OR REPLACE TRIGGER telegram_channel_subscriptions_updated_at
     BEFORE UPDATE ON telegram_channel_subscriptions
     FOR EACH ROW
     EXECUTE FUNCTION update_updated_at();
+
+CREATE TABLE IF NOT EXISTS telegram_notification_preferences (
+    user_id BIGINT NOT NULL,
+    chat_id TEXT NOT NULL,
+    preferences JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (user_id, chat_id)
+);
+CREATE OR REPLACE TRIGGER telegram_notification_preferences_updated_at
+    BEFORE UPDATE ON telegram_notification_preferences
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+
+CREATE TABLE IF NOT EXISTS telegram_notification_digest (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id BIGINT NOT NULL,
+    chat_id TEXT NOT NULL,
+    kind VARCHAR(30) NOT NULL,
+    payload JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    delivered_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_telegram_notification_digest_pending ON telegram_notification_digest(user_id, chat_id, created_at) WHERE delivered_at IS NULL;
 
 -- Telegram 后台任务表（用于重启后可见、可追踪）
 CREATE TABLE IF NOT EXISTS telegram_background_jobs (

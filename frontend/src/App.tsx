@@ -21,6 +21,7 @@ import { fileApi, type BatchDeletePreview, type BatchDeleteResult, type ChunkUpl
 import { authService } from "./services/auth";
 import type { QueueItem } from "./components/ui/UploadQueueModal";
 import { LatestRequest } from "./services/latestRequest";
+import { FileQueryController } from "./services/fileQueryController";
 import { BoundedUploadQueue } from "./services/boundedUploadQueue";
 import { createUploadTelemetry, updateUploadTelemetry } from "./services/uploadTelemetry";
 import { describeFileViewState } from "./services/fileViewState";
@@ -60,6 +61,7 @@ function App() {
   const [hasMoreFiles, setHasMoreFiles] = useState(false);
   const [loadingMoreFiles, setLoadingMoreFiles] = useState(false);
   const latestFileRequestRef = useRef(new LatestRequest());
+  const fileQueryControllerRef = useRef(new FileQueryController({ debounceMs: 0 }));
 
   // 改用队列管理上传状态
   const [uploadQueue, setUploadQueue] = useState<QueueItem[]>([]);
@@ -123,6 +125,7 @@ function App() {
   const [batchDeletePreview, setBatchDeletePreview] = useState<BatchDeletePreview | null>(null);
   const [batchDeleteResult, setBatchDeleteResult] = useState<BatchDeleteResult | null>(null);
   const [searchQuery, setSearchQuery] = useState(() => initialRoute.kind === 'files' ? initialRoute.query : '');
+  const [debouncedSearchQuery, setDebouncedSearchQuery] = useState(searchQuery);
   const [isMobileSearchOpen, setIsMobileSearchOpen] = useState(false);
   const [currentFolder, setCurrentFolder] = useState<string | null>(() => initialRoute.kind === 'files' ? initialRoute.folder : null); // 当前选中的文件夹
   const [settingsSection, setSettingsSection] = useState<SettingsSectionId>(() => initialRoute.kind === 'settings' ? initialRoute.section : 'general');
@@ -282,7 +285,7 @@ function App() {
 
     const folder = currentCategory === 'ytdlp' ? 'ytdlp' : (currentFolder ?? null);
     return {
-      q: searchQuery,
+      q: debouncedSearchQuery,
       type,
       folder,
       favorite: currentCategory === 'favorites' ? true : undefined,
@@ -290,7 +293,7 @@ function App() {
       direction: sortConfig.direction,
       signal,
     };
-  }, [currentCategory, currentFolder, searchQuery, sortConfig]);
+  }, [currentCategory, currentFolder, debouncedSearchQuery, sortConfig]);
 
   // 加载文件列表：新 generation 中止旧请求，且只有最新 generation 可提交。
   const loadFiles = useCallback(async () => {
@@ -387,21 +390,60 @@ function App() {
     }
   }, [isAuthenticated]);
 
-  // 认证成功后加载数据
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebouncedSearchQuery(searchQuery), 250);
+    return () => window.clearTimeout(timer);
+  }, [searchQuery]);
+
+  // 认证和查询条件由单一 effect 驱动；文本搜索 debounce，其他条件立即刷新。
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    const controller = fileQueryControllerRef.current;
+    const queryKey = JSON.stringify({ currentCategory, currentFolder, debouncedSearchQuery, sortConfig });
+    controller.schedule(queryKey, async signal => {
+      const request = latestFileRequestRef.current.begin();
+      signal.addEventListener('abort', () => latestFileRequestRef.current.cancel(), { once: true });
+      const hadData = files.length > 0 || folderAggregations.length > 0;
+      try {
+        setLoading(true);
+        setQueryError(null);
+        const options = buildFileQueryOptions(request.signal);
+        const includeFolders = currentCategory !== 'ytdlp';
+        const [page, globalFolders] = await Promise.all([
+          fileApi.getFilesPage(options),
+          includeFolders ? fileApi.getFolderAggregations(options) : Promise.resolve([]),
+        ]);
+        if (!request.isCurrent()) throw new DOMException('superseded', 'AbortError');
+        setFiles(page.files);
+        setFolderAggregations(globalFolders);
+        setFileCursor(page.nextCursor);
+        setHasMoreFiles(page.hasMore);
+        setIsStale(false);
+        return { page, globalFolders };
+      } catch (error: any) {
+        if (error?.name !== 'AbortError' && request.isCurrent()) {
+          if (error.message === 'UNAUTHORIZED') {
+            authService.clearToken();
+            setIsAuthenticated(false);
+          } else {
+            setQueryError(error.message || '加载文件失败');
+            setIsStale(hadData);
+          }
+        }
+        throw error;
+      } finally {
+        if (request.isCurrent()) setLoading(false);
+      }
+    }).catch(() => undefined);
+    return () => controller.cancel();
+  }, [isAuthenticated, currentCategory, currentFolder, debouncedSearchQuery, sortConfig, buildFileQueryOptions]);
+
   useEffect(() => {
     if (isAuthenticated) {
-      loadFiles();
       loadStorageStats();
       loadStorageConfig();
     }
-  }, [isAuthenticated, loadFiles, loadStorageStats, loadStorageConfig]);
-
-  // 监听分类变化
-  useEffect(() => {
-    if (isAuthenticated) {
-      loadFiles();
-    }
-  }, [currentCategory, isAuthenticated, loadFiles]);
+  }, [isAuthenticated, loadStorageStats, loadStorageConfig]);
 
   useEffect(() => {
     if (currentCategory === 'ytdlp') {
@@ -858,8 +900,13 @@ function App() {
         setIsAuthenticated(false);
       } else {
         console.error('重命名失败:', error);
-        alert(error.message || '重命名失败');
+        setNotification({
+          show: true,
+          message: error.message || '重命名失败',
+          type: 'error'
+        });
       }
+      throw error;
     }
   };
 
@@ -880,8 +927,13 @@ function App() {
         setIsAuthenticated(false);
       } else {
         console.error('重命名文件夹失败:', error);
-        alert(error.message || '重命名文件夹失败');
+        setNotification({
+          show: true,
+          message: error.message || '重命名文件夹失败',
+          type: 'error'
+        });
       }
+      throw error;
     }
   };
 

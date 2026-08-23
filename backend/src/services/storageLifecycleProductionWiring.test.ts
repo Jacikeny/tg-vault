@@ -20,8 +20,9 @@ test('Telegram, yt-dlp, web and chunk permanent writes all hold account operatio
 test('Telegram job target snapshot and storage switch participate in account row locking transactions', () => {
     const jobs = read('./telegramChannelJobs.ts');
     const storage = read('./storage.ts');
-    assert.match(jobs, /await lockStorageAccountForUse\(client, target\.accountId\)/);
-    assert.match(jobs, /INSERT INTO telegram_background_jobs[\s\S]*await client\.query\('COMMIT'\)/);
+    assert.match(jobs, /persistChannelJobAdmission\(input/);
+    assert.match(jobs, /lockStorageAccount:\s*\(client, accountId\)\s*=>\s*lockStorageAccountForUse/);
+    assert.match(jobs, /withTransaction:[\s\S]*await client\.query\('BEGIN'\)[\s\S]*await client\.query\('COMMIT'\)/);
     assert.match(storage, /switchStorageToLocalWithClient/);
     assert.match(storage, /switchStorageAccountWithClient/);
     assert.match(storage, /await client\.query\('BEGIN'\)[\s\S]*await client\.query\('COMMIT'\)/);

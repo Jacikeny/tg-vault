@@ -17,7 +17,12 @@ if [[ ! -f .env ]]; then
 DB_PASSWORD=$(openssl rand -hex 32)
 SESSION_SECRET=$(openssl rand -hex 32)
 STORAGE_CREDENTIALS_SECRET=$(openssl rand -hex 32)
+IMAGE_VERSION=v2.0.1
+SOURCE_REVISION=$(git rev-parse HEAD)
+SOURCE_VERSION=v2.0.1
 VITE_API_URL=https://api.example.com
+OAUTH_CALLBACK_BASE_URL=https://api.example.com
+OAUTH_FRONTEND_ORIGIN=https://cloud.example.com
 CORS_ORIGIN=https://cloud.example.com
 DOMAIN=cloud.example.com
 COOKIE_SECURE=true
@@ -25,6 +30,14 @@ EOF
   echo "已创建 .env。请先编辑其中的 Web/API 域名，再重新运行本脚本。"
   exit 2
 fi
+
+required_keys=(IMAGE_VERSION SOURCE_REVISION SOURCE_VERSION VITE_API_URL OAUTH_CALLBACK_BASE_URL OAUTH_FRONTEND_ORIGIN CORS_ORIGIN DOMAIN)
+for key in "${required_keys[@]}"; do
+  if ! grep -qE "^${key}=.+" .env; then
+    echo ".env 缺少必填项 ${key}；请补齐后重试。" >&2
+    exit 2
+  fi
+done
 
 docker compose config --quiet
 docker compose up -d --build

@@ -10,8 +10,8 @@ services:
       provenance: mode=max
       args:
         - VITE_API_URL=${VITE_API_URL:-https://api.example.com}
-        - SOURCE_REVISION=${SOURCE_REVISION:-unknown}
-        - SOURCE_VERSION=${SOURCE_VERSION:-worktree}
+        - SOURCE_REVISION=${SOURCE_REVISION:?SOURCE_REVISION is required}
+        - SOURCE_VERSION=${SOURCE_VERSION:?SOURCE_VERSION is required}
     container_name: tg-vault-frontend
     ports:
       - "127.0.0.1:47832:80"
@@ -41,8 +41,8 @@ services:
       sbom: true
       provenance: mode=max
       args:
-        - SOURCE_REVISION=${SOURCE_REVISION:-unknown}
-        - SOURCE_VERSION=${SOURCE_VERSION:-worktree}
+        - SOURCE_REVISION=${SOURCE_REVISION:?SOURCE_REVISION is required}
+        - SOURCE_VERSION=${SOURCE_VERSION:?SOURCE_VERSION is required}
     container_name: tg-vault-backend
     ports:
       - "127.0.0.1:${PORT:-51947}:${PORT:-51947}"
@@ -82,6 +82,7 @@ services:
       - SQL_LOG_ALL=${SQL_LOG_ALL:-false}
       - LOG_LEVEL=${LOG_LEVEL:-info}
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
+      - TELEGRAM_REQUIRED=${TELEGRAM_REQUIRED:-false}
       - TELEGRAM_API_ID=${TELEGRAM_API_ID:-}
       - TELEGRAM_API_HASH=${TELEGRAM_API_HASH:-}
       - TELEGRAM_ALLOWED_USER_IDS=${TELEGRAM_ALLOWED_USER_IDS:-}

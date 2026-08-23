@@ -17,7 +17,7 @@ checks = [
     ('idx_files_account_folder_created', schema),
     ('idx_files_source_fav_created', schema),
     ('idx_files_source_folder_created', schema),
-    ('ensureFilesPerformanceIndexes', db_index),
+    ('CANONICAL_SCHEMA_VERSION', db_index),
     ('buildFilePageQuery', file_query),
     ('id, name, stored_name, type, mime_type, size', file_query),
     ('(created_at, id)', file_query),

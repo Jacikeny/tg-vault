@@ -32,6 +32,8 @@ test('delete locks account, rechecks every resumable task/upload reference, then
         { rows: [] },
         { rows: [] },
         { rows: [] },
+        { rows: [] },
+        { rows: [] },
         { rowCount: 3 },
         { rows: [{ id: 'account' }], rowCount: 1 },
     ]);
@@ -39,23 +41,54 @@ test('delete locks account, rechecks every resumable task/upload reference, then
     assert.deepEqual(result, { id: 'account', name: 'A', type: 's3', deletedFiles: 3 });
     assert.match(client.calls[0].text, /FOR UPDATE/);
     assert.match(client.calls[1].text, /telegram_background_jobs/);
-    assert.match(client.calls[2].text, /transfer_tasks/);
-    assert.match(client.calls[2].text, /retryable = true/);
-    assert.match(client.calls[3].text, /storage_account_leases/);
-    assert.match(client.calls[4].text, /telegram_write_reconciliations/);
-    assert.match(client.calls[4].text, /chunk_upload_reconciliations/);
-    assert.match(client.calls[4].text, /ytdlp_write_reconciliations/);
-    assert.match(client.calls[5].text, /chunk_upload_sessions/);
-    assert.match(client.calls[5].text, /status IN \('open', 'completing', 'failed'\)/);
-    assert.match(client.calls[6].text, /target_account_id = NULL/);
-    assert.match(client.calls[6].text, /status IN \('completed', 'cancelled'\)/);
-    assert.match(client.calls[7].text, /DELETE FROM files/);
-    assert.match(client.calls[8].text, /DELETE FROM storage_accounts/);
+    assert.match(client.calls[2].text, /telegram_target_states/);
+    assert.match(client.calls[3].text, /telegram_channel_subscriptions/);
+    assert.match(client.calls[4].text, /transfer_tasks/);
+    assert.match(client.calls[4].text, /retryable = true/);
+    assert.match(client.calls[5].text, /storage_account_leases/);
+    assert.match(client.calls[6].text, /telegram_write_reconciliations/);
+    assert.match(client.calls[6].text, /chunk_upload_reconciliations/);
+    assert.match(client.calls[6].text, /ytdlp_write_reconciliations/);
+    assert.match(client.calls[7].text, /chunk_upload_sessions/);
+    assert.match(client.calls[7].text, /status IN \('open', 'completing', 'failed'\)/);
+    assert.match(client.calls[8].text, /target_account_id = NULL/);
+    assert.match(client.calls[8].text, /status IN \('completed', 'cancelled'\)/);
+    assert.match(client.calls[9].text, /DELETE FROM files/);
+    assert.match(client.calls[10].text, /DELETE FROM storage_accounts/);
+});
+
+test('delete refuses a storage account referenced by a chat target override', async () => {
+    const client = new ScriptedClient([
+        { rows: [{ id: 'account', name: 'A', type: 's3', is_active: false }] },
+        { rows: [] },
+        { rows: [{ chat_id: 'chat-a' }] },
+    ]);
+    await assert.rejects(
+        deleteStorageAccountWithClient(client as any, 'account'),
+        (error: unknown) => error instanceof StorageAccountConflictError && error.kind === 'job',
+    );
+    assert.match(client.calls[2].text, /telegram_target_states/);
+});
+
+test('delete refuses a storage account referenced by a fixed subscription target', async () => {
+    const client = new ScriptedClient([
+        { rows: [{ id: 'account', name: 'A', type: 's3', is_active: false }] },
+        { rows: [] },
+        { rows: [] },
+        { rows: [{ id: 'subscription' }] },
+    ]);
+    await assert.rejects(
+        deleteStorageAccountWithClient(client as any, 'account'),
+        (error: unknown) => error instanceof StorageAccountConflictError && error.kind === 'job',
+    );
+    assert.match(client.calls[3].text, /telegram_channel_subscriptions/);
 });
 
 test('delete refuses an account referenced by an upload lease before deleting files', async () => {
     const client = new ScriptedClient([
         { rows: [{ id: 'account', name: 'A', type: 's3', is_active: false }] },
+        { rows: [] },
+        { rows: [] },
         { rows: [] },
         { rows: [] },
         { rows: [{ id: 'lease' }] },
@@ -71,6 +104,8 @@ test('delete refuses an account referenced by an open, completing, or failed res
     for (const status of ['open', 'completing', 'failed']) {
         const client = new ScriptedClient([
             { rows: [{ id: 'account', name: 'A', type: 's3', is_active: false }] },
+            { rows: [] },
+            { rows: [] },
             { rows: [] },
             { rows: [] },
             { rows: [] },
@@ -95,6 +130,8 @@ test('delete refuses an account referenced by an unfinished or retryable transfe
         const client = new ScriptedClient([
             { rows: [{ id: 'account', name: 'A', type: 's3', is_active: false }] },
             { rows: [] },
+            { rows: [] },
+            { rows: [] },
             { rows: [task] },
         ]);
         await assert.rejects(
@@ -108,6 +145,8 @@ test('delete refuses an account referenced by an unfinished or retryable transfe
 test('delete failure after file delete is surfaced so caller transaction can roll back', async () => {
     const client = new ScriptedClient([
         { rows: [{ id: 'account', name: 'A', type: 'webdav', is_active: false }] },
+        { rows: [] },
+        { rows: [] },
         { rows: [] },
         { rows: [] },
         { rows: [] },

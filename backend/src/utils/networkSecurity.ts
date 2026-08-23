@@ -20,9 +20,27 @@ function isPrivateIPv4(ip: string): boolean {
     return ranges.some(([start, end]) => n >= ipv4ToInt(start) && n <= ipv4ToInt(end));
 }
 
+function embeddedIPv4FromIPv6(ip: string): string | null {
+    const normalized = ip.toLowerCase().split('%', 1)[0];
+    const dotted = normalized.match(/(?:^|:)(\d{1,3}(?:\.\d{1,3}){3})$/)?.[1];
+    if (dotted && net.isIP(dotted) === 4) return dotted;
+
+    const segments = normalized.split(':').filter(Boolean);
+    if (segments.length < 2) return null;
+    const high = Number.parseInt(segments.at(-2) || '', 16);
+    const low = Number.parseInt(segments.at(-1) || '', 16);
+    if (!Number.isInteger(high) || !Number.isInteger(low) || high < 0 || high > 0xffff || low < 0 || low > 0xffff) return null;
+    return `${high >>> 8}.${high & 0xff}.${low >>> 8}.${low & 0xff}`;
+}
+
 function isPrivateIPv6(ip: string): boolean {
     const normalized = ip.toLowerCase();
-    return normalized === '::1' || normalized === '::' || normalized.startsWith('fc') || normalized.startsWith('fd') || normalized.startsWith('fe80:');
+    if (normalized === '::1' || normalized === '::' || normalized.startsWith('fc') || normalized.startsWith('fd') || normalized.startsWith('fe80:')) return true;
+    const isMapped = normalized.startsWith('::ffff:');
+    const isNat64 = normalized.startsWith('64:ff9b::');
+    if (!isMapped && !isNat64) return false;
+    const embedded = embeddedIPv4FromIPv6(normalized);
+    return !embedded || isPrivateIPv4(embedded);
 }
 
 export function isPrivateAddress(ip: string): boolean {

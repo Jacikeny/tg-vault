@@ -1,0 +1,24 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import test from 'node:test';
+
+const app = fs.readFileSync(new URL('../App.tsx', import.meta.url), 'utf8');
+
+test('file query is driven by one consolidated effect and one request group', () => {
+    const effect = app.slice(app.indexOf('// 认证和查询条件由单一 effect'), app.indexOf("if (currentCategory === 'ytdlp')"));
+    assert.equal((effect.match(/fileApi\.getFilesPage\(/g) || []).length, 1);
+    assert.equal((effect.match(/fileApi\.getFolderAggregations\(/g) || []).length, 1);
+    assert.match(effect, /Promise\.all/);
+});
+
+test('search input is debounced for 250ms before query options change', () => {
+    assert.match(app, /setTimeout\(\(\) => setDebouncedSearchQuery\(searchQuery\), 250\)/);
+    assert.match(app, /q: debouncedSearchQuery/);
+});
+
+test('refresh keeps existing list while latest generation is pending', () => {
+    const loader = app.slice(app.indexOf('const loadFiles = useCallback'), app.indexOf('const loadMoreFiles'));
+    assert.doesNotMatch(loader, /setFiles\(\[\]\)/);
+    assert.match(loader, /latestFileRequestRef\.current\.begin/);
+    assert.match(loader, /request\.isCurrent\(\)/);
+});

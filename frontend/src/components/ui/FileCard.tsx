@@ -6,6 +6,8 @@ import { Button } from "./Button";
 import { fileApi, type FileData } from "../../services/api";
 import { ContextMenu, createFileMenuItems } from "./ContextMenu";
 import { useLongPress } from "../../hooks/useLongPress";
+import { ApiActionError, describeActionFailure } from "../../services/apiActionError";
+import { authService } from "../../services/auth";
 
 // Re-export FileData type for convenience
 export type { FileData } from "../../services/api";
@@ -52,9 +54,10 @@ export const FileCard = ({
         try {
             setDownloadError(null);
             await fileApi.downloadFile(file.id, file.name);
-        } catch (error: any) {
+        } catch (error: unknown) {
             console.error("下载失败", error);
-            setDownloadError(error?.message || "下载失败");
+            if (error instanceof ApiActionError && error.kind === 'unauthorized') authService.clearToken();
+            setDownloadError(describeActionFailure('下载', error));
         }
     };
 

@@ -22,4 +22,10 @@ i18n
         }
     });
 
+const syncDocumentLanguage = (language?: string) => {
+    document.documentElement.lang = language?.toLowerCase().startsWith('zh') ? 'zh-CN' : 'en';
+};
+syncDocumentLanguage(i18n.resolvedLanguage || i18n.language);
+i18n.on('languageChanged', syncDocumentLanguage);
+
 export default i18n;

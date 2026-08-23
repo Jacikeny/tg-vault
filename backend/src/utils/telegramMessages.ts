@@ -62,7 +62,7 @@ function buildTaskControlLines(taskId?: string, queuePaused = false, pauseReason
     ];
 }
 
-export function buildTaskControlButtons(taskId?: string, queuePaused = false, systemPause?: TaskSystemPauseView, queuePausing = false, userPaused = queuePaused && !systemPause): Api.ReplyInlineMarkup | undefined {
+export function buildTaskControlButtons(taskId?: string, queuePaused = false, systemPause?: TaskSystemPauseView, queuePausing = false, userPaused = queuePaused && !systemPause, failedCount = 0): Api.ReplyInlineMarkup | undefined {
     if (!taskId) return undefined;
     const actionButtons: Api.TypeKeyboardButton[] = queuePaused || queuePausing
         ? systemPause && !userPaused
@@ -70,9 +70,14 @@ export function buildTaskControlButtons(taskId?: string, queuePaused = false, sy
             : [new Api.KeyboardButtonCallback({ text: '▶️ 继续', data: Buffer.from(`tq_resume_${taskId}`) })]
         : [new Api.KeyboardButtonCallback({ text: '⏸ 暂停', data: Buffer.from(`tq_pause_${taskId}`) })];
     actionButtons.push(new Api.KeyboardButtonCallback({ text: '🛑 取消', data: Buffer.from(`tq_cancel_${taskId}`) }));
-    return new Api.ReplyInlineMarkup({
-        rows: [new Api.KeyboardButtonRow({ buttons: actionButtons })],
-    });
+    const rows = [new Api.KeyboardButtonRow({ buttons: actionButtons })];
+    if (failedCount > 0) {
+        rows.push(new Api.KeyboardButtonRow({ buttons: [
+            new Api.KeyboardButtonCallback({ text: `🔄 重试失败 (${failedCount})`, data: Buffer.from(`receipt_retry_${taskId}`) }),
+            new Api.KeyboardButtonCallback({ text: '查看失败明细', data: Buffer.from(`receipt_failures_${taskId}`) }),
+        ] }));
+    }
+    return new Api.ReplyInlineMarkup({ rows });
 }
 
 function collectCompletedFolders(
@@ -388,7 +393,9 @@ export function buildUploadSuccess(
     size: number,
     fileType: string,
     providerName: string,
-    folder?: string | null
+    folder?: string | null,
+    fileId?: string | null,
+    duplicateOutcome?: 'copied' | 'skipped' | null,
 ): string {
     const typeEmoji = getTypeEmoji(
         fileType === 'image' ? 'image/' :
@@ -404,6 +411,10 @@ export function buildUploadSuccess(
         `📦 ${formatBytes(size)}`,
         `📍 ${getProviderDisplayName(providerName)}`,
         ...(folder ? [`📁 ${folder}`] : []),
+        ...(fileId ? [`🆔 ${fileId.slice(0, 13)}`] : []),
+        ...(duplicateOutcome === 'copied' ? ['♻️ 重复处理：已生成副本'] : duplicateOutcome === 'skipped' ? ['⏭️ 重复处理：已跳过'] : []),
+        ``,
+        ...(fileId ? ['操作：/find 可搜索同目录；复制上方 ID；/delete <ID> 可进入删除确认。'] : []),
     ].join('\n');
 }
 

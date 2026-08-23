@@ -8,7 +8,7 @@ import fs from 'fs';
 import axios from 'axios';
 import crypto from 'crypto';
 import { getSetting, setSetting } from '../utils/settings.js';
-import { getConfiguredTelegramAllowedUsers, parseTelegramAllowedUserIds, setTelegramAllowedUsers } from '../utils/authSettings.js';
+import { getConfiguredTelegramAllowedUsers, parseTelegramAllowedUserIds, setTelegramAllowedUsersAndReconcile } from '../utils/authSettings.js';
 import { getTelegramUserSessionFilePath, isTelegramUserClientReady } from '../services/telegramUserClient.js';
 import { assertPublicStorageEndpoint } from '../utils/networkSecurity.js';
 import { getCurrentStorageScope } from '../utils/fileScope.js';
@@ -20,6 +20,7 @@ import { logOperationalEvent } from '../services/operationalEvents.js';
 import { webDestructiveConfirmationStore } from '../services/webDestructiveConfirmation.js';
 import { StorageProbeError } from '../services/storage.js';
 import { getTelegramUserClientStatus } from '../services/telegramUserClientStatus.js';
+import { getTelegramBotStatus } from '../services/telegramBotStatus.js';
 import { maintenanceImpact } from '../utils/maintenanceActions.js';
 import { buildStorageCapabilities, buildStorageStatsPayload } from '../utils/storageProductContract.js';
 import { buildAdvancedSettings, normalizeAdvancedSettingsPatch } from '../utils/advancedSettings.js';
@@ -223,6 +224,7 @@ router.get('/config', requireAuth, async (req: Request, res: Response) => {
             telegramUserDownloadEnabled: telegramUserDownloadEnabled === 'true',
             telegramUserSessionReady,
             telegramUserClientStatus: getTelegramUserClientStatus(),
+            telegramBotStatus: getTelegramBotStatus(),
             telegramAllowedUserIds,
             telegramAllowedUserIdsFromEnv,
         });
@@ -300,8 +302,17 @@ router.post('/config/telegram-allowed-users', requireAuth, async (req: Request, 
         if (userIds.length === 0) {
             return res.status(400).json({ error: '请至少填写一个 Telegram user id' });
         }
-        const saved = await setTelegramAllowedUsers(userIds);
-        res.json({ success: true, userIds: saved });
+        const reconciliation = await setTelegramAllowedUsersAndReconcile(userIds);
+        res.json({
+            success: true,
+            userIds: reconciliation.allowed,
+            added: reconciliation.added.length,
+            removed: reconciliation.removed.length,
+            revoked: reconciliation.revoked.length,
+            message: reconciliation.revoked.length > 0
+                ? '允许列表已保存；移除用户的 Bot 认证已立即撤销。'
+                : '允许列表已保存。',
+        });
     } catch (error) {
         console.error('更新 Telegram 允许用户列表失败:', error);
         res.status(500).json({ error: '更新 Telegram 允许用户列表失败' });

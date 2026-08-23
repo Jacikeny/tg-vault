@@ -93,6 +93,22 @@ export async function deleteStorageAccountWithClient(client: LifecycleClient, ac
     );
     if (taskReference.rows.length > 0) throw new StorageAccountConflictError('job');
 
+    const targetStateReference = await client.query(
+        `SELECT chat_id FROM telegram_target_states
+         WHERE account_id = $1 AND expires_at > NOW()
+         LIMIT 1 FOR UPDATE`,
+        [accountId],
+    );
+    if (targetStateReference.rows.length > 0) throw new StorageAccountConflictError('job');
+
+    const subscriptionTargetReference = await client.query(
+        `SELECT id FROM telegram_channel_subscriptions
+         WHERE target_mode = 'fixed' AND target_account_id = $1
+         LIMIT 1 FOR UPDATE`,
+        [accountId],
+    );
+    if (subscriptionTargetReference.rows.length > 0) throw new StorageAccountConflictError('job');
+
     const transferReference = await client.query(
         `SELECT id FROM transfer_tasks
          WHERE target_account_id = $1

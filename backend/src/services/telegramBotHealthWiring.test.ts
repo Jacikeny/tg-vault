@@ -1,0 +1,30 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import test from 'node:test';
+
+const app = fs.readFileSync(new URL('../index.ts', import.meta.url), 'utf8');
+const bot = fs.readFileSync(new URL('./telegramBot.ts', import.meta.url), 'utf8');
+const storage = fs.readFileSync(new URL('../routes/storage.ts', import.meta.url), 'utf8');
+const compose = fs.readFileSync(new URL('../../../docker-compose.yml', import.meta.url), 'utf8');
+const envExample = fs.readFileSync(new URL('../../../.env.example', import.meta.url), 'utf8');
+
+test('Bot startup errors are observable and required mode blocks readiness', () => {
+    assert.match(bot, /markTelegramBotStarting\(\)/);
+    assert.match(bot, /markTelegramBotReady\(\)/);
+    assert.match(bot, /markTelegramBotError\(status/);
+    assert.match(bot, /throw error/);
+    assert.match(app, /TELEGRAM_REQUIRED/);
+    assert.match(app, /telegramBotBlocksReadiness\(bot\)/);
+    assert.match(app, /components: \{ telegramBot: bot \}/);
+});
+
+test('optional Bot failure remains visible as degraded in Web settings and readiness', () => {
+    assert.match(app, /应用以 degraded 状态继续/);
+    assert.match(app, /status: bot\.degraded \? 'degraded' : 'ready'/);
+    assert.match(storage, /telegramBotStatus: getTelegramBotStatus\(\)/);
+});
+
+test('deployment contract exposes TELEGRAM_REQUIRED with safe compose default and production recommendation', () => {
+    assert.match(compose, /TELEGRAM_REQUIRED=\$\{TELEGRAM_REQUIRED:-false\}/);
+    assert.match(envExample, /TELEGRAM_REQUIRED=true/);
+});

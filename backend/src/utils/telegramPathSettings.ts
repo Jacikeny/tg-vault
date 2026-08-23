@@ -2,6 +2,7 @@ import { Api } from 'telegram';
 import { sanitizeFilename } from './telegramUtils.js';
 import { getSetting, setSetting } from './settings.js';
 import { clearTelegramPathStateRows, consumeTelegramOncePath, getTelegramSessionPath, previewTelegramPersistentPath, setTelegramPathStateRow } from './telegramPathStateStore.js';
+import { ScopedInteractionMap } from '../services/scopedInteractionMap.js';
 
 interface ChatPathState {
     nextFolder?: string;
@@ -11,7 +12,10 @@ interface ChatPathState {
 export type PendingPathInputMode = 'once' | 'session';
 
 const chatPathState = new Map<string, ChatPathState>();
-const pendingPathInputState = new Map<string, PendingPathInputMode>();
+const pendingPathInputState = new ScopedInteractionMap<string, PendingPathInputMode>({
+    ttlMs: Math.max(60_000, Number.parseInt(process.env.TELEGRAM_INTERACTION_TTL_MS || '900000', 10) || 900_000),
+    maxEntries: Math.max(10, Number.parseInt(process.env.TELEGRAM_INTERACTION_MAX_ENTRIES || '1000', 10) || 1_000),
+});
 const recentPathState = new Map<string, string[]>();
 const MAX_RECENT_PATHS = 6;
 const RECENT_PATH_SETTING_PREFIX = 'telegram_recent_paths:';

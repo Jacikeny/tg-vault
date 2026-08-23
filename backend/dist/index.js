@@ -60,60 +60,42 @@ import fs from "fs/promises";
 import path from "path";
 import dotenv from "dotenv";
 import { fileURLToPath } from "url";
-async function ensureFavoritesColumn() {
-  try {
-    await pool.query(`ALTER TABLE files ADD COLUMN IF NOT EXISTS is_favorite BOOLEAN DEFAULT false`);
-    await pool.query(`CREATE INDEX IF NOT EXISTS idx_files_is_favorite ON files(is_favorite)`);
-  } catch (err) {
-    if (err?.code === "42P01") {
-      return;
-    }
-    console.error("\u274C \u6570\u636E\u5E93\u8FC1\u79FB\u5931\u8D25 (\u6536\u85CF\u5B57\u6BB5):", err);
-    throw err;
-  }
-}
-async function ensureFilesPerformanceIndexes() {
-  try {
-    await pool.query(`CREATE INDEX IF NOT EXISTS idx_files_account_created ON files(storage_account_id, created_at DESC, id DESC)`);
-    await pool.query(`CREATE INDEX IF NOT EXISTS idx_files_source_created ON files(source, created_at DESC, id DESC)`);
-    await pool.query(`CREATE INDEX IF NOT EXISTS idx_files_account_fav_created ON files(storage_account_id, is_favorite, created_at DESC, id DESC)`);
-    await pool.query(`CREATE INDEX IF NOT EXISTS idx_files_source_fav_created ON files(source, is_favorite, created_at DESC, id DESC)`);
-    await pool.query(`CREATE INDEX IF NOT EXISTS idx_files_account_folder_created ON files(storage_account_id, folder, created_at DESC, id DESC)`);
-    await pool.query(`CREATE INDEX IF NOT EXISTS idx_files_source_folder_created ON files(source, folder, created_at DESC, id DESC)`);
-  } catch (err) {
-    if (err?.code === "42P01") {
-      return;
-    }
-    console.error("\u274C \u6570\u636E\u5E93\u8FC1\u79FB\u5931\u8D25 (\u6587\u4EF6\u5217\u8868\u6027\u80FD\u7D22\u5F15):", err);
-    throw err;
-  }
+import crypto from "node:crypto";
+async function applyCanonicalSchemaMigration(schemaSql) {
+  const checksum = crypto.createHash("sha256").update(schemaSql).digest("hex");
+  await pool.query(
+    `INSERT INTO schema_migrations (version, name, checksum)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (version) DO UPDATE SET checksum = EXCLUDED.checksum`,
+    [CANONICAL_SCHEMA_VERSION, "canonical-expand-schema", checksum]
+  );
 }
 async function initializeDatabase() {
   try {
     const schemaPath = path.join(__dirname, "schema.sql");
     const schemaSql = await fs.readFile(schemaPath, "utf-8");
     const statements = [];
-    let current2 = "";
+    let current3 = "";
     let inDollarQuote = false;
     for (let i = 0; i < schemaSql.length; i++) {
       const char = schemaSql[i];
-      current2 += char;
+      current3 += char;
       if (char === "$" && schemaSql[i + 1] === "$") {
         inDollarQuote = !inDollarQuote;
-        current2 += "$";
+        current3 += "$";
         i++;
       } else if (char === ";" && !inDollarQuote) {
-        const stmt = current2.trim();
+        const stmt = current3.trim();
         if (stmt.length > 1) {
           const withoutLeadingLineComments = stmt.replace(/^\s*(--[^\n]*\n\s*)+/g, "").trim();
           if (withoutLeadingLineComments.length > 0) {
             statements.push(withoutLeadingLineComments.slice(0, -1));
           }
         }
-        current2 = "";
+        current3 = "";
       }
     }
-    const lastStmt = current2.trim();
+    const lastStmt = current3.trim();
     if (lastStmt.length > 0) {
       const withoutLeadingLineComments = lastStmt.replace(/^\s*(--[^\n]*\n\s*)+/g, "").trim();
       if (withoutLeadingLineComments.length > 0) {
@@ -130,42 +112,7 @@ async function initializeDatabase() {
         throw err;
       }
     }
-    await ensureFavoritesColumn();
-    await ensureFilesPerformanceIndexes();
-    await pool.query(`ALTER TABLE files ADD COLUMN IF NOT EXISTS preview_path VARCHAR(500)`);
-    await pool.query(`ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS key_hash VARCHAR(64)`);
-    await pool.query(`ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS last_used_at TIMESTAMPTZ`);
-    await pool.query(`ALTER TABLE telegram_channel_subscriptions ADD COLUMN IF NOT EXISTS source_original TEXT`);
-    await pool.query(`ALTER TABLE telegram_channel_subscriptions ADD COLUMN IF NOT EXISTS source_type TEXT DEFAULT 'public'`);
-    await pool.query(`ALTER TABLE telegram_channel_subscriptions ADD COLUMN IF NOT EXISTS disabled_reason TEXT`);
-    await pool.query(`ALTER TABLE telegram_channel_subscriptions ADD COLUMN IF NOT EXISTS disabled_at TIMESTAMPTZ`);
-    await pool.query(`CREATE TABLE IF NOT EXISTS web_sessions (
-            token_hash VARCHAR(64) PRIMARY KEY,
-            expires_at TIMESTAMPTZ NOT NULL,
-            created_at TIMESTAMPTZ DEFAULT NOW()
-        )`);
-    await pool.query(`CREATE INDEX IF NOT EXISTS idx_web_sessions_expires ON web_sessions(expires_at)`);
-    await pool.query(`CREATE TABLE IF NOT EXISTS task_center_dismissals (
-            source_type VARCHAR(30) NOT NULL,
-            task_id VARCHAR(128) NOT NULL,
-            task_updated_at TIMESTAMPTZ NOT NULL,
-            dismissed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            PRIMARY KEY (source_type, task_id)
-        )`);
-    await pool.query(`CREATE INDEX IF NOT EXISTS idx_task_center_dismissals_version ON task_center_dismissals(source_type, task_id, task_updated_at)`);
-    await pool.query(`CREATE TABLE IF NOT EXISTS storage_account_cooldowns (
-            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-            storage_account_id UUID REFERENCES storage_accounts(id) ON DELETE CASCADE,
-            provider VARCHAR(50) NOT NULL,
-            reason VARCHAR(100) NOT NULL,
-            cooldown_until TIMESTAMPTZ NOT NULL,
-            last_error TEXT,
-            created_at TIMESTAMPTZ DEFAULT NOW(),
-            updated_at TIMESTAMPTZ DEFAULT NOW(),
-            UNIQUE(storage_account_id, provider, reason)
-        )`);
-    await pool.query(`CREATE INDEX IF NOT EXISTS idx_storage_account_cooldowns_until ON storage_account_cooldowns(cooldown_until)`);
-    await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_api_keys_key_hash ON api_keys(key_hash) WHERE key_hash IS NOT NULL`);
+    await applyCanonicalSchemaMigration(schemaSql);
     console.log("\u2705 \u6570\u636E\u5E93\u8868\u7ED3\u6784\u521D\u59CB\u5316\u5B8C\u6210");
   } catch (err) {
     console.error("\u274C \u6570\u636E\u5E93\u521D\u59CB\u5316\u5931\u8D25:", err);
@@ -176,7 +123,7 @@ function ensureDatabaseInitialized() {
   if (!initializationPromise) initializationPromise = initializeDatabase();
   return initializationPromise;
 }
-var __filename, __dirname, Pool, pool, initializationPromise, sqlLoggingConfig, query;
+var __filename, __dirname, Pool, pool, initializationPromise, CANONICAL_SCHEMA_VERSION, sqlLoggingConfig, query;
 var init_db = __esm({
   "src/db/index.ts"() {
     "use strict";
@@ -189,6 +136,7 @@ var init_db = __esm({
       connectionString: process.env.DATABASE_URL || "postgresql://tgvault:password@localhost:5432/tgvault"
     });
     initializationPromise = null;
+    CANONICAL_SCHEMA_VERSION = 2026082401;
     sqlLoggingConfig = parseSqlLoggingConfig();
     pool.on("connect", () => {
       if (process.env.LOG_LEVEL === "debug") console.log(JSON.stringify({ event: "db.connected" }));
@@ -213,7 +161,7 @@ var init_db = __esm({
 });
 
 // src/utils/secretStore.ts
-import crypto from "crypto";
+import crypto2 from "crypto";
 import fs2 from "fs";
 import path2 from "path";
 function getCandidateSecretDirs() {
@@ -281,7 +229,7 @@ function getOrCreatePersistentSecret(envName, fileName) {
   if (fromFile) {
     return fromFile;
   }
-  const generated = crypto.randomBytes(32).toString("hex");
+  const generated = crypto2.randomBytes(32).toString("hex");
   persistSecretWithFallback(envName, fileName, generated);
   return generated;
 }
@@ -292,7 +240,7 @@ var init_secretStore = __esm({
 });
 
 // src/utils/credentialCrypto.ts
-import crypto3 from "crypto";
+import crypto4 from "crypto";
 function getCredentialSecret() {
   const secret = getOrCreatePersistentSecret("STORAGE_CREDENTIALS_SECRET", "storage_credentials_secret");
   if (secret.length < 32) {
@@ -306,15 +254,15 @@ function getCredentialSecret() {
   return secret;
 }
 function getKey() {
-  return crypto3.createHash("sha256").update(getCredentialSecret()).digest();
+  return crypto4.createHash("sha256").update(getCredentialSecret()).digest();
 }
 function isEncryptedCredential(value) {
   return typeof value === "string" && value.startsWith(ENCRYPTION_PREFIX);
 }
 function encryptCredential(value) {
   if (!value || isEncryptedCredential(value)) return value;
-  const iv = crypto3.randomBytes(12);
-  const cipher = crypto3.createCipheriv("aes-256-gcm", getKey(), iv);
+  const iv = crypto4.randomBytes(12);
+  const cipher = crypto4.createCipheriv("aes-256-gcm", getKey(), iv);
   const ciphertext = Buffer.concat([cipher.update(value, "utf8"), cipher.final()]);
   const tag = cipher.getAuthTag();
   return `${ENCRYPTION_PREFIX}${iv.toString("base64url")}:${tag.toString("base64url")}:${ciphertext.toString("base64url")}`;
@@ -325,7 +273,7 @@ function decryptCredential(value) {
   if (!ivText || !tagText || !cipherText) {
     throw new Error("Invalid encrypted credential format");
   }
-  const decipher = crypto3.createDecipheriv("aes-256-gcm", getKey(), Buffer.from(ivText, "base64url"));
+  const decipher = crypto4.createDecipheriv("aes-256-gcm", getKey(), Buffer.from(ivText, "base64url"));
   decipher.setAuthTag(Buffer.from(tagText, "base64url"));
   return Buffer.concat([
     decipher.update(Buffer.from(cipherText, "base64url")),
@@ -382,6 +330,38 @@ var init_credentialCrypto = __esm({
       "admin_password_hash",
       "telegram_pin_hash"
     ]);
+  }
+});
+
+// src/utils/settings.ts
+async function getSetting(key, defaultValue) {
+  try {
+    const res = await query("SELECT value FROM system_settings WHERE key = $1", [key]);
+    if (res.rowCount === 0) {
+      return defaultValue ?? null;
+    }
+    return decryptSettingValue(key, res.rows[0].value);
+  } catch (e) {
+    console.error(`\u83B7\u53D6\u8BBE\u7F6E ${key} \u5931\u8D25:`, e);
+    return defaultValue ?? null;
+  }
+}
+async function setSetting(key, value) {
+  try {
+    await query(
+      "INSERT INTO system_settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()",
+      [key, encryptSettingValue(key, value)]
+    );
+  } catch (e) {
+    console.error(`\u4FDD\u5B58\u8BBE\u7F6E ${key} \u5931\u8D25:`, e);
+    throw e;
+  }
+}
+var init_settings = __esm({
+  "src/utils/settings.ts"() {
+    "use strict";
+    init_db();
+    init_credentialCrypto();
   }
 });
 
@@ -637,6 +617,20 @@ async function deleteStorageAccountWithClient(client2, accountId) {
     [accountId]
   );
   if (taskReference.rows.length > 0) throw new StorageAccountConflictError("job");
+  const targetStateReference = await client2.query(
+    `SELECT chat_id FROM telegram_target_states
+         WHERE account_id = $1 AND expires_at > NOW()
+         LIMIT 1 FOR UPDATE`,
+    [accountId]
+  );
+  if (targetStateReference.rows.length > 0) throw new StorageAccountConflictError("job");
+  const subscriptionTargetReference = await client2.query(
+    `SELECT id FROM telegram_channel_subscriptions
+         WHERE target_mode = 'fixed' AND target_account_id = $1
+         LIMIT 1 FOR UPDATE`,
+    [accountId]
+  );
+  if (subscriptionTargetReference.rows.length > 0) throw new StorageAccountConflictError("job");
   const transferReference = await client2.query(
     `SELECT id FROM transfer_tasks
          WHERE target_account_id = $1
@@ -2387,6 +2381,387 @@ var init_storage = __esm({
   }
 });
 
+// src/utils/authSettings.ts
+import crypto6 from "crypto";
+function hashSecret(secret) {
+  const salt = crypto6.randomBytes(16).toString("base64url");
+  const derived = crypto6.scryptSync(secret, salt, 64).toString("base64url");
+  return `${SCRYPT_PREFIX}:${salt}:${derived}`;
+}
+function safeEqualText(a, b) {
+  try {
+    const left = Buffer.from(a);
+    const right = Buffer.from(b);
+    return left.length === right.length && crypto6.timingSafeEqual(left, right);
+  } catch {
+    return false;
+  }
+}
+function verifySecret(secret, stored) {
+  if (!stored) return false;
+  if (stored.startsWith(`${SCRYPT_PREFIX}:`)) {
+    const [, , salt, expected] = stored.split(":");
+    if (!salt || !expected) return false;
+    const actual = crypto6.scryptSync(secret, salt, 64).toString("base64url");
+    return safeEqualText(actual, expected);
+  }
+  if (/^[a-f0-9]{64}$/i.test(stored)) {
+    const actual = crypto6.createHash("sha256").update(secret).digest("hex");
+    return safeEqualText(actual, stored.toLowerCase());
+  }
+  return false;
+}
+async function getStoredWebPasswordHash() {
+  const stored = await getSetting(WEB_PASSWORD_KEY, "");
+  return stored || "";
+}
+async function isInitialSetupRequired() {
+  return !await getStoredWebPasswordHash();
+}
+async function verifyWebPassword(password) {
+  return verifySecret(password, await getStoredWebPasswordHash());
+}
+async function verifyTelegramPin(pin) {
+  const stored = await getSetting(TELEGRAM_PIN_KEY, "");
+  if (stored) return verifySecret(pin, stored);
+  return verifySecret(pin, await getStoredWebPasswordHash());
+}
+function validateWebPassword(password) {
+  if (typeof password !== "string" || password.length < 8) {
+    return "\u7F51\u9875\u7BA1\u7406\u5458\u5BC6\u7801\u81F3\u5C11\u9700\u8981 8 \u4F4D";
+  }
+  if (password.length > 256) {
+    return "\u7F51\u9875\u7BA1\u7406\u5458\u5BC6\u7801\u8FC7\u957F";
+  }
+  return null;
+}
+function validateTelegramPin(pin) {
+  if (typeof pin !== "string" || !/^\d{4}$/.test(pin)) {
+    return "Telegram Bot \u5BC6\u7801\u5FC5\u987B\u662F 4 \u4F4D\u6570\u5B57";
+  }
+  return null;
+}
+async function createInitialAdminCredentialsWithClient(client2, webPassword, telegramPin) {
+  const webError = validateWebPassword(webPassword);
+  if (webError) throw new Error(webError);
+  const pinError = validateTelegramPin(telegramPin);
+  if (pinError) throw new Error(pinError);
+  if (webPassword === telegramPin) {
+    throw new Error("\u7F51\u9875\u5BC6\u7801\u4E0D\u80FD\u4E0E Telegram Bot 4 \u4F4D\u5BC6\u7801\u76F8\u540C");
+  }
+  await client2.query(`SELECT pg_advisory_xact_lock(hashtext('tg-vault:initial-admin-setup'))`);
+  const existing = await client2.query("SELECT value FROM system_settings WHERE key = $1 FOR UPDATE", [WEB_PASSWORD_KEY]);
+  if ((existing.rowCount || 0) > 0 && existing.rows[0]?.value) {
+    throw new Error("\u7BA1\u7406\u5458\u5BC6\u7801\u5DF2\u521B\u5EFA\uFF0C\u4E0D\u80FD\u91CD\u590D\u521D\u59CB\u5316");
+  }
+  await client2.query(
+    "INSERT INTO system_settings (key, value) VALUES ($1, $2)",
+    [WEB_PASSWORD_KEY, hashSecret(webPassword)]
+  );
+  await client2.query(
+    "INSERT INTO system_settings (key, value) VALUES ($1, $2)",
+    [TELEGRAM_PIN_KEY, hashSecret(telegramPin)]
+  );
+}
+async function createInitialAdminCredentials(webPassword, telegramPin) {
+  const client2 = await pool.connect();
+  try {
+    await client2.query("BEGIN");
+    await createInitialAdminCredentialsWithClient(client2, webPassword, telegramPin);
+    await client2.query("COMMIT");
+  } catch (error) {
+    await client2.query("ROLLBACK").catch(() => void 0);
+    throw error;
+  } finally {
+    client2.release();
+  }
+}
+async function changeWebPasswordAndRevokeSessions(currentPassword, newPassword) {
+  const validationError = validateWebPassword(newPassword);
+  if (validationError) throw new Error(validationError);
+  if (currentPassword === newPassword) throw new Error("\u65B0\u5BC6\u7801\u4E0D\u80FD\u4E0E\u5F53\u524D\u5BC6\u7801\u76F8\u540C");
+  const client2 = await pool.connect();
+  try {
+    await client2.query("BEGIN");
+    await client2.query(`SELECT pg_advisory_xact_lock(hashtext('tg-vault:web-password-change'))`);
+    const current3 = await client2.query("SELECT value FROM system_settings WHERE key = $1 FOR UPDATE", [WEB_PASSWORD_KEY]);
+    const storedHash = String(current3.rows[0]?.value || "");
+    if (!verifySecret(currentPassword, storedHash)) throw new Error("\u5F53\u524D\u5BC6\u7801\u4E0D\u6B63\u786E");
+    await client2.query(
+      `UPDATE system_settings SET value = $2, updated_at = NOW() WHERE key = $1`,
+      [WEB_PASSWORD_KEY, hashSecret(newPassword)]
+    );
+    await client2.query("DELETE FROM web_sessions");
+    await client2.query("COMMIT");
+  } catch (error) {
+    await client2.query("ROLLBACK").catch(() => void 0);
+    throw error;
+  } finally {
+    client2.release();
+  }
+}
+function parseTelegramAllowedUserIds(value) {
+  if (!value) return [];
+  return [...new Set(String(value).split(/[\s,]+/).map((item) => Number(item.trim())).filter((item) => Number.isSafeInteger(item) && item > 0))].sort((a, b) => a - b);
+}
+function shouldAutoAllowFirstTelegramUser(allowedUsers, authenticatedUserCount) {
+  return allowedUsers.length === 0 && authenticatedUserCount === 0;
+}
+async function getStoredTelegramAllowedUsers() {
+  const stored = await getSetting(TELEGRAM_ALLOWED_USERS_KEY, "");
+  return parseTelegramAllowedUserIds(stored || "");
+}
+async function getConfiguredTelegramAllowedUsers() {
+  const envUsers = parseTelegramAllowedUserIds(process.env.TELEGRAM_ALLOWED_USER_IDS || "");
+  if (envUsers.length > 0) return envUsers;
+  return getStoredTelegramAllowedUsers();
+}
+async function countAuthenticatedTelegramUsers() {
+  const result = await pool.query("SELECT COUNT(*)::int AS count FROM telegram_auth");
+  return Number(result.rows[0]?.count || 0);
+}
+async function setTelegramAllowedUsersAndReconcile(userIds) {
+  const previous = await getConfiguredTelegramAllowedUsers();
+  const users = parseTelegramAllowedUserIds(userIds.join(","));
+  const client2 = await pool.connect();
+  try {
+    await client2.query("BEGIN");
+    await client2.query(`SELECT pg_advisory_xact_lock(hashtext('tg-vault:telegram-allowlist'))`);
+    await client2.query(
+      `INSERT INTO system_settings (key, value, updated_at)
+             VALUES ($1, $2, NOW())
+             ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+      [TELEGRAM_ALLOWED_USERS_KEY, users.join(",")]
+    );
+    const { reconcileTelegramAllowedUsers: reconcileTelegramAllowedUsers2 } = await Promise.resolve().then(() => (init_telegramState(), telegramState_exports));
+    const reconciliation = await reconcileTelegramAllowedUsers2(users, { query: client2.query.bind(client2) });
+    await client2.query("COMMIT");
+    const previousSet = new Set(previous);
+    return {
+      ...reconciliation,
+      added: users.filter((id) => !previousSet.has(id))
+    };
+  } catch (error) {
+    await client2.query("ROLLBACK").catch(() => void 0);
+    throw error;
+  } finally {
+    client2.release();
+  }
+}
+async function setTelegramAllowedUsers(userIds) {
+  return (await setTelegramAllowedUsersAndReconcile(userIds)).allowed;
+}
+async function addTelegramAllowedUser(userId) {
+  const users = await getStoredTelegramAllowedUsers();
+  if (!users.includes(userId)) users.push(userId);
+  return setTelegramAllowedUsers(users);
+}
+var WEB_PASSWORD_KEY, TELEGRAM_PIN_KEY, TELEGRAM_ALLOWED_USERS_KEY, SCRYPT_PREFIX;
+var init_authSettings = __esm({
+  "src/utils/authSettings.ts"() {
+    "use strict";
+    init_db();
+    init_settings();
+    WEB_PASSWORD_KEY = "admin_password_hash";
+    TELEGRAM_PIN_KEY = "telegram_pin_hash";
+    TELEGRAM_ALLOWED_USERS_KEY = "telegram_allowed_user_ids";
+    SCRYPT_PREFIX = "scrypt:v1";
+  }
+});
+
+// src/services/scopedInteractionMap.ts
+var ScopedInteractionMap;
+var init_scopedInteractionMap = __esm({
+  "src/services/scopedInteractionMap.ts"() {
+    "use strict";
+    ScopedInteractionMap = class {
+      entries = /* @__PURE__ */ new Map();
+      ttlMs;
+      maxEntries;
+      now;
+      constructor(options = {}) {
+        this.ttlMs = Math.max(1, options.ttlMs ?? 15 * 6e4);
+        this.maxEntries = Math.max(1, options.maxEntries ?? 1e3);
+        this.now = options.now ?? Date.now;
+      }
+      evictForCapacity() {
+        this.cleanup();
+        while (this.entries.size >= this.maxEntries) {
+          let oldest;
+          let oldestTime = Number.POSITIVE_INFINITY;
+          for (const [key, entry] of this.entries) {
+            if (entry.createdAt < oldestTime) {
+              oldest = key;
+              oldestTime = entry.createdAt;
+            }
+          }
+          if (oldest === void 0) break;
+          this.entries.delete(oldest);
+        }
+      }
+      set(key, value) {
+        const now = this.now();
+        if (!this.entries.has(key)) this.evictForCapacity();
+        this.entries.set(key, { value, createdAt: now, expiresAt: now + this.ttlMs });
+        return this;
+      }
+      get(key) {
+        const entry = this.entries.get(key);
+        if (!entry) return void 0;
+        if (entry.expiresAt <= this.now()) {
+          this.entries.delete(key);
+          return void 0;
+        }
+        return entry.value;
+      }
+      has(key) {
+        return this.get(key) !== void 0;
+      }
+      touch(key) {
+        const value = this.get(key);
+        if (value === void 0) return false;
+        const entry = this.entries.get(key);
+        entry.expiresAt = this.now() + this.ttlMs;
+        return true;
+      }
+      delete(key) {
+        return this.entries.delete(key);
+      }
+      keys() {
+        this.cleanup();
+        return this.entries.keys();
+      }
+      values() {
+        this.cleanup();
+        return Array.from(this.entries.values(), (entry) => entry.value).values();
+      }
+      entriesIterator() {
+        this.cleanup();
+        return Array.from(this.entries, ([key, entry]) => [key, entry.value]).values();
+      }
+      cleanup() {
+        const now = this.now();
+        let removed = 0;
+        for (const [key, entry] of this.entries) {
+          if (entry.expiresAt <= now) {
+            this.entries.delete(key);
+            removed += 1;
+          }
+        }
+        return removed;
+      }
+      clear() {
+        this.entries.clear();
+      }
+      get size() {
+        this.cleanup();
+        return this.entries.size;
+      }
+    };
+  }
+});
+
+// src/services/telegramState.ts
+var telegramState_exports = {};
+__export(telegramState_exports, {
+  TelegramUserState: () => TelegramUserState,
+  authenticatedUsers: () => authenticatedUsers,
+  isAuthenticated: () => isAuthenticated,
+  isAuthenticatedAsync: () => isAuthenticatedAsync,
+  loadAuthenticatedUsers: () => loadAuthenticatedUsers,
+  passwordInputState: () => passwordInputState,
+  persistAuthenticatedUser: () => persistAuthenticatedUser,
+  reconcileTelegramAllowedUsers: () => reconcileTelegramAllowedUsers,
+  revokeAuthenticatedUser: () => revokeAuthenticatedUser,
+  userStates: () => userStates
+});
+async function revokeAuthenticatedUser(userId) {
+  authenticatedUsers.delete(userId);
+  try {
+    await query("DELETE FROM telegram_auth WHERE user_id = $1", [userId]);
+  } catch (error) {
+    console.error("\u{1F916} \u64A4\u9500 Telegram \u6388\u6743\u7528\u6237\u5931\u8D25:", error);
+  }
+}
+async function reconcileTelegramAllowedUsers(userIds, dependencies = {}) {
+  const allowed = [...new Set(userIds.filter((id) => Number.isSafeInteger(id) && id > 0))].sort((a, b) => a - b);
+  const runQuery = dependencies.query || query;
+  const cache = dependencies.cache || authenticatedUsers;
+  const existing = await runQuery("SELECT user_id FROM telegram_auth ORDER BY user_id");
+  const authenticated = existing.rows.map((row) => Number(row.user_id)).filter(Number.isSafeInteger);
+  const allowedSet = new Set(allowed);
+  const authenticatedSet = new Set(authenticated);
+  const added = allowed.filter((id) => !authenticatedSet.has(id));
+  const removed = authenticated.filter((id) => !allowedSet.has(id)).sort((a, b) => a - b);
+  const revokedResult = await runQuery(
+    `DELETE FROM telegram_auth
+         WHERE NOT (user_id = ANY($1::bigint[]))
+         RETURNING user_id`,
+    [allowed]
+  );
+  const revoked = revokedResult.rows.map((row) => Number(row.user_id)).filter(Number.isSafeInteger).sort((a, b) => a - b);
+  for (const userId of /* @__PURE__ */ new Set([...removed, ...revoked])) cache.delete(userId);
+  const recipients = [...cache.keys()].filter((id) => allowedSet.has(id)).sort((a, b) => a - b);
+  return { allowed, added, removed, revoked, recipients };
+}
+async function loadAuthenticatedUsers() {
+  try {
+    const allowedUsers = await getConfiguredTelegramAllowedUsers();
+    const result = await query("SELECT user_id, authenticated_at FROM telegram_auth");
+    for (const row of result.rows) {
+      const userId = Number(row.user_id);
+      if (allowedUsers.length > 0 && !allowedUsers.includes(userId)) {
+        await revokeAuthenticatedUser(userId);
+        continue;
+      }
+      authenticatedUsers.set(userId, { authenticatedAt: new Date(row.authenticated_at) });
+    }
+    console.log(`\u{1F916} \u5DF2\u4ECE\u6570\u636E\u5E93\u8F7D\u5165 ${authenticatedUsers.size} \u4E2A\u6388\u6743\u7528\u6237`);
+  } catch (error) {
+    console.error("\u{1F916} \u8F7D\u5165\u5DF2\u9A8C\u8BC1\u7528\u6237\u5931\u8D25:", error);
+  }
+}
+async function persistAuthenticatedUser(userId) {
+  try {
+    await query("INSERT INTO telegram_auth (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING", [userId]);
+    authenticatedUsers.set(userId, { authenticatedAt: /* @__PURE__ */ new Date() });
+    console.log(`\u{1F916} \u7528\u6237 ${userId} \u5DF2\u6301\u4E45\u5316\u5230\u6570\u636E\u5E93`);
+  } catch (error) {
+    console.error("\u{1F916} \u6301\u4E45\u5316\u7528\u6237\u5931\u8D25:", error);
+  }
+}
+function isAuthenticated(userId) {
+  return authenticatedUsers.has(userId);
+}
+async function isAuthenticatedAsync(userId) {
+  const allowedUsers = await getConfiguredTelegramAllowedUsers();
+  if (allowedUsers.length > 0 && !allowedUsers.includes(userId)) {
+    if (authenticatedUsers.has(userId)) await revokeAuthenticatedUser(userId);
+    return false;
+  }
+  return authenticatedUsers.has(userId);
+}
+var TelegramUserState, INTERACTION_TTL_MS, INTERACTION_MAX_ENTRIES, userStates, authenticatedUsers, passwordInputState;
+var init_telegramState = __esm({
+  "src/services/telegramState.ts"() {
+    "use strict";
+    init_db();
+    init_authSettings();
+    init_scopedInteractionMap();
+    TelegramUserState = /* @__PURE__ */ ((TelegramUserState2) => {
+      TelegramUserState2["IDLE"] = "IDLE";
+      TelegramUserState2["WAITING_2FA_LOGIN"] = "WAITING_2FA_LOGIN";
+      TelegramUserState2["WAITING_2FA_SETUP"] = "WAITING_2FA_SETUP";
+      return TelegramUserState2;
+    })(TelegramUserState || {});
+    INTERACTION_TTL_MS = Math.max(6e4, Number.parseInt(process.env.TELEGRAM_INTERACTION_TTL_MS || "900000", 10) || 9e5);
+    INTERACTION_MAX_ENTRIES = Math.max(10, Number.parseInt(process.env.TELEGRAM_INTERACTION_MAX_ENTRIES || "1000", 10) || 1e3);
+    userStates = new ScopedInteractionMap({ ttlMs: INTERACTION_TTL_MS, maxEntries: INTERACTION_MAX_ENTRIES });
+    authenticatedUsers = /* @__PURE__ */ new Map();
+    passwordInputState = new ScopedInteractionMap({ ttlMs: INTERACTION_TTL_MS, maxEntries: INTERACTION_MAX_ENTRIES });
+  }
+});
+
 // src/index.ts
 import express from "express";
 import cors from "cors";
@@ -2433,7 +2808,7 @@ import fs12 from "fs";
 import path17 from "path";
 
 // src/middleware/signedUrl.ts
-import crypto16 from "crypto";
+import crypto19 from "crypto";
 
 // src/utils/config.ts
 init_secretStore();
@@ -2459,13 +2834,13 @@ import { Router } from "express";
 init_db();
 
 // src/services/webSessionStore.ts
-import crypto2 from "node:crypto";
+import crypto3 from "node:crypto";
 function hashToken(token) {
-  return crypto2.createHash("sha256").update(token).digest("hex");
+  return crypto3.createHash("sha256").update(token).digest("hex");
 }
 function createWebSessionStore(repository) {
   return {
-    async issue(expiresAt, randomBytes2 = crypto2.randomBytes) {
+    async issue(expiresAt, randomBytes2 = crypto3.randomBytes) {
       const token = randomBytes2(32).toString("hex");
       await repository.insert(hashToken(token), expiresAt);
       return { token, expiresAt };
@@ -2489,44 +2864,16 @@ function createWebSessionStore(repository) {
 import { rateLimit } from "express-rate-limit";
 
 // src/utils/security.ts
+init_settings();
 import { TOTP, NobleCryptoPlugin, ScureBase32Plugin } from "otplib";
 import QRCode from "qrcode";
-import crypto4 from "crypto";
-
-// src/utils/settings.ts
-init_db();
-init_credentialCrypto();
-async function getSetting(key, defaultValue) {
-  try {
-    const res = await query("SELECT value FROM system_settings WHERE key = $1", [key]);
-    if (res.rowCount === 0) {
-      return defaultValue ?? null;
-    }
-    return decryptSettingValue(key, res.rows[0].value);
-  } catch (e) {
-    console.error(`\u83B7\u53D6\u8BBE\u7F6E ${key} \u5931\u8D25:`, e);
-    return defaultValue ?? null;
-  }
-}
-async function setSetting(key, value) {
-  try {
-    await query(
-      "INSERT INTO system_settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()",
-      [key, encryptSettingValue(key, value)]
-    );
-  } catch (e) {
-    console.error(`\u4FDD\u5B58\u8BBE\u7F6E ${key} \u5931\u8D25:`, e);
-    throw e;
-  }
-}
-
-// src/utils/security.ts
+import crypto5 from "crypto";
 function totpEncryptionKey() {
-  return crypto4.createHash("sha256").update(SESSION_SECRET).digest();
+  return crypto5.createHash("sha256").update(SESSION_SECRET).digest();
 }
 function encryptSecret(plain) {
-  const iv = crypto4.randomBytes(12);
-  const cipher = crypto4.createCipheriv("aes-256-gcm", totpEncryptionKey(), iv);
+  const iv = crypto5.randomBytes(12);
+  const cipher = crypto5.createCipheriv("aes-256-gcm", totpEncryptionKey(), iv);
   const ciphertext = Buffer.concat([cipher.update(plain, "utf8"), cipher.final()]);
   const tag = cipher.getAuthTag();
   return `enc:v1:${iv.toString("base64url")}:${tag.toString("base64url")}:${ciphertext.toString("base64url")}`;
@@ -2534,7 +2881,7 @@ function encryptSecret(plain) {
 function decryptSecret(value) {
   if (!value.startsWith("enc:v1:")) return value;
   const [, , ivText, tagText, cipherText] = value.split(":");
-  const decipher = crypto4.createDecipheriv("aes-256-gcm", totpEncryptionKey(), Buffer.from(ivText, "base64url"));
+  const decipher = crypto5.createDecipheriv("aes-256-gcm", totpEncryptionKey(), Buffer.from(ivText, "base64url"));
   decipher.setAuthTag(Buffer.from(tagText, "base64url"));
   return Buffer.concat([decipher.update(Buffer.from(cipherText, "base64url")), decipher.final()]).toString("utf8");
 }
@@ -2622,218 +2969,14 @@ import axios2 from "axios";
 
 // src/services/telegramBot.ts
 init_storage();
+init_telegramState();
 import { TelegramClient as TelegramClient5, Api as Api7 } from "telegram";
 import { StringSession as StringSession2 } from "telegram/sessions/index.js";
 import { NewMessage } from "telegram/events/index.js";
 import { Raw } from "telegram/events/index.js";
 import fs11 from "fs";
 import path16 from "path";
-import crypto15 from "crypto";
-
-// src/services/telegramState.ts
-init_db();
-
-// src/utils/authSettings.ts
-init_db();
-import crypto5 from "crypto";
-var WEB_PASSWORD_KEY = "admin_password_hash";
-var TELEGRAM_PIN_KEY = "telegram_pin_hash";
-var TELEGRAM_ALLOWED_USERS_KEY = "telegram_allowed_user_ids";
-var SCRYPT_PREFIX = "scrypt:v1";
-function hashSecret(secret) {
-  const salt = crypto5.randomBytes(16).toString("base64url");
-  const derived = crypto5.scryptSync(secret, salt, 64).toString("base64url");
-  return `${SCRYPT_PREFIX}:${salt}:${derived}`;
-}
-function safeEqualText(a, b) {
-  try {
-    const left = Buffer.from(a);
-    const right = Buffer.from(b);
-    return left.length === right.length && crypto5.timingSafeEqual(left, right);
-  } catch {
-    return false;
-  }
-}
-function verifySecret(secret, stored) {
-  if (!stored) return false;
-  if (stored.startsWith(`${SCRYPT_PREFIX}:`)) {
-    const [, , salt, expected] = stored.split(":");
-    if (!salt || !expected) return false;
-    const actual = crypto5.scryptSync(secret, salt, 64).toString("base64url");
-    return safeEqualText(actual, expected);
-  }
-  if (/^[a-f0-9]{64}$/i.test(stored)) {
-    const actual = crypto5.createHash("sha256").update(secret).digest("hex");
-    return safeEqualText(actual, stored.toLowerCase());
-  }
-  return false;
-}
-async function getStoredWebPasswordHash() {
-  const stored = await getSetting(WEB_PASSWORD_KEY, "");
-  return stored || "";
-}
-async function isInitialSetupRequired() {
-  return !await getStoredWebPasswordHash();
-}
-async function verifyWebPassword(password) {
-  return verifySecret(password, await getStoredWebPasswordHash());
-}
-async function verifyTelegramPin(pin) {
-  const stored = await getSetting(TELEGRAM_PIN_KEY, "");
-  if (stored) return verifySecret(pin, stored);
-  return verifySecret(pin, await getStoredWebPasswordHash());
-}
-function validateWebPassword(password) {
-  if (typeof password !== "string" || password.length < 8) {
-    return "\u7F51\u9875\u7BA1\u7406\u5458\u5BC6\u7801\u81F3\u5C11\u9700\u8981 8 \u4F4D";
-  }
-  if (password.length > 256) {
-    return "\u7F51\u9875\u7BA1\u7406\u5458\u5BC6\u7801\u8FC7\u957F";
-  }
-  return null;
-}
-function validateTelegramPin(pin) {
-  if (typeof pin !== "string" || !/^\d{4}$/.test(pin)) {
-    return "Telegram Bot \u5BC6\u7801\u5FC5\u987B\u662F 4 \u4F4D\u6570\u5B57";
-  }
-  return null;
-}
-async function createInitialAdminCredentialsWithClient(client2, webPassword, telegramPin) {
-  const webError = validateWebPassword(webPassword);
-  if (webError) throw new Error(webError);
-  const pinError = validateTelegramPin(telegramPin);
-  if (pinError) throw new Error(pinError);
-  if (webPassword === telegramPin) {
-    throw new Error("\u7F51\u9875\u5BC6\u7801\u4E0D\u80FD\u4E0E Telegram Bot 4 \u4F4D\u5BC6\u7801\u76F8\u540C");
-  }
-  await client2.query(`SELECT pg_advisory_xact_lock(hashtext('tg-vault:initial-admin-setup'))`);
-  const existing = await client2.query("SELECT value FROM system_settings WHERE key = $1 FOR UPDATE", [WEB_PASSWORD_KEY]);
-  if ((existing.rowCount || 0) > 0 && existing.rows[0]?.value) {
-    throw new Error("\u7BA1\u7406\u5458\u5BC6\u7801\u5DF2\u521B\u5EFA\uFF0C\u4E0D\u80FD\u91CD\u590D\u521D\u59CB\u5316");
-  }
-  await client2.query(
-    "INSERT INTO system_settings (key, value) VALUES ($1, $2)",
-    [WEB_PASSWORD_KEY, hashSecret(webPassword)]
-  );
-  await client2.query(
-    "INSERT INTO system_settings (key, value) VALUES ($1, $2)",
-    [TELEGRAM_PIN_KEY, hashSecret(telegramPin)]
-  );
-}
-async function createInitialAdminCredentials(webPassword, telegramPin) {
-  const client2 = await pool.connect();
-  try {
-    await client2.query("BEGIN");
-    await createInitialAdminCredentialsWithClient(client2, webPassword, telegramPin);
-    await client2.query("COMMIT");
-  } catch (error) {
-    await client2.query("ROLLBACK").catch(() => void 0);
-    throw error;
-  } finally {
-    client2.release();
-  }
-}
-async function changeWebPasswordAndRevokeSessions(currentPassword, newPassword) {
-  const validationError = validateWebPassword(newPassword);
-  if (validationError) throw new Error(validationError);
-  if (currentPassword === newPassword) throw new Error("\u65B0\u5BC6\u7801\u4E0D\u80FD\u4E0E\u5F53\u524D\u5BC6\u7801\u76F8\u540C");
-  const client2 = await pool.connect();
-  try {
-    await client2.query("BEGIN");
-    await client2.query(`SELECT pg_advisory_xact_lock(hashtext('tg-vault:web-password-change'))`);
-    const current2 = await client2.query("SELECT value FROM system_settings WHERE key = $1 FOR UPDATE", [WEB_PASSWORD_KEY]);
-    const storedHash = String(current2.rows[0]?.value || "");
-    if (!verifySecret(currentPassword, storedHash)) throw new Error("\u5F53\u524D\u5BC6\u7801\u4E0D\u6B63\u786E");
-    await client2.query(
-      `UPDATE system_settings SET value = $2, updated_at = NOW() WHERE key = $1`,
-      [WEB_PASSWORD_KEY, hashSecret(newPassword)]
-    );
-    await client2.query("DELETE FROM web_sessions");
-    await client2.query("COMMIT");
-  } catch (error) {
-    await client2.query("ROLLBACK").catch(() => void 0);
-    throw error;
-  } finally {
-    client2.release();
-  }
-}
-function parseTelegramAllowedUserIds(value) {
-  if (!value) return [];
-  return [...new Set(String(value).split(/[\s,]+/).map((item) => Number(item.trim())).filter((item) => Number.isSafeInteger(item) && item > 0))].sort((a, b) => a - b);
-}
-function shouldAutoAllowFirstTelegramUser(allowedUsers, authenticatedUserCount) {
-  return allowedUsers.length === 0 && authenticatedUserCount === 0;
-}
-async function getStoredTelegramAllowedUsers() {
-  const stored = await getSetting(TELEGRAM_ALLOWED_USERS_KEY, "");
-  return parseTelegramAllowedUserIds(stored || "");
-}
-async function getConfiguredTelegramAllowedUsers() {
-  const envUsers = parseTelegramAllowedUserIds(process.env.TELEGRAM_ALLOWED_USER_IDS || "");
-  if (envUsers.length > 0) return envUsers;
-  return getStoredTelegramAllowedUsers();
-}
-async function countAuthenticatedTelegramUsers() {
-  const result = await pool.query("SELECT COUNT(*)::int AS count FROM telegram_auth");
-  return Number(result.rows[0]?.count || 0);
-}
-async function setTelegramAllowedUsers(userIds) {
-  const users = parseTelegramAllowedUserIds(userIds.join(","));
-  await setSetting(TELEGRAM_ALLOWED_USERS_KEY, users.join(","));
-  return users;
-}
-async function addTelegramAllowedUser(userId) {
-  const users = await getStoredTelegramAllowedUsers();
-  if (!users.includes(userId)) users.push(userId);
-  return setTelegramAllowedUsers(users);
-}
-
-// src/services/telegramState.ts
-var userStates = /* @__PURE__ */ new Map();
-var authenticatedUsers = /* @__PURE__ */ new Map();
-var passwordInputState = /* @__PURE__ */ new Map();
-async function revokeAuthenticatedUser(userId) {
-  authenticatedUsers.delete(userId);
-  try {
-    await query("DELETE FROM telegram_auth WHERE user_id = $1", [userId]);
-  } catch (error) {
-    console.error("\u{1F916} \u64A4\u9500 Telegram \u6388\u6743\u7528\u6237\u5931\u8D25:", error);
-  }
-}
-async function loadAuthenticatedUsers() {
-  try {
-    const allowedUsers = await getConfiguredTelegramAllowedUsers();
-    const result = await query("SELECT user_id, authenticated_at FROM telegram_auth");
-    for (const row of result.rows) {
-      const userId = Number(row.user_id);
-      if (allowedUsers.length > 0 && !allowedUsers.includes(userId)) {
-        await revokeAuthenticatedUser(userId);
-        continue;
-      }
-      authenticatedUsers.set(userId, { authenticatedAt: new Date(row.authenticated_at) });
-    }
-    console.log(`\u{1F916} \u5DF2\u4ECE\u6570\u636E\u5E93\u8F7D\u5165 ${authenticatedUsers.size} \u4E2A\u6388\u6743\u7528\u6237`);
-  } catch (error) {
-    console.error("\u{1F916} \u8F7D\u5165\u5DF2\u9A8C\u8BC1\u7528\u6237\u5931\u8D25:", error);
-  }
-}
-async function persistAuthenticatedUser(userId) {
-  try {
-    await query("INSERT INTO telegram_auth (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING", [userId]);
-    authenticatedUsers.set(userId, { authenticatedAt: /* @__PURE__ */ new Date() });
-    console.log(`\u{1F916} \u7528\u6237 ${userId} \u5DF2\u6301\u4E45\u5316\u5230\u6570\u636E\u5E93`);
-  } catch (error) {
-    console.error("\u{1F916} \u6301\u4E45\u5316\u7528\u6237\u5931\u8D25:", error);
-  }
-}
-async function isAuthenticatedAsync(userId) {
-  const allowedUsers = await getConfiguredTelegramAllowedUsers();
-  if (allowedUsers.length > 0 && !allowedUsers.includes(userId)) {
-    if (authenticatedUsers.has(userId)) await revokeAuthenticatedUser(userId);
-    return false;
-  }
-  return authenticatedUsers.has(userId);
-}
+import crypto18 from "crypto";
 
 // src/services/telegramCommands.ts
 init_db();
@@ -2963,17 +3106,20 @@ import { Api } from "telegram";
 
 // src/utils/telegramCommandRegistry.ts
 var BOT_COMMANDS = [
-  { command: "start", description: "\u5F00\u59CB\u4F7F\u7528 / \u9A8C\u8BC1\u8EAB\u4EFD", helpDescription: "\u8EAB\u4EFD\u8BA4\u8BC1 / \u5F00\u59CB\u4F7F\u7528", category: "main", menu: true, help: true },
+  { command: "start", description: "\u5F00\u59CB\u4F7F\u7528 / \u9A8C\u8BC1\u8EAB\u4EFD", helpDescription: "\u8EAB\u4EFD\u8BA4\u8BC1 / \u5F00\u59CB\u4F7F\u7528", category: "main", menu: true, help: true, requiresAuth: false },
   { command: "tasks", description: "\u67E5\u770B\u5B9E\u65F6\u4EFB\u52A1", helpDescription: "\u67E5\u770B\u5B9E\u65F6\u4F20\u8F93\u4EFB\u52A1\u961F\u5217", category: "main", aliases: ["task"], menu: true, help: true },
   { command: "storage", description: "\u5B58\u50A8\u72B6\u6001 / \u5220\u9664\u672C\u5730\u5B9E\u4F53\u6587\u4EF6", helpDescription: "\u67E5\u770B\u5B58\u50A8\u72B6\u6001\uFF1B\u53EF\u786E\u8BA4\u5220\u9664\u672C\u5730\u5B9E\u4F53\u6587\u4EF6", category: "main", menu: true, help: true },
   { command: "path_rules", description: "\u4FDD\u5B58\u4F4D\u7F6E / \u81EA\u5B9A\u4E49\u76EE\u5F55", helpDescription: "\u6253\u5F00\u4FDD\u5B58\u4F4D\u7F6E\u4E0E\u81EA\u5B9A\u4E49\u76EE\u5F55\u9762\u677F", category: "main", aliases: ["path", "save_rules"], menu: true, help: true },
   { command: "tg_download", description: "\u6309\u65E5\u671F / \u6807\u7B7E\u4E0B\u8F7D\u9891\u9053\u6587\u4EF6", helpDescription: "\u6253\u5F00\u6309\u65E5\u671F\u6216\u6807\u7B7E\u4E0B\u8F7D\u5411\u5BFC", category: "main", aliases: ["tg_dl"], menu: true, help: true },
   { command: "list", description: "\u67E5\u770B\u6700\u8FD1\u6587\u4EF6", helpDescription: "\u67E5\u770B\u6700\u8FD1\u6587\u4EF6\u548C\u53EF\u590D\u5236\u7684\u6587\u4EF6 ID", category: "files", usage: "[\u6570\u91CF] [\u9875\u7801]", menu: true, help: true },
+  { command: "find", description: "\u641C\u7D22\u548C\u64CD\u4F5C\u6587\u4EF6", helpDescription: "\u6309\u540D\u79F0\u3001\u7C7B\u578B\u3001\u76EE\u5F55\u3001\u65E5\u671F\u6216\u6536\u85CF\u641C\u7D22\u6587\u4EF6\u5E76\u6253\u5F00\u64CD\u4F5C\u5361", category: "files", usage: "[\u5173\u952E\u8BCD] [type:image|video|audio|document] [folder:\u76EE\u5F55] [after:YYYY-MM-DD] [before:YYYY-MM-DD] [fav]", menu: true, help: true },
   { command: "tg_sub", description: "\u7BA1\u7406\u9891\u9053\u81EA\u52A8\u540C\u6B65", helpDescription: "\u6253\u5F00\u9891\u9053\u8BA2\u9605\u7BA1\u7406\u5411\u5BFC", category: "channels", aliases: ["tg_subscribe"], menu: true, help: true },
   { command: "storage_switch", description: "\u5207\u6362\u7CFB\u7EDF\u9ED8\u8BA4\u5B58\u50A8", helpDescription: "\u5207\u6362\u6240\u6709\u65B0\u4EFB\u52A1\u4F7F\u7528\u7684\u7CFB\u7EDF\u9ED8\u8BA4\u5B58\u50A8", category: "settings", aliases: ["switch_storage", "storage_source"], menu: true, help: true },
+  { command: "target", description: "\u8BBE\u7F6E\u5F53\u524D\u804A\u5929\u5B58\u50A8\u76EE\u6807", helpDescription: "\u8BBE\u7F6E\u4E0B\u4E00\u6B21\u6216\u5F53\u524D\u804A\u5929\u6301\u7EED\u4F7F\u7528\u7684\u5B58\u50A8\u8D26\u6237\uFF1B\u4E0D\u4FEE\u6539\u7CFB\u7EDF\u9ED8\u8BA4", category: "files", usage: "[once|session|clear] [local|\u8D26\u6237ID]", menu: true, help: true },
   { command: "ytdlp", description: "\u4E0B\u8F7D\u89C6\u9891\u94FE\u63A5", helpDescription: "\u89E3\u6790\u5E76\u4E0B\u8F7D\u4E00\u4E2A\u89C6\u9891\u94FE\u63A5", category: "files", usage: "<url>", menu: true, help: true },
-  { command: "help", description: "\u67E5\u770B\u5B8C\u6574\u5E2E\u52A9", helpDescription: "\u663E\u793A\u6B64\u5E2E\u52A9", category: "main", menu: true, help: true },
+  { command: "help", description: "\u67E5\u770B\u5B8C\u6574\u5E2E\u52A9", helpDescription: "\u663E\u793A\u6B64\u5E2E\u52A9", category: "main", menu: true, help: true, requiresAuth: false },
   { command: "setup_2fa", description: "\u914D\u7F6E\u53CC\u91CD\u9A8C\u8BC1", helpDescription: "\u914D\u7F6E\u53CC\u91CD\u9A8C\u8BC1 (TOTP)", category: "security", aliases: ["setup-2fa"], menu: false, help: true },
+  { command: "logout", description: "\u64A4\u9500\u672C\u8BBE\u5907 Bot \u8BA4\u8BC1", helpDescription: "\u7ACB\u5373\u9000\u51FA\u5E76\u64A4\u9500\u5F53\u524D Telegram \u7528\u6237\u7684 Bot \u8BA4\u8BC1", category: "security", menu: false, help: true },
   { command: "p", description: "\u8BBE\u7F6E\u4E0B\u4E00\u6B21\u4FDD\u5B58\u76EE\u5F55", helpDescription: "\u4E0B\u4E00\u6B21\u4E0B\u8F7D\u4FDD\u5B58\u5230\u6307\u5B9A\u76EE\u5F55", category: "files", usage: "<\u76EE\u5F55>", help: true },
   { command: "ps", description: "\u8BBE\u7F6E\u672C\u4F1A\u8BDD\u4FDD\u5B58\u76EE\u5F55", helpDescription: "\u672C\u4F1A\u8BDD\u6301\u7EED\u4FDD\u5B58\u5230\u6307\u5B9A\u76EE\u5F55", category: "files", usage: "<\u76EE\u5F55>", help: true },
   { command: "pc", description: "\u6E05\u9664\u81EA\u5B9A\u4E49\u4FDD\u5B58\u76EE\u5F55", helpDescription: "\u6E05\u9664\u4E0B\u4E00\u6B21\u548C\u672C\u4F1A\u8BDD\u81EA\u5B9A\u4E49\u76EE\u5F55", category: "files", help: true },
@@ -2984,7 +3130,9 @@ var BOT_COMMANDS = [
   { command: "tg_retry", description: "\u91CD\u8BD5\u5931\u8D25\u4EFB\u52A1", helpDescription: "\u91CD\u8BD5\u6700\u8FD1\u5931\u8D25\u7684 Telegram \u4E0B\u8F7D\u4EFB\u52A1", category: "channels", usage: "[\u6570\u91CF] [\u4EFB\u52A1 ID]", help: true },
   { command: "stop_tasks", description: "\u505C\u6B62\u5F53\u524D\u804A\u5929\u4EFB\u52A1", helpDescription: "\u517C\u5BB9\u5165\u53E3\uFF1A\u9884\u89C8\u5E76\u505C\u6B62\u5F53\u524D\u804A\u5929\u4E0B\u8F7D\u4EFB\u52A1", category: "settings", aliases: ["stop", "cancel_tasks"], help: true },
   { command: "download_workers", description: "\u5355\u6587\u4EF6\u5206\u7247\u5E76\u53D1", helpDescription: "\u8BBE\u7F6E\u5355\u6587\u4EF6\u5206\u7247\u4E0B\u8F7D\u5E76\u53D1", category: "settings", aliases: ["workers"], help: true },
-  { command: "file_concurrency", description: "\u540C\u65F6\u4E0B\u8F7D\u6587\u4EF6\u6570", helpDescription: "\u8BBE\u7F6E\u540C\u65F6\u4E0B\u8F7D\u6587\u4EF6\u6570", category: "settings", aliases: ["file_workers", "download_files"], help: true },
+  { command: "file_concurrency", description: "\u6587\u4EF6\u7EA7\u4E0B\u8F7D\u5E76\u53D1", helpDescription: "\u8BBE\u7F6E 1 / 2 / 3 / 4 \u4E2A\u6587\u4EF6\u5E76\u884C\uFF0C\u907F\u514D\u628A\u5206\u7247\u5E76\u53D1\u548C\u6587\u4EF6\u7EA7\u5E76\u53D1\u6DF7\u6DC6", category: "settings", aliases: ["file_workers", "download_files"], menu: false, help: true },
+  { command: "status", description: "\u7CFB\u7EDF\u8BCA\u65AD\u72B6\u6001", helpDescription: "\u67E5\u770B Bot\u3001\u8D26\u53F7\u4E0B\u8F7D\u5668\u3001\u5B58\u50A8\u3001\u78C1\u76D8\u3001\u961F\u5217\u3001\u8BA2\u9605\u548C\u5BF9\u8D26\u72B6\u6001", category: "settings", menu: true, help: true },
+  { command: "notifications", description: "\u901A\u77E5\u504F\u597D", helpDescription: "\u8BBE\u7F6E\u6210\u529F/\u5931\u8D25/\u8BA2\u9605\u6458\u8981\u3001\u65F6\u533A\u548C\u5B89\u9759\u65F6\u6BB5\uFF1B\u5B89\u5168\u544A\u8B66\u59CB\u7EC8\u5373\u65F6", category: "settings", usage: "[timezone|quiet|success|failure|subscription] [\u503C]", menu: true, help: true },
   { command: "duplicate_mode", description: "\u91CD\u590D\u6587\u4EF6\u5904\u7406", helpDescription: "\u8BBE\u7F6E\u91CD\u590D\u6587\u4EF6\u5904\u7406\u7B56\u7565", category: "settings", aliases: ["duplicate", "dup"], help: true },
   { command: "cleanup_settings", description: "\u81EA\u52A8\u6E05\u7406\u672A\u7D22\u5F15\u4E34\u65F6\u6587\u4EF6", helpDescription: "\u8BBE\u7F6E\u81EA\u52A8\u6E05\u7406\u672A\u767B\u8BB0\u4E34\u65F6\u6587\u4EF6\u7684\u5F00\u5173", category: "settings", aliases: ["cleanup"], help: true },
   { command: "tg_subs", description: "\u67E5\u770B\u9891\u9053\u8BA2\u9605", helpDescription: "\u67E5\u770B\u9891\u9053\u8BA2\u9605\u5217\u8868", category: "channels", aliases: ["tg_subscriptions"], help: true },
@@ -2992,6 +3140,8 @@ var BOT_COMMANDS = [
 ];
 var lookup = /* @__PURE__ */ new Map();
 for (const definition of BOT_COMMANDS) {
+  definition.handlerKey ||= definition.command;
+  definition.requiresAuth ??= definition.command !== "start" && definition.command !== "help";
   lookup.set(definition.command, definition);
   definition.aliases?.forEach((alias) => lookup.set(alias, definition));
 }
@@ -3050,13 +3200,18 @@ function buildTaskControlLines(taskId, queuePaused = false, pauseReason, systemP
     `\u{1F6D1} \u53D6\u6D88\uFF1A\u7ED3\u675F\u5F53\u524D\u4EFB\u52A1\u5361\u5E76\u79FB\u9664\u6309\u94AE\uFF0C\u4E0D\u4F1A\u8BEF\u53D6\u6D88\u5176\u5B83\u804A\u5929\u4EFB\u52A1`
   ];
 }
-function buildTaskControlButtons(taskId, queuePaused = false, systemPause, queuePausing = false, userPaused = queuePaused && !systemPause) {
+function buildTaskControlButtons(taskId, queuePaused = false, systemPause, queuePausing = false, userPaused = queuePaused && !systemPause, failedCount = 0) {
   if (!taskId) return void 0;
   const actionButtons = queuePaused || queuePausing ? systemPause && !userPaused ? [] : [new Api.KeyboardButtonCallback({ text: "\u25B6\uFE0F \u7EE7\u7EED", data: Buffer.from(`tq_resume_${taskId}`) })] : [new Api.KeyboardButtonCallback({ text: "\u23F8 \u6682\u505C", data: Buffer.from(`tq_pause_${taskId}`) })];
   actionButtons.push(new Api.KeyboardButtonCallback({ text: "\u{1F6D1} \u53D6\u6D88", data: Buffer.from(`tq_cancel_${taskId}`) }));
-  return new Api.ReplyInlineMarkup({
-    rows: [new Api.KeyboardButtonRow({ buttons: actionButtons })]
-  });
+  const rows = [new Api.KeyboardButtonRow({ buttons: actionButtons })];
+  if (failedCount > 0) {
+    rows.push(new Api.KeyboardButtonRow({ buttons: [
+      new Api.KeyboardButtonCallback({ text: `\u{1F504} \u91CD\u8BD5\u5931\u8D25 (${failedCount})`, data: Buffer.from(`receipt_retry_${taskId}`) }),
+      new Api.KeyboardButtonCallback({ text: "\u67E5\u770B\u5931\u8D25\u660E\u7EC6", data: Buffer.from(`receipt_failures_${taskId}`) })
+    ] }));
+  }
+  return new Api.ReplyInlineMarkup({ rows });
 }
 function collectCompletedFolders(singleFiles, batches) {
   const folders = /* @__PURE__ */ new Set();
@@ -3237,7 +3392,7 @@ function buildFileList(files, total) {
   lines.push(`\u{1F4C4} \u66F4\u591A\u8BB0\u5F55: /list 20 \u6216 /list 20 2`);
   return lines.join("\n");
 }
-function buildUploadSuccess(fileName, size, fileType, providerName, folder) {
+function buildUploadSuccess(fileName, size, fileType, providerName, folder, fileId, duplicateOutcome) {
   const typeEmoji = getTypeEmoji(
     fileType === "image" ? "image/" : fileType === "video" ? "video/" : fileType === "audio" ? "audio/" : "other"
   );
@@ -3249,7 +3404,11 @@ function buildUploadSuccess(fileName, size, fileType, providerName, folder) {
     `${typeEmoji} ${fileName}`,
     `\u{1F4E6} ${formatBytes(size)}`,
     `\u{1F4CD} ${getProviderDisplayName(providerName)}`,
-    ...folder ? [`\u{1F4C1} ${folder}`] : []
+    ...folder ? [`\u{1F4C1} ${folder}`] : [],
+    ...fileId ? [`\u{1F194} ${fileId.slice(0, 13)}`] : [],
+    ...duplicateOutcome === "copied" ? ["\u267B\uFE0F \u91CD\u590D\u5904\u7406\uFF1A\u5DF2\u751F\u6210\u526F\u672C"] : duplicateOutcome === "skipped" ? ["\u23ED\uFE0F \u91CD\u590D\u5904\u7406\uFF1A\u5DF2\u8DF3\u8FC7"] : [],
+    ``,
+    ...fileId ? ["\u64CD\u4F5C\uFF1A/find \u53EF\u641C\u7D22\u540C\u76EE\u5F55\uFF1B\u590D\u5236\u4E0A\u65B9 ID\uFF1B/delete <ID> \u53EF\u8FDB\u5165\u5220\u9664\u786E\u8BA4\u3002"] : []
   ].join("\n");
 }
 function buildUploadFail(fileName, error) {
@@ -3578,12 +3737,15 @@ function buildCleanupNotice(deletedCount, freedSpace) {
   ].join("\n");
 }
 
+// src/services/telegramCommands.ts
+init_telegramState();
+
 // src/services/telegramUpload.ts
 init_db();
 import { Api as Api4 } from "telegram";
 import fs7 from "fs";
 import path11 from "path";
-import crypto11 from "crypto";
+import crypto12 from "crypto";
 import bigInt from "big-integer";
 
 // src/utils/thumbnail.ts
@@ -3591,7 +3753,7 @@ import path6 from "path";
 import sharp from "sharp";
 import ffmpeg from "fluent-ffmpeg";
 import fs5 from "fs";
-import crypto6 from "crypto";
+import crypto7 from "crypto";
 var THUMBNAIL_DIR = path6.resolve(process.env.THUMBNAIL_DIR || "./data/thumbnails");
 if (!fs5.existsSync(THUMBNAIL_DIR)) {
   fs5.mkdirSync(THUMBNAIL_DIR, { recursive: true });
@@ -3614,14 +3776,14 @@ async function generateMediaPreview(filePath, storedName, mimeType) {
   if (!fs5.existsSync(absFilePath)) return null;
   try {
     if (mimeType.startsWith("image/") && mimeType !== "image/gif") {
-      const previewName = `preview_${crypto6.randomUUID()}.webp`;
+      const previewName = `preview_${crypto7.randomUUID()}.webp`;
       const previewPath = path6.join(PREVIEW_DIR, previewName);
       await sharp(absFilePath).rotate().resize(2048, 2048, { fit: "inside", withoutEnlargement: true }).webp({ quality: 86, effort: 4 }).toFile(previewPath);
       console.log(`[Preview] \u2705 Image preview created: ${previewName}`);
       return previewPath;
     }
     if (mimeType.startsWith("video/")) {
-      const previewName = `preview_${crypto6.randomUUID()}.mp4`;
+      const previewName = `preview_${crypto7.randomUUID()}.mp4`;
       const previewPath = path6.join(PREVIEW_DIR, previewName);
       const mp4Like = isMp4Like(mimeType, storedName || absFilePath);
       if (mp4Like) {
@@ -3666,7 +3828,7 @@ async function generateMediaPreview(filePath, storedName, mimeType) {
 }
 async function generateThumbnail(filePath, storedName, mimeType) {
   const absFilePath = path6.resolve(filePath);
-  const thumbName = `thumb_${crypto6.randomUUID()}.webp`;
+  const thumbName = `thumb_${crypto7.randomUUID()}.webp`;
   const thumbPath = path6.join(THUMBNAIL_DIR, thumbName);
   console.log(`[Thumbnail] \u{1F680} Starting generation for: ${storedName}`);
   console.log(`[Thumbnail] Source: ${absFilePath}`);
@@ -3765,10 +3927,10 @@ init_storage();
 var TaskAbortRegistry = class {
   controllers = /* @__PURE__ */ new Map();
   acquire(taskId) {
-    const current2 = this.controllers.get(taskId);
-    if (current2 && !current2.controller.signal.aborted) {
-      current2.references += 1;
-      return current2.controller;
+    const current3 = this.controllers.get(taskId);
+    if (current3 && !current3.controller.signal.aborted) {
+      current3.references += 1;
+      return current3.controller;
     }
     const controller = new AbortController();
     this.controllers.set(taskId, { controller, references: 1 });
@@ -3947,6 +4109,10 @@ function getTelegramUserSessionFilePath() {
   return userSessionFilePath || getSessionFilePath();
 }
 
+// src/services/telegramUpload.ts
+init_settings();
+init_telegramState();
+
 // src/utils/telegramMedia.ts
 import { Api as Api2 } from "telegram";
 function getDownloadableMedia(message) {
@@ -4060,12 +4226,12 @@ function extractFileInfo(message) {
 
 // src/utils/fileUtils.ts
 import path8 from "path";
-import crypto7 from "crypto";
+import crypto8 from "crypto";
 async function getUniqueStoredName(originalName, _folder = null, _storageAccountId = null) {
   const sanitizedName = sanitizeFilename(originalName);
   const ext = path8.extname(sanitizedName);
   const rawBaseName = ext ? sanitizedName.slice(0, -ext.length) : sanitizedName;
-  const suffix = `--${crypto7.randomUUID()}`;
+  const suffix = `--${crypto8.randomUUID()}`;
   const maxBaseLength = Math.max(1, 255 - ext.length - suffix.length);
   const baseName = rawBaseName.slice(0, maxBaseLength) || "file";
   return `${baseName}${suffix}${ext}`;
@@ -4231,7 +4397,7 @@ async function getTelegramBatchFolderName(message, fallback) {
 
 // src/utils/telegramNaming.ts
 import path10 from "path";
-import crypto8 from "crypto";
+import crypto9 from "crypto";
 function normalizeExtension(extension) {
   if (!extension) return "";
   const trimmed = extension.trim();
@@ -4303,7 +4469,7 @@ function buildTelegramGeneratedFileName(options) {
       return appendSequenceNumber(nameWithExtension, options.sequenceNumber);
     }
   }
-  const suffix = sanitizeFilename(options.randomSuffix || crypto8.randomBytes(4).toString("hex")).replace(/\s+/g, "_");
+  const suffix = sanitizeFilename(options.randomSuffix || crypto9.randomBytes(4).toString("hex")).replace(/\s+/g, "_");
   return appendSequenceNumber(`${fallbackPrefix(options.mimeType)}_${suffix}${ext}`, options.sequenceNumber);
 }
 function resolveTelegramGeneratedFileName(options) {
@@ -4428,6 +4594,7 @@ async function prefetchForwardedSourceMessages(userClient2, messages) {
 
 // src/utils/telegramPathSettings.ts
 import { Api as Api3 } from "telegram";
+init_settings();
 
 // src/utils/telegramPathStateStore.ts
 init_db();
@@ -4463,8 +4630,12 @@ async function clearTelegramPathStateRows(runQuery = defaultQuery, chatId) {
 }
 
 // src/utils/telegramPathSettings.ts
+init_scopedInteractionMap();
 var chatPathState = /* @__PURE__ */ new Map();
-var pendingPathInputState = /* @__PURE__ */ new Map();
+var pendingPathInputState = new ScopedInteractionMap({
+  ttlMs: Math.max(6e4, Number.parseInt(process.env.TELEGRAM_INTERACTION_TTL_MS || "900000", 10) || 9e5),
+  maxEntries: Math.max(10, Number.parseInt(process.env.TELEGRAM_INTERACTION_MAX_ENTRIES || "1000", 10) || 1e3)
+});
 var recentPathState = /* @__PURE__ */ new Map();
 var MAX_RECENT_PATHS = 6;
 var RECENT_PATH_SETTING_PREFIX = "telegram_recent_paths:";
@@ -4515,8 +4686,8 @@ function sanitizeCustomStoragePath(input) {
 }
 async function rememberRecentTelegramPathPersistent(chatId, folder) {
   const normalized = sanitizeCustomStoragePath(folder);
-  const current2 = await loadRecentTelegramPaths(chatId);
-  const next = [normalized, ...current2.filter((item) => item !== normalized)].slice(0, MAX_RECENT_PATHS);
+  const current3 = await loadRecentTelegramPaths(chatId);
+  const next = [normalized, ...current3.filter((item) => item !== normalized)].slice(0, MAX_RECENT_PATHS);
   await persistRecentTelegramPaths(chatId, next);
   return normalized;
 }
@@ -4647,8 +4818,54 @@ function buildPathSettingsText(_state, chatId) {
   ].join("\n");
 }
 
+// src/utils/telegramTargetStateStore.ts
+init_db();
+var defaultQuery2 = (sql, params) => query(sql, params);
+async function setTelegramTargetState(runQuery = defaultQuery2, chatId, mode, provider, accountId, expiresAt) {
+  await runQuery(
+    `INSERT INTO telegram_target_states (chat_id, mode, provider, account_id, expires_at)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (chat_id, mode)
+         DO UPDATE SET provider = EXCLUDED.provider, account_id = EXCLUDED.account_id,
+                       expires_at = EXCLUDED.expires_at, updated_at = NOW()`,
+    [chatId, mode, provider, accountId, expiresAt]
+  );
+}
+function mapRow(row) {
+  if (!row) return null;
+  return {
+    provider: String(row.provider),
+    accountId: row.account_id == null ? null : String(row.account_id),
+    mode: String(row.mode)
+  };
+}
+async function consumeTelegramTargetState(runQuery = defaultQuery2, chatId) {
+  const result = await runQuery(
+    `DELETE FROM telegram_target_states
+         WHERE chat_id = $1 AND mode = 'once' AND expires_at > NOW()
+         RETURNING provider, account_id, mode`,
+    [chatId]
+  );
+  return mapRow(result.rows[0]);
+}
+async function getTelegramTargetState(runQuery = defaultQuery2, chatId, mode = "session") {
+  const result = await runQuery(
+    `SELECT provider, account_id, mode FROM telegram_target_states
+         WHERE chat_id = $1 AND mode = $2 AND expires_at > NOW()`,
+    [chatId, mode]
+  );
+  return mapRow(result.rows[0]);
+}
+async function consumeOrGetTelegramTargetState(chatId) {
+  return await consumeTelegramTargetState(void 0, chatId) || await getTelegramTargetState(void 0, chatId, "session");
+}
+async function clearTelegramTargetState(chatId) {
+  await defaultQuery2("DELETE FROM telegram_target_states WHERE chat_id = $1", [chatId]);
+}
+
 // src/utils/duplicatePolicy.ts
 init_db();
+init_settings();
 function normalizeDuplicateMode(value) {
   return value === "skip" ? "skip" : "copy";
 }
@@ -4703,21 +4920,21 @@ var DownloadTaskQueue = class {
     if (existing && ["completed", "cancelled"].includes(this.snapshotGroup(existing).state)) {
       this.groups.delete(id);
     }
-    const current2 = this.groups.get(id);
-    if (current2) {
-      current2.kind = input.kind;
-      current2.title = input.title || current2.title;
-      current2.chatId = input.chatId || current2.chatId;
-      current2.userId = input.userId ?? current2.userId;
-      current2.source = input.source ?? current2.source;
-      if (current2.targetProvider === void 0 && input.targetProvider !== void 0) current2.targetProvider = input.targetProvider;
-      if (current2.targetAccountId === void 0 && input.targetAccountId !== void 0) current2.targetAccountId = input.targetAccountId;
-      current2.targetFolder = input.targetFolder ?? current2.targetFolder;
-      current2.hidden = input.hidden ?? current2.hidden;
-      current2.expectedTotal = Math.max(current2.expectedTotal, Math.max(0, input.expectedTotal || 0));
-      current2.updatedAt = this.nextGroupVersion(current2, now);
-      this.notifyGroup(current2);
-      return this.snapshotGroup(current2);
+    const current3 = this.groups.get(id);
+    if (current3) {
+      current3.kind = input.kind;
+      current3.title = input.title || current3.title;
+      current3.chatId = input.chatId || current3.chatId;
+      current3.userId = input.userId ?? current3.userId;
+      current3.source = input.source ?? current3.source;
+      if (current3.targetProvider === void 0 && input.targetProvider !== void 0) current3.targetProvider = input.targetProvider;
+      if (current3.targetAccountId === void 0 && input.targetAccountId !== void 0) current3.targetAccountId = input.targetAccountId;
+      current3.targetFolder = input.targetFolder ?? current3.targetFolder;
+      current3.hidden = input.hidden ?? current3.hidden;
+      current3.expectedTotal = Math.max(current3.expectedTotal, Math.max(0, input.expectedTotal || 0));
+      current3.updatedAt = this.nextGroupVersion(current3, now);
+      this.notifyGroup(current3);
+      return this.snapshotGroup(current3);
     }
     const record = {
       ...input,
@@ -5837,9 +6054,9 @@ async function saveAndIndexWithCompensation(provider, tempPath, storedName, mime
 
 // src/services/storageAccountLease.ts
 init_storageAccountLifecycle();
-import crypto9 from "node:crypto";
+import crypto10 from "node:crypto";
 async function acquireStorageAccountLease(client2, accountId, purpose, ttlMs = 30 * 60 * 1e3) {
-  const leaseId = crypto9.randomUUID();
+  const leaseId = crypto10.randomUUID();
   const expiresAt = new Date(Date.now() + ttlMs);
   const result = await client2.query(
     `INSERT INTO storage_account_leases (id, storage_account_id, purpose, expires_at)
@@ -5916,7 +6133,7 @@ async function acquireStorageAccountOperationLease(pool2, accountId, purpose, op
 init_storageAccountLifecycle();
 
 // src/services/telegramWriteReconciliation.ts
-import crypto10 from "node:crypto";
+import crypto11 from "node:crypto";
 async function ownsTelegramReconciliationLease(db, operationId, leaseToken) {
   const result = await db.query(
     `UPDATE telegram_write_reconciliations
@@ -5928,7 +6145,7 @@ async function ownsTelegramReconciliationLease(db, operationId, leaseToken) {
   return result.rowCount === 1;
 }
 async function beginTelegramWriteReconciliation(db, input) {
-  const operationId = crypto10.randomUUID();
+  const operationId = crypto11.randomUUID();
   const result = await db.query(
     `INSERT INTO telegram_write_reconciliations
          (operation_id, job_id, item_id, child_lease_token, provider, account_id,
@@ -6213,7 +6430,7 @@ async function getDiskWatermarkState(requiredBytes = 0) {
 }
 async function waitForDiskWatermark(requiredBytes = 0, signal) {
   const startedAt = Date.now();
-  const blockerId = crypto11.randomUUID();
+  const blockerId = crypto12.randomUUID();
   let announcedPause = false;
   try {
     while (true) {
@@ -6298,16 +6515,16 @@ var telegramStorageWriteLocks = /* @__PURE__ */ new Map();
 async function withTelegramStorageWriteLock(key, fn) {
   const previous = telegramStorageWriteLocks.get(key) || Promise.resolve();
   let release;
-  const current2 = new Promise((resolve) => {
+  const current3 = new Promise((resolve) => {
     release = resolve;
   });
-  telegramStorageWriteLocks.set(key, previous.then(() => current2, () => current2));
+  telegramStorageWriteLocks.set(key, previous.then(() => current3, () => current3));
   await previous.catch(() => void 0);
   try {
     return await fn();
   } finally {
     release();
-    if (telegramStorageWriteLocks.get(key) === current2) {
+    if (telegramStorageWriteLocks.get(key) === current3) {
       telegramStorageWriteLocks.delete(key);
     }
   }
@@ -6549,7 +6766,7 @@ async function finalizeSilentSessionIfDone(client2, chatId) {
     );
     const controls = s?.failed ? (() => {
       const queueStats = getDownloadQueueStats();
-      return buildTaskControlButtons(s?.taskId, queueStats.paused, queueStats.systemPause);
+      return buildTaskControlButtons(s?.taskId, queueStats.paused, queueStats.systemPause, false, queueStats.userPaused, s?.failed || 0);
     })() : void 0;
     const edited = await safeEditMessage(client2, chatId, { message: silentMsgId, text, buttons: controls });
     if (!edited) {
@@ -6824,7 +7041,7 @@ async function refreshSilentProgress(client2, chatId, userId, pauseHint) {
     cardPausing,
     cardSystemPause
   );
-  const controls = isComplete && session.failed === 0 ? void 0 : buildTaskControlButtons(session.taskId, cardPaused, cardSystemPause, cardPausing, cardUserPaused);
+  const controls = isComplete && session.failed === 0 ? void 0 : buildTaskControlButtons(session.taskId, cardPaused, cardSystemPause, cardPausing, cardUserPaused, session.failed);
   const buttons = controls;
   await safeEditMessage(client2, chatId, { message: silentMsgId, text, buttons });
 }
@@ -6896,6 +7113,9 @@ async function loadFileDownloadConcurrencySetting() {
   const value = await getSetting("telegram_file_download_concurrency", process.env.TELEGRAM_FILE_DOWNLOAD_CONCURRENCY || "2");
   return setFileDownloadConcurrency(normalizeFileDownloadConcurrency(value));
 }
+function getTaskStatus() {
+  return downloadQueue.getDetailedStatus();
+}
 function listDownloadTaskGroups(chatId, userId) {
   return downloadQueue.getSnapshot({ chatId, userId }).groups;
 }
@@ -6937,10 +7157,10 @@ function cancelDownloadTaskGroup(groupId, chatId, userId) {
   return downloadQueue.cancelGroup(groupId, { chatId, userId }, "\u7528\u6237\u901A\u8FC7\u4EFB\u52A1\u4E2D\u5FC3\u53D6\u6D88\u4EFB\u52A1");
 }
 function ordinaryGroupId(prefix, chatId, identity) {
-  return `${prefix}${crypto11.createHash("sha256").update(`${chatId}:${identity}`).digest("base64url").slice(0, 22)}`;
+  return `${prefix}${crypto12.createHash("sha256").update(`${chatId}:${identity}`).digest("base64url").slice(0, 22)}`;
 }
 function channelExecutionGroupId(key) {
-  return `j${crypto11.createHash("sha256").update(key).digest("base64url").slice(0, 22)}`;
+  return `j${crypto12.createHash("sha256").update(key).digest("base64url").slice(0, 22)}`;
 }
 function getChannelExecutionGroup(jobId) {
   return downloadQueue.getGroup(channelExecutionGroupId(jobId), {}, true);
@@ -7031,6 +7251,12 @@ async function cancelSilentTask(client2, chatId, taskId, fallbackMessageId, user
   resetChatTransferSession(chatIdStr);
   return result;
 }
+function listFailedDownloadTaskDetails(taskId, chatId, userId) {
+  if (!canControlTask(taskId, chatId, userId)) return [];
+  const files = getConsolidatedFiles(chatId).filter((file) => file.phase === "failed").map((file) => `${file.fileName}: ${file.error || "\u672A\u77E5\u9519\u8BEF"}`);
+  const batches = getConsolidatedBatches(chatId).filter((batch) => batch.failed > 0).map((batch) => `${batch.folderPath || batch.folderName}: ${batch.failed} \u9879\u5931\u8D25`);
+  return [...files, ...batches];
+}
 function retryFailedDownloadTasks(limit = 10, taskId, chatId, userId) {
   return downloadQueue.retryFailed(limit, { chatId, userId }, taskId);
 }
@@ -7041,7 +7267,7 @@ var mediaGroupDebouncer = createTelegramMediaGroupDebouncer({
 });
 async function downloadAndSaveFile(client2, message, originalFileName, targetDir, onProgress, signal) {
   const ext = path11.extname(originalFileName) || "";
-  const tempStoredName = `${crypto11.randomUUID()}${ext}`;
+  const tempStoredName = `${crypto12.randomUUID()}${ext}`;
   let saveDir = targetDir || UPLOAD_DIR;
   if (!fs7.existsSync(saveDir)) {
     try {
@@ -8006,6 +8232,9 @@ async function handleFileUpload(client2, event) {
     const queueKey = telegramMediaGroupQueueKey(message.chatId, mediaGroupId);
     let queue = mediaGroupQueues.get(queueKey);
     if (!queue) {
+      const chatKey = message.chatId?.toString() || String(senderId);
+      const selectedTarget = await consumeOrGetTelegramTargetState(chatKey);
+      const storageTarget = selectedTarget ? storageManager.getTarget(selectedTarget.provider, selectedTarget.accountId) : storageManager.getActiveTarget();
       queue = {
         mediaGroupId,
         queueKey,
@@ -8014,7 +8243,7 @@ async function handleFileUpload(client2, event) {
         client: client2,
         files: [],
         processingStarted: false,
-        storageTarget: storageManager.getActiveTarget(),
+        storageTarget,
         createdAt: Date.now(),
         lastAddedAt: Date.now()
       };
@@ -8071,7 +8300,8 @@ async function handleFileUpload(client2, event) {
     const chatIdStr = chatId.toString();
     const chatName = await getTelegramChatName(message);
     const previewRules = await getStoragePathRules();
-    const singleStorageTarget = storageManager.getActiveTarget();
+    const selectedTarget = await consumeOrGetTelegramTargetState(chatIdStr);
+    const singleStorageTarget = selectedTarget ? storageManager.getTarget(selectedTarget.provider, selectedTarget.accountId) : storageManager.getActiveTarget();
     const previewFolder = await resolveTelegramStorageFolderPersistent(chatIdStr, buildStorageFolderWithRules({
       source: "telegram",
       chatName,
@@ -8294,7 +8524,7 @@ async function handleFileUpload(client2, event) {
           await runStatusAction(chatId, async () => {
             await client2.editMessage(chatId, {
               message: statusMsg.id,
-              text: buildUploadSuccess(finalFileName, actualSize, fileType, provider.name, storageFolder)
+              text: buildUploadSuccess(finalFileName, actualSize, fileType, provider.name, storageFolder, indexedFileId, duplicateMode === "copy" ? "copied" : null)
             });
           });
         }
@@ -8454,10 +8684,234 @@ init_storage();
 init_db();
 init_storage();
 import { Api as Api5 } from "telegram";
-import crypto12 from "node:crypto";
+import crypto13 from "node:crypto";
 import { getPeerId } from "telegram/Utils.js";
+
+// src/services/telegramChannelJobAdmission.ts
+function resolveChannelJobTargetSnapshot(explicitTarget, getActiveTarget) {
+  return explicitTarget ?? getActiveTarget();
+}
+
+// src/services/telegramChannelJobs.ts
 init_storageCooldown();
+init_settings();
 init_storageAccountLifecycle();
+
+// src/services/telegramDateRange.ts
+var DAY_MS = 24 * 60 * 60 * 1e3;
+var TELEGRAM_DATE_RANGE_WARNING_DAYS = Math.max(
+  1,
+  Number.parseInt(process.env.TELEGRAM_DATE_RANGE_WARNING_DAYS || "31", 10) || 31
+);
+function parseDateOnlyStrict(value, endOfDay = false) {
+  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) throw new Error("\u65E5\u671F\u683C\u5F0F\u5FC5\u987B\u662F YYYY-MM-DD");
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const date = new Date(Date.UTC(
+    year,
+    month - 1,
+    day,
+    endOfDay ? 23 : 0,
+    endOfDay ? 59 : 0,
+    endOfDay ? 59 : 0,
+    endOfDay ? 999 : 0
+  ));
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) {
+    throw new Error("\u8BF7\u8F93\u5165\u6709\u6548\u65E5\u671F\uFF08YYYY-MM-DD\uFF09");
+  }
+  return date;
+}
+function parseTelegramDateRange(startDateText, endDateText, options = {}) {
+  const startDate = parseDateOnlyStrict(startDateText);
+  const endDate = parseDateOnlyStrict(endDateText, true);
+  if (startDate > endDate) throw new Error("\u5F00\u59CB\u65E5\u671F\u4E0D\u80FD\u665A\u4E8E\u7ED3\u675F\u65E5\u671F");
+  const endStartOfDay = Date.UTC(endDate.getUTCFullYear(), endDate.getUTCMonth(), endDate.getUTCDate());
+  const dayCount = Math.floor((endStartOfDay - startDate.getTime()) / DAY_MS) + 1;
+  if (dayCount < 1) throw new Error("\u65E5\u671F\u8303\u56F4\u4E0D\u80FD\u4E3A\u7A7A");
+  const threshold = options.warningThresholdDays ?? TELEGRAM_DATE_RANGE_WARNING_DAYS;
+  return {
+    startDate,
+    endDate,
+    dayCount,
+    requiresLargeRangeConfirmation: dayCount > threshold
+  };
+}
+
+// src/services/telegramNotificationDelivery.ts
+init_db();
+
+// src/services/telegramNotificationPreferences.ts
+init_db();
+var DEFAULT_TELEGRAM_NOTIFICATION_PREFERENCES = {
+  failureImmediate: true,
+  successMode: "immediate",
+  security: true,
+  subscriptionDigest: true,
+  timezone: "UTC",
+  quietStart: null,
+  quietEnd: null
+};
+function validTime(value) {
+  const text = typeof value === "string" ? value.trim() : "";
+  return /^([01]\d|2[0-3]):[0-5]\d$/.test(text) ? text : null;
+}
+function normalizeTelegramNotificationPreferences(input) {
+  const successMode = ["immediate", "digest", "off"].includes(String(input.successMode)) ? String(input.successMode) : DEFAULT_TELEGRAM_NOTIFICATION_PREFERENCES.successMode;
+  const timezone = typeof input.timezone === "string" && input.timezone.trim() ? input.timezone.trim() : "UTC";
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: timezone }).format(/* @__PURE__ */ new Date());
+  } catch {
+    throw new Error("\u65E0\u6548\u65F6\u533A");
+  }
+  return {
+    failureImmediate: input.failureImmediate !== false,
+    successMode,
+    security: true,
+    subscriptionDigest: input.subscriptionDigest !== false,
+    timezone,
+    quietStart: validTime(input.quietStart),
+    quietEnd: validTime(input.quietEnd)
+  };
+}
+function isQuietHour(preferences, now = /* @__PURE__ */ new Date()) {
+  if (!preferences.quietStart || !preferences.quietEnd || preferences.quietStart === preferences.quietEnd) return false;
+  const parts = new Intl.DateTimeFormat("en-GB", { timeZone: preferences.timezone, hour: "2-digit", minute: "2-digit", hour12: false }).formatToParts(now);
+  const hour = Number(parts.find((part) => part.type === "hour")?.value || 0);
+  const minute = Number(parts.find((part) => part.type === "minute")?.value || 0);
+  const current3 = hour * 60 + minute;
+  const toMinutes = (value) => Number(value.slice(0, 2)) * 60 + Number(value.slice(3));
+  const start = toMinutes(preferences.quietStart);
+  const end = toMinutes(preferences.quietEnd);
+  return start < end ? current3 >= start && current3 < end : current3 >= start || current3 < end;
+}
+function evaluateTelegramNotification(kind, preferences, now = /* @__PURE__ */ new Date()) {
+  if (kind === "security") return { deliver: "immediate", reason: "security-bypass" };
+  const quiet = isQuietHour(preferences, now);
+  if (kind === "failure") return preferences.failureImmediate && !quiet ? { deliver: "immediate", reason: "preference" } : { deliver: "digest", reason: quiet ? "quiet-hours" : "preference" };
+  if (kind === "subscription") return preferences.subscriptionDigest || quiet ? { deliver: "digest", reason: quiet ? "quiet-hours" : "preference" } : { deliver: "immediate", reason: "preference" };
+  if (preferences.successMode === "off") return { deliver: "skip", reason: "preference" };
+  if (quiet || preferences.successMode === "digest") return { deliver: "digest", reason: quiet ? "quiet-hours" : "preference" };
+  return { deliver: "immediate", reason: "preference" };
+}
+async function getTelegramNotificationPreferences(userId, chatId) {
+  const result = await query("SELECT preferences FROM telegram_notification_preferences WHERE user_id = $1 AND chat_id = $2", [userId, chatId]);
+  return normalizeTelegramNotificationPreferences(result.rows[0]?.preferences || {});
+}
+async function setTelegramNotificationPreferences(userId, chatId, input) {
+  const preferences = normalizeTelegramNotificationPreferences(input);
+  await query(
+    `INSERT INTO telegram_notification_preferences (user_id, chat_id, preferences)
+         VALUES ($1, $2, $3::jsonb)
+         ON CONFLICT (user_id, chat_id) DO UPDATE SET preferences = EXCLUDED.preferences, updated_at = NOW()`,
+    [userId, chatId, JSON.stringify(preferences)]
+  );
+  return preferences;
+}
+
+// src/services/telegramNotificationDelivery.ts
+function resolveNotificationOwnerUserId(ownerUserId, chatId) {
+  if (Number.isSafeInteger(ownerUserId) && Number(ownerUserId) > 0) return Number(ownerUserId);
+  const parsed = Number(chatId);
+  if (Number.isSafeInteger(parsed) && parsed > 0) return parsed;
+  throw new Error("notification owner user id is required for group/channel delivery");
+}
+async function enqueueTelegramNotification(event, deps) {
+  const preferences = await (deps.getPreferences || getTelegramNotificationPreferences)(event.userId, event.chatId);
+  const decision = evaluateTelegramNotification(event.kind, preferences, (deps.now || (() => /* @__PURE__ */ new Date()))());
+  if (decision.deliver === "immediate") {
+    await deps.send(event.chatId, event.message);
+    return "immediate";
+  }
+  if (decision.deliver === "skip") return "skip";
+  await (deps.runQuery || query)(
+    `INSERT INTO telegram_notification_digest (user_id, chat_id, kind, payload)
+         VALUES ($1, $2, $3, $4::jsonb)`,
+    [event.userId, event.chatId, event.kind, JSON.stringify({ message: event.message, ...event.payload || {} })]
+  );
+  return "digest";
+}
+var digestFlushInProgress = /* @__PURE__ */ new Set();
+async function claimTelegramNotificationDigest(userId, chatId, runQuery) {
+  const claimed = await runQuery(
+    `WITH candidates AS (
+             SELECT id FROM telegram_notification_digest
+             WHERE user_id = $1 AND chat_id = $2 AND delivered_at IS NULL
+             ORDER BY created_at ASC LIMIT 100
+             FOR UPDATE SKIP LOCKED
+         )
+         UPDATE telegram_notification_digest d SET delivered_at = NOW()
+         FROM candidates c WHERE d.id = c.id
+         RETURNING d.id, d.kind, d.payload`,
+    [userId, chatId]
+  );
+  return claimed.rows;
+}
+async function flushTelegramNotificationDigest(userId, chatId, deps) {
+  const scope = `${userId}:${chatId}`;
+  if (digestFlushInProgress.has(scope)) return 0;
+  digestFlushInProgress.add(scope);
+  try {
+    const runQuery = deps.runQuery || query;
+    const selected = { rows: await claimTelegramNotificationDigest(userId, chatId, runQuery) };
+    if (selected.rows.length === 0) return 0;
+    const lines = selected.rows.map((row) => `\u2022 ${String(row.payload?.message || row.kind)}`);
+    await deps.send(chatId, ["\u{1F4EC} **\u901A\u77E5\u6458\u8981**", "", ...lines].join("\n"));
+    return selected.rows.length;
+  } finally {
+    digestFlushInProgress.delete(scope);
+  }
+}
+
+// src/services/telegramSubscriptionManagement.ts
+var TELEGRAM_SUBSCRIPTION_PAGE_SIZE = 5;
+function buildTelegramSubscriptionPage(rows, requestedPage = 0) {
+  const totalPages = Math.max(1, Math.ceil(rows.length / TELEGRAM_SUBSCRIPTION_PAGE_SIZE));
+  const page = Math.min(Math.max(0, Math.floor(requestedPage || 0)), totalPages - 1);
+  const startIndex = page * TELEGRAM_SUBSCRIPTION_PAGE_SIZE;
+  return {
+    page,
+    totalPages,
+    startIndex,
+    visibleRows: rows.slice(startIndex, startIndex + TELEGRAM_SUBSCRIPTION_PAGE_SIZE)
+  };
+}
+function buildSubscriptionOperations(row) {
+  const operations = [
+    { action: "sync", label: "\u7ACB\u5373\u540C\u6B65" },
+    { action: row.enabled ? "pause" : "resume", label: row.enabled ? "\u6682\u505C" : "\u6062\u590D" },
+    { action: "target", label: "\u4FEE\u6539\u76EE\u6807" },
+    { action: "from_now", label: "\u4ECE\u73B0\u5728\u5F00\u59CB" },
+    { action: "backfill", label: "\u6309\u65E5\u671F\u8865\u6293" },
+    { action: "result", label: "\u6700\u8FD1\u7ED3\u679C" },
+    { action: "retry", label: "\u91CD\u8BD5\u5931\u8D25\u9879" }
+  ];
+  return operations;
+}
+function resolveSubscriptionTarget(row, getActiveTarget, getTarget) {
+  if (row.target_mode !== "fixed") return getActiveTarget();
+  if (!row.target_provider) throw new Error("\u56FA\u5B9A\u8BA2\u9605\u76EE\u6807\u7F3A\u5C11 provider");
+  return getTarget(row.target_provider, row.target_account_id || null);
+}
+function parseTelegramSubscriptionCallback(data) {
+  let match = data.match(/^tsub_page_(\d{1,6})$/);
+  if (match) return { kind: "page", page: Number(match[1]) };
+  match = data.match(/^tsub_(view|folder|clear|cancel|sync|pause|resume|target|from_now|backfill|result|retry)_([0-9a-f-]{36})(?:_(\d{1,6}))?$/i);
+  if (match) {
+    return {
+      kind: "action",
+      action: match[1],
+      id: match[2],
+      page: Number(match[3] || 0)
+    };
+  }
+  match = data.match(/^tsub_(confirm|back)_([A-Za-z0-9_-]{1,64})$/);
+  if (match) return { kind: match[1], token: match[2] };
+  return null;
+}
+
+// src/services/telegramChannelJobs.ts
 var SUBSCRIPTION_INTERVAL_MS = Math.max(6e4, parseInt(process.env.TELEGRAM_SUBSCRIPTION_INTERVAL_MS || "300000", 10) || 3e5);
 var SUBSCRIPTION_SCAN_LIMIT = Math.max(1, parseInt(process.env.TELEGRAM_SUBSCRIPTION_SCAN_LIMIT || "100", 10) || 100);
 var TG_JOB_RECOVERY_DELAY_MS = Math.max(1e3, parseInt(process.env.TG_JOB_RECOVERY_DELAY_MS || "10000", 10) || 1e4);
@@ -8657,6 +9111,24 @@ async function persistDownloadRefs(jobId, source, refs, folderOverride) {
     );
   }
 }
+async function persistChannelJobAdmission(input, dependencies) {
+  const target = resolveChannelJobTargetSnapshot(input.target, dependencies.getActiveTarget);
+  const persistedParams = {
+    ...input.params,
+    storageProvider: target.provider.name,
+    storageAccountId: target.accountId
+  };
+  return dependencies.withTransaction(async (client2) => {
+    if (target.accountId) await dependencies.lockStorageAccount(client2, target.accountId);
+    const result = await client2.query(
+      `INSERT INTO telegram_background_jobs (user_id, chat_id, kind, source, params, status, scan_status, download_status, scan_cursor)
+             VALUES ($1, $2, $3, $4, $5, 'queued', 'pending', 'pending', '{}'::jsonb)
+             RETURNING id`,
+      [input.userId, input.chatId || null, input.kind, input.source, JSON.stringify(persistedParams)]
+    );
+    return String(result.rows[0].id);
+  });
+}
 async function getDiscussionMediaRefs(userClient2, source, postMessages, options = {}) {
   if (!options.includeComments || postMessages.length === 0) {
     return { refs: [], scanned: 0, mediaFound: 0 };
@@ -8842,48 +9314,25 @@ async function persistDownloadMessages(jobId, source, messages, folderOverride) 
   propagateTelegramDownloadGroupContext(refs);
   await persistDownloadRefs(jobId, source, refs, folderOverride);
 }
-function parseDateOnly(value, endOfDay = false) {
-  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  if (!match) throw new Error("\u65E5\u671F\u683C\u5F0F\u5FC5\u987B\u662F YYYY-MM-DD");
-  const [, yearText, monthText, dayText] = match;
-  const year = Number(yearText);
-  const month = Number(monthText);
-  const day = Number(dayText);
-  return new Date(Date.UTC(
-    year,
-    month - 1,
-    day,
-    endOfDay ? 23 : 0,
-    endOfDay ? 59 : 0,
-    endOfDay ? 59 : 0,
-    endOfDay ? 999 : 0
-  ));
-}
-async function createJob(userId, chatId, kind, source, params) {
-  const target = storageManager.getActiveTarget();
-  const persistedParams = {
-    ...params,
-    storageProvider: target.provider.name,
-    storageAccountId: target.accountId
-  };
-  const client2 = await pool.connect();
-  try {
-    await client2.query("BEGIN");
-    if (target.accountId) await lockStorageAccountForUse(client2, target.accountId);
-    const result = await client2.query(
-      `INSERT INTO telegram_background_jobs (user_id, chat_id, kind, source, params, status, scan_status, download_status, scan_cursor)
-             VALUES ($1, $2, $3, $4, $5, 'queued', 'pending', 'pending', '{}'::jsonb)
-             RETURNING id`,
-      [userId, chatId || null, kind, source, JSON.stringify(persistedParams)]
-    );
-    await client2.query("COMMIT");
-    return result.rows[0].id;
-  } catch (error) {
-    await client2.query("ROLLBACK").catch(() => void 0);
-    throw error;
-  } finally {
-    client2.release();
-  }
+async function createJob(input) {
+  return persistChannelJobAdmission(input, {
+    getActiveTarget: () => storageManager.getActiveTarget(),
+    lockStorageAccount: (client2, accountId) => lockStorageAccountForUse(client2, accountId),
+    withTransaction: async (operation) => {
+      const client2 = await pool.connect();
+      try {
+        await client2.query("BEGIN");
+        const result = await operation(client2);
+        await client2.query("COMMIT");
+        return result;
+      } catch (error) {
+        await client2.query("ROLLBACK").catch(() => void 0);
+        throw error;
+      } finally {
+        client2.release();
+      }
+    }
+  });
 }
 async function getJob(jobId) {
   const result = await query(`SELECT * FROM telegram_background_jobs WHERE id = $1`, [jobId]);
@@ -8961,8 +9410,8 @@ async function subscribeTelegramChannel(userId, chatId, sourceInput, folderOverr
   const latestMessageId = await getLatestMessageId(userClient2, resolved.source);
   const title = resolved.title || getEntityTitle(resolved.entity, resolved.source);
   const result = await query(
-    `INSERT INTO telegram_channel_subscriptions (user_id, chat_id, source, source_original, source_type, title, last_message_id, folder_override, enabled, disabled_reason, disabled_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, true, NULL, NULL)
+    `INSERT INTO telegram_channel_subscriptions (user_id, chat_id, source, source_original, source_type, title, last_message_id, folder_override, enabled, disabled_reason, disabled_at, target_mode, target_provider, target_account_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, true, NULL, NULL, 'follow_global', NULL, NULL)
          ON CONFLICT (user_id, source)
          DO UPDATE SET chat_id = EXCLUDED.chat_id, source_original = EXCLUDED.source_original, source_type = EXCLUDED.source_type, title = EXCLUDED.title, folder_override = EXCLUDED.folder_override, enabled = true, disabled_reason = NULL, disabled_at = NULL, updated_at = NOW()
          RETURNING id, source, source_original, source_type, title, last_message_id, folder_override, enabled, disabled_reason, disabled_at`,
@@ -8973,6 +9422,7 @@ async function subscribeTelegramChannel(userId, chatId, sourceInput, folderOverr
 async function listTelegramSubscriptions(userId, includeDisabled = false) {
   const result = await query(
     `SELECT id, source, source_original, source_type, title, last_message_id, folder_override, enabled, disabled_reason, disabled_at,
+                target_mode, target_provider, target_account_id,
                 last_scan_at, last_success_at, last_error, last_result,
                 CASE WHEN enabled THEN NOW() + ($3::int * INTERVAL '1 millisecond') ELSE NULL END AS next_scan_at,
                 updated_at
@@ -8995,6 +9445,58 @@ async function resolveUniqueTelegramSubscriptionId(userId, selector) {
     [userId, `${normalized}%`]
   );
   return result.rows.length === 1 ? String(result.rows[0].id) : null;
+}
+async function setTelegramSubscriptionEnabled(userId, selector, enabled) {
+  const subscriptionId = await resolveUniqueTelegramSubscriptionId(userId, selector);
+  if (!subscriptionId) return null;
+  const result = await query(
+    `UPDATE telegram_channel_subscriptions
+         SET enabled = $3, disabled_reason = CASE WHEN $3 THEN NULL ELSE '\u7528\u6237\u624B\u52A8\u6682\u505C\u8BA2\u9605' END,
+             disabled_at = CASE WHEN $3 THEN NULL ELSE NOW() END, updated_at = NOW()
+         WHERE user_id = $1 AND id = $2::uuid RETURNING *`,
+    [userId, subscriptionId, enabled]
+  );
+  return result.rows[0] || null;
+}
+async function updateTelegramSubscriptionTarget(userId, selector, input) {
+  const subscriptionId = await resolveUniqueTelegramSubscriptionId(userId, selector);
+  if (!subscriptionId) return null;
+  if (input.mode === "fixed") {
+    if (!input.provider) throw new Error("\u56FA\u5B9A\u8BA2\u9605\u76EE\u6807\u7F3A\u5C11 provider");
+    storageManager.getTarget(input.provider, input.accountId || null);
+  }
+  const result = await query(
+    `UPDATE telegram_channel_subscriptions
+         SET target_mode = $3, target_provider = CASE WHEN $3 = 'fixed' THEN $4 ELSE NULL END,
+             target_account_id = CASE WHEN $3 = 'fixed' THEN $5::uuid ELSE NULL END, updated_at = NOW()
+         WHERE user_id = $1 AND id = $2::uuid RETURNING *`,
+    [userId, subscriptionId, input.mode, input.provider || null, input.accountId || null]
+  );
+  return result.rows[0] || null;
+}
+async function setTelegramSubscriptionFromNow(userId, selector) {
+  const subscriptionId = await resolveUniqueTelegramSubscriptionId(userId, selector);
+  if (!subscriptionId) return null;
+  const target = await findTelegramSubscription(userId, subscriptionId);
+  if (!target) return null;
+  const latestMessageId = await getLatestMessageId(requireUserClient(), target.source);
+  const result = await query(
+    `UPDATE telegram_channel_subscriptions SET last_message_id = $3, updated_at = NOW()
+         WHERE user_id = $1 AND id = $2::uuid RETURNING *`,
+    [userId, subscriptionId, latestMessageId]
+  );
+  return result.rows[0] || null;
+}
+async function requestTelegramSubscriptionSync(userId, selector) {
+  const subscriptionId = await resolveUniqueTelegramSubscriptionId(userId, selector);
+  if (!subscriptionId) return null;
+  const result = await query(
+    `UPDATE telegram_channel_subscriptions
+         SET next_scan_at = NOW(), enabled = true, disabled_reason = NULL, disabled_at = NULL, updated_at = NOW()
+         WHERE user_id = $1 AND id = $2::uuid RETURNING *`,
+    [userId, subscriptionId]
+  );
+  return result.rows[0] || null;
 }
 async function updateTelegramSubscriptionFolder(userId, selector, folderOverride) {
   const subscriptionId = await resolveUniqueTelegramSubscriptionId(userId, selector);
@@ -9296,13 +9798,13 @@ async function heartbeatTelegramDownloadRefsWithQuery(runQuery, jobId, refs) {
   for (let index = 0; index < results.length; index += 1) {
     if ((results[index].rowCount || 0) === 1) continue;
     const ref = leased[index];
-    const current2 = await runQuery(
+    const current3 = await runQuery(
       `SELECT status, lease_token
              FROM telegram_download_items
              WHERE job_id = $1 AND source_peer = $2 AND message_id = $3`,
       [jobId, sourcePeerKey(ref.source, ref.origin === "comment" ? "comment" : "channel"), ref.id]
     );
-    const row = current2.rows[0];
+    const row = current3.rows[0];
     if (row && ["success", "failed", "skipped"].includes(String(row.status))) {
       ref.leaseToken = void 0;
       continue;
@@ -9580,9 +10082,9 @@ async function runSegmentedTelegramJob(botClient, requestMessage, jobId, source,
     return { jobId, deferred: true, ...totals, requested: 0, commentMessagesScanned: 0, commentMediaFound: 0 };
   }
   while (await waitUntilRunnable(jobId, options)) {
-    const current2 = await getJob(jobId);
-    cursor = current2?.scan_cursor || cursor || {};
-    if (current2?.scan_status === "done") break;
+    const current3 = await getJob(jobId);
+    cursor = current3?.scan_cursor || cursor || {};
+    if (current3?.scan_status === "done") break;
     try {
       const segment = await scanChannelSegment(userClient2, jobId, source, params, cursor, options);
       const onRefDiscovered = async (ref) => {
@@ -9636,20 +10138,27 @@ async function enqueueTelegramDateDownload(botClient, requestMessage, userId, so
   const resolved = await resolveTelegramSource(userClient2, sourceInput);
   await assertTelegramSourceAllowed(resolved.source, [resolved.originalSource]);
   const source = resolved.source;
-  const startDate = parseDateOnly(startDateText);
-  const endDate = parseDateOnly(endDateText, true);
-  if (startDate > endDate) throw new Error("\u5F00\u59CB\u65E5\u671F\u4E0D\u80FD\u665A\u4E8E\u7ED3\u675F\u65E5\u671F");
-  const jobId = await createJob(userId, requestMessage.chatId?.toString(), "date_range", source, {
-    mode: "date",
-    startDate: startDateText,
-    endDate: endDateText,
-    startDateIso: startDate.toISOString(),
-    endDateIso: endDate.toISOString(),
-    folderOverride: folderOverride || null,
-    includeComments: Boolean(options.includeComments),
-    commentsMaxPerPost: options.commentsMaxPerPost || TELEGRAM_COMMENTS_MAX_PER_POST,
-    storageProvider: options.targetProvider || null,
-    storageAccountId: options.targetAccountId || null
+  const range = parseTelegramDateRange(startDateText, endDateText);
+  const { startDate, endDate } = range;
+  const target = resolveChannelJobTargetSnapshot(options.target, () => storageManager.getActiveTarget());
+  const jobId = await createJob({
+    userId,
+    chatId: requestMessage.chatId?.toString(),
+    kind: "date_range",
+    source,
+    target,
+    params: {
+      mode: "date",
+      startDate: startDateText,
+      endDate: endDateText,
+      startDateIso: startDate.toISOString(),
+      endDateIso: endDate.toISOString(),
+      dayCount: range.dayCount,
+      largeRange: range.requiresLargeRangeConfirmation,
+      folderOverride: folderOverride || null,
+      includeComments: Boolean(options.includeComments),
+      commentsMaxPerPost: options.commentsMaxPerPost || TELEGRAM_COMMENTS_MAX_PER_POST
+    }
   });
   return runSegmentedTelegramJob(botClient, requestMessage, jobId, source, folderOverride, options);
 }
@@ -9659,14 +10168,20 @@ async function enqueueTelegramTagDownload(botClient, requestMessage, userId, sou
   await assertTelegramSourceAllowed(resolved.source, [resolved.originalSource]);
   const source = resolved.source;
   const tag = normalizeHashtag(tagInput);
-  const jobId = await createJob(userId, requestMessage.chatId?.toString(), "tag_download", source, {
-    mode: "tag",
-    tag,
-    folderOverride: folderOverride || null,
-    includeComments: Boolean(options.includeComments),
-    commentsMaxPerPost: options.commentsMaxPerPost || TELEGRAM_COMMENTS_MAX_PER_POST,
-    storageProvider: options.targetProvider || null,
-    storageAccountId: options.targetAccountId || null
+  const target = resolveChannelJobTargetSnapshot(options.target, () => storageManager.getActiveTarget());
+  const jobId = await createJob({
+    userId,
+    chatId: requestMessage.chatId?.toString(),
+    kind: "tag_download",
+    source,
+    target,
+    params: {
+      mode: "tag",
+      tag,
+      folderOverride: folderOverride || null,
+      includeComments: Boolean(options.includeComments),
+      commentsMaxPerPost: options.commentsMaxPerPost || TELEGRAM_COMMENTS_MAX_PER_POST
+    }
   });
   const result = await runSegmentedTelegramJob(botClient, requestMessage, jobId, source, folderOverride, options);
   return { ...result, tag };
@@ -9929,9 +10444,11 @@ async function runSubscriptionScan(botClient) {
     const userClient2 = getTelegramUserClient();
     if (!userClient2 || !isTelegramUserClientReady()) return;
     const result = await query(
-      `SELECT id, user_id, chat_id, source, source_original, source_type, last_message_id, folder_override
+      `SELECT id, user_id, chat_id, source, source_original, source_type, last_message_id, folder_override,
+                target_mode, target_provider, target_account_id, next_scan_at
          FROM telegram_channel_subscriptions
          WHERE enabled = true
+           AND (next_scan_at IS NULL OR next_scan_at <= NOW())
          ORDER BY updated_at ASC`
     );
     for (const row of result.rows) {
@@ -9940,14 +10457,26 @@ async function runSubscriptionScan(botClient) {
         const latestMessageId = await getLatestMessageId(userClient2, row.source);
         const lastMessageId = Number(row.last_message_id || 0);
         await query(`UPDATE telegram_channel_subscriptions
-                         SET last_scan_at = NOW(), last_error = NULL,
+                         SET last_scan_at = NOW(), next_scan_at = NOW() + ($4::int * INTERVAL '1 millisecond'), last_error = NULL,
                              last_result = jsonb_build_object('status', CASE WHEN $2::int > $3::int THEN 'updates_found' ELSE 'no_updates' END,
                                                               'latestMessageId', $2::int, 'previousMessageId', $3::int)
-                         WHERE id = $1`, [row.id, latestMessageId || 0, lastMessageId]);
+                         WHERE id = $1`, [row.id, latestMessageId || 0, lastMessageId, SUBSCRIPTION_INTERVAL_MS]);
         if (!latestMessageId || latestMessageId <= lastMessageId) continue;
         const count = Math.min(SUBSCRIPTION_SCAN_LIMIT, latestMessageId - lastMessageId);
         const ids = Array.from({ length: count }, (_, index) => lastMessageId + index + 1);
-        const jobId = await createJob(Number(row.user_id), row.chat_id?.toString(), "subscription_sync", row.source, { subscriptionId: String(row.id), fromId: lastMessageId + 1, toId: latestMessageId });
+        const subscriptionTarget = resolveSubscriptionTarget(
+          row,
+          () => storageManager.getActiveTarget(),
+          (provider, accountId) => storageManager.getTarget(provider, accountId)
+        );
+        const jobId = await createJob({
+          userId: Number(row.user_id),
+          chatId: row.chat_id?.toString(),
+          kind: "subscription_sync",
+          source: row.source,
+          target: subscriptionTarget,
+          params: { subscriptionId: String(row.id), fromId: lastMessageId + 1, toId: latestMessageId, targetMode: row.target_mode || "follow_global" }
+        });
         const candidateMessages = await expandMessagesWithMediaGroups(userClient2, row.source, (await userClient2.getMessages(row.source, { ids })).filter(Boolean));
         await persistDownloadMessages(jobId, row.source, candidateMessages, row.folder_override || null);
         await updateJob(jobId, { status: "running", started_at: /* @__PURE__ */ new Date(), total_count: ids.length });
@@ -9993,7 +10522,12 @@ async function runSubscriptionScan(botClient) {
                              last_result = jsonb_build_object('status', $3::text, 'found', $4::int, 'skipped', $5::int, 'failed', $6::int)
                          WHERE id = $1`, [row.id, downloadResult.failed > 0 ? `${downloadResult.failed} \u4E2A\u6587\u4EF6\u4E0B\u8F7D\u5931\u8D25` : null, downloadResult.failed > 0 ? "partial_failure" : "success", downloadResult.found, downloadResult.skipped, downloadResult.failed]);
         if (downloadResult.found > 0) {
-          await botClient.sendMessage(targetChat, { message: `\u2705 \u8BA2\u9605 ${row.source} \u5DF2\u540C\u6B65 ${downloadResult.found} \u4E2A\u65B0\u6587\u4EF6\uFF0C\u8DF3\u8FC7 ${downloadResult.skipped} \u6761${downloadResult.failed ? `\uFF0C\u5931\u8D25 ${downloadResult.failed} \u6761` : ""}${safeAdvanceId < latestMessageId ? "\u3002\u672C\u8F6E\u8FBE\u5230\u626B\u63CF\u4E0A\u9650\u6216\u5B58\u5728\u5931\u8D25\u9879\uFF0C\u5269\u4F59\u5C06\u5728\u540E\u7EED\u7EE7\u7EED\u5904\u7406\u3002" : "\u3002"}` }).catch(() => void 0);
+          const notificationMessage = `\u2705 \u8BA2\u9605 ${row.source} \u5DF2\u540C\u6B65 ${downloadResult.found} \u4E2A\u65B0\u6587\u4EF6\uFF0C\u8DF3\u8FC7 ${downloadResult.skipped} \u6761${downloadResult.failed ? `\uFF0C\u5931\u8D25 ${downloadResult.failed} \u6761` : ""}${safeAdvanceId < latestMessageId ? "\u3002\u672C\u8F6E\u8FBE\u5230\u626B\u63CF\u4E0A\u9650\u6216\u5B58\u5728\u5931\u8D25\u9879\uFF0C\u5269\u4F59\u5C06\u5728\u540E\u7EED\u7EE7\u7EED\u5904\u7406\u3002" : "\u3002"}`;
+          await enqueueTelegramNotification({ userId: Number(row.user_id), chatId: String(targetChat), kind: "subscription", message: notificationMessage }, {
+            send: async (chatId, message) => {
+              await botClient.sendMessage(chatId, { message });
+            }
+          }).catch(() => void 0);
         }
       } catch (error) {
         console.error("\u{1F916} Telegram \u8BA2\u9605\u540C\u6B65\u5931\u8D25:", error);
@@ -10007,11 +10541,14 @@ async function runSubscriptionScan(botClient) {
           const reason = subscriptionDisabledReason(error);
           await pauseTelegramSubscriptionForError(row.id, reason).catch((updateError) => console.error("\u{1F916} \u6682\u505C\u4E0D\u53EF\u8BBF\u95EE\u7684 Telegram \u8BA2\u9605\u5931\u8D25:", updateError));
           const targetChat = row.chat_id || row.user_id;
-          await botClient.sendMessage(targetChat, {
-            message: `\u26A0\uFE0F \u5DF2\u6682\u505C\u8BA2\u9605 ${row.source_original || row.source}
+          const pausedMessage = `\u26A0\uFE0F \u5DF2\u6682\u505C\u8BA2\u9605 ${row.source_original || row.source}
 ${reason}
 
-\u4F60\u53EF\u4EE5\u5728 /tg_subs \u6216 /tg_sub \u8BA2\u9605\u5217\u8868\u4E2D\u67E5\u770B\u63D0\u9192\uFF1B\u786E\u8BA4\u8D26\u53F7\u53EF\u8BBF\u95EE\u540E\u91CD\u65B0\u6DFB\u52A0\u8BA2\u9605\u5373\u53EF\u3002`
+\u4F60\u53EF\u4EE5\u5728 /tg_subs \u6216 /tg_sub \u8BA2\u9605\u5217\u8868\u4E2D\u67E5\u770B\u63D0\u9192\uFF1B\u786E\u8BA4\u8D26\u53F7\u53EF\u8BBF\u95EE\u540E\u91CD\u65B0\u6DFB\u52A0\u8BA2\u9605\u5373\u53EF\u3002`;
+          await enqueueTelegramNotification({ userId: Number(row.user_id), chatId: String(targetChat), kind: "failure", message: pausedMessage }, {
+            send: async (chatId, message) => {
+              await botClient.sendMessage(chatId, { message });
+            }
           }).catch(() => void 0);
         }
       }
@@ -10169,7 +10706,7 @@ async function recoverInterruptedTelegramJobs(botClient) {
     const lockResult = await client2.query(`SELECT pg_try_advisory_lock(hashtext('tg-vault:telegram-job-recovery')) AS locked`);
     lockHeld = Boolean(lockResult.rows[0]?.locked);
     if (!lockHeld) return;
-    const reconciliationLease = crypto12.randomUUID();
+    const reconciliationLease = crypto13.randomUUID();
     const pendingWrites = await claimTelegramWriteReconciliations(pool, reconciliationLease, 100);
     for (const pendingWrite of pendingWrites) {
       const target = storageManager.getTarget(pendingWrite.provider, pendingWrite.accountId);
@@ -10255,6 +10792,9 @@ function startTelegramSubscriptionWorker(botClient) {
   runSubscriptionScan(botClient).catch((error) => console.error("\u{1F916} Telegram \u8BA2\u9605\u626B\u63CF\u5F02\u5E38:", error));
   console.log(`\u{1F916} Telegram \u9891\u9053\u8BA2\u9605\u626B\u63CF\u5DF2\u542F\u52A8\uFF0C\u95F4\u9694 ${Math.round(SUBSCRIPTION_INTERVAL_MS / 1e3)} \u79D2`);
 }
+
+// src/services/telegramCommands.ts
+init_settings();
 
 // src/services/orphanCleanup.ts
 init_db();
@@ -10513,6 +11053,100 @@ function telegramChatKeyFromPeerParts(peer, fallbackUserId) {
   return numericPeerValue(fallbackUserId);
 }
 
+// src/services/unifiedTaskMapper.ts
+function safeNumber(value) {
+  const parsed = Number(value ?? 0);
+  return Number.isFinite(parsed) ? Math.max(0, parsed) : 0;
+}
+function parseTaskOptions(value) {
+  if (value && typeof value === "object" && !Array.isArray(value)) return value;
+  if (typeof value !== "string") return {};
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+function channelStatus(status) {
+  if (status === "queued") return "pending";
+  if (status === "cooling") return "waiting";
+  if (status === "completed_with_errors") return "failed";
+  return status;
+}
+function telegramChannelJobTaskState(row) {
+  const status = channelStatus(String(row?.status || "pending"));
+  const scanStatus = String(row?.scan_status || "pending");
+  const stage = status === "completed" ? "completed" : status === "failed" ? "failed" : status === "cancelled" || scanStatus === "cancelled" ? "cancelled" : scanStatus === "scanning" ? "scanning" : scanStatus === "done" ? "downloading" : "waiting";
+  return { status, stage };
+}
+function mapTelegramChannelJob(row, accountNames) {
+  const params = parseTaskOptions(row?.params);
+  const state = telegramChannelJobTaskState(row);
+  const total = Math.max(safeNumber(row?.total_count), safeNumber(row?.item_count));
+  const completed = safeNumber(row?.completed_items ?? row?.success_count);
+  const failed = safeNumber(row?.failed_items ?? row?.failed_count);
+  const skipped = safeNumber(row?.skipped_count_items ?? row?.skipped_count);
+  const accountId = params.storageAccountId == null ? null : String(params.storageAccountId);
+  const provider = params.storageProvider == null ? null : String(params.storageProvider);
+  return {
+    id: String(row?.id),
+    sourceType: "telegram_channel",
+    kind: String(row?.kind),
+    title: row?.source || "Telegram \u9891\u9053\u4EFB\u52A1",
+    status: state.status,
+    stage: state.stage,
+    progress: total > 0 ? Math.min(100, (completed + failed + skipped) / total * 100) : 0,
+    ownerUserId: row?.user_id == null ? null : safeNumber(row.user_id),
+    chatId: row?.chat_id == null ? null : String(row.chat_id),
+    source: row?.source == null ? null : String(row.source),
+    target: {
+      provider,
+      accountId,
+      accountName: accountId ? accountNames.get(accountId) || null : provider === "local" ? "\u670D\u52A1\u5668\u672C\u5730\u76EE\u5F55" : null,
+      folder: params.folderOverride == null ? null : String(params.folderOverride)
+    },
+    counts: { total, completed, failed },
+    bytes: { total: safeNumber(row?.total_bytes), transferred: 0 },
+    detail: { scanStatus: row?.scan_status, downloadStatus: row?.download_status, skipped },
+    error: row?.error == null ? null : String(row.error),
+    retryable: ["failed", "completed_with_errors"].includes(String(row?.status)),
+    cancellable: ["queued", "running", "paused", "cooling"].includes(String(row?.status)),
+    createdAt: row?.created_at,
+    updatedAt: row?.updated_at,
+    finishedAt: row?.finished_at || null
+  };
+}
+function mapTransferTask(task, accountNames) {
+  return {
+    id: task.id,
+    sourceType: task.sourceType,
+    kind: task.kind,
+    title: task.title,
+    status: task.status,
+    stage: task.stage,
+    progress: task.progress,
+    ownerUserId: task.ownerUserId,
+    chatId: task.chatId,
+    source: task.source,
+    target: {
+      provider: task.targetProvider,
+      accountId: task.targetAccountId,
+      accountName: task.targetAccountId ? accountNames.get(task.targetAccountId) || null : task.targetProvider === "local" ? "\u670D\u52A1\u5668\u672C\u5730\u76EE\u5F55" : null,
+      folder: task.targetFolder
+    },
+    counts: { total: task.totalItems, completed: task.completedItems, failed: task.failedItems },
+    bytes: { total: task.totalBytes, transferred: task.transferredBytes },
+    detail: task.payload,
+    error: task.error,
+    retryable: task.retryable,
+    cancellable: ["pending", "running", "paused"].includes(task.status),
+    createdAt: task.createdAt,
+    updatedAt: task.updatedAt,
+    finishedAt: task.finishedAt
+  };
+}
+
 // src/services/telegramTaskCenter.ts
 var PAGE_SIZE = 6;
 var VALID_ID = /^[A-Za-z0-9-]{1,24}$/;
@@ -10527,7 +11161,7 @@ var ACTION_CODES = {
 var CODE_ACTIONS = Object.fromEntries(Object.entries(ACTION_CODES).map(([action, code]) => [code, action]));
 var SOURCE_CODES = { memory: "m", channel: "c", ytdlp: "y" };
 var CODE_SOURCES = { m: "memory", c: "channel", y: "ytdlp" };
-function safeNumber(value) {
+function safeNumber2(value) {
   const parsed = Number(value || 0);
   return Number.isFinite(parsed) ? Math.max(0, parsed) : 0;
 }
@@ -10803,12 +11437,12 @@ function channelTaskCenterItem(row) {
   const rawId = String(row?.id || "").replace(/[^A-Za-z0-9-]/g, "");
   if (!rawId) return null;
   const id = rawId.slice(0, 12);
-  const total = Math.max(safeNumber(row.total_count), safeNumber(row.item_count));
-  const active = safeNumber(row.downloading_count);
-  const pending = safeNumber(row.pending_count);
-  const completed = safeNumber(row.success_count);
-  const failed = safeNumber(row.failed_count);
-  const skipped = safeNumber(row.skipped_count_items ?? row.skipped_count);
+  const total = Math.max(safeNumber2(row.total_count), safeNumber2(row.item_count));
+  const active = safeNumber2(row.downloading_count);
+  const pending = safeNumber2(row.pending_count);
+  const completed = safeNumber2(row.success_count);
+  const failed = safeNumber2(row.failed_count);
+  const skipped = safeNumber2(row.skipped_count_items ?? row.skipped_count);
   const cooldownUntil = row.cooldown_until ? new Date(row.cooldown_until) : void 0;
   const inCooldown = Boolean(row.cooldown_until && safeTime(row.cooldown_until, 0) > Date.now()) || row.status === "cooling" && (!row.cooldown_until || safeTime(row.cooldown_until, 0) > Date.now());
   const protection = inCooldown ? {
@@ -10817,7 +11451,8 @@ function channelTaskCenterItem(row) {
     autoResume: true,
     retryAt: cooldownUntil && !Number.isNaN(cooldownUntil.getTime()) ? cooldownUntil.toLocaleString("zh-CN", { hour12: false }) : void 0
   } : void 0;
-  const state = inCooldown ? "cooling" : row.status === "paused" ? active > 0 ? "pausing" : "paused" : row.status === "queued" || row.status === "pending" ? "waiting" : active > 0 || row.scan_status === "scanning" || row.is_actively_running ? "running" : "waiting";
+  const channelState = telegramChannelJobTaskState(row);
+  const state = inCooldown ? "cooling" : row.status === "paused" ? active > 0 ? "pausing" : "paused" : channelState.status === "cancelled" ? "failed" : channelState.status === "completed" ? "waiting" : channelState.status === "failed" ? "failed" : row.status === "queued" || row.status === "pending" ? "waiting" : active > 0 || channelState.stage === "scanning" || channelState.stage === "downloading" || row.is_actively_running ? "running" : "waiting";
   const optionsSource = row.options ?? row.params ?? {};
   let options;
   if (typeof optionsSource === "string") {
@@ -10833,7 +11468,7 @@ function channelTaskCenterItem(row) {
   const qualifier = options.tag || (options.startDate && options.endDate ? `${options.startDate} \u2192 ${options.endDate}` : "");
   const source = String(row.source || "\u9891\u9053\u4EFB\u52A1");
   const chatId = row.chat_id !== void 0 && row.chat_id !== null ? String(row.chat_id) : void 0;
-  const userId = row.user_id !== void 0 && row.user_id !== null ? safeNumber(row.user_id) : void 0;
+  const userId = row.user_id !== void 0 && row.user_id !== null ? safeNumber2(row.user_id) : void 0;
   return {
     sourceType: "channel",
     id,
@@ -10861,11 +11496,33 @@ function channelTaskCenterItem(row) {
 // src/services/ytDlpDownload.ts
 init_db();
 init_storage();
-import crypto13 from "node:crypto";
+import crypto14 from "node:crypto";
 import fs9 from "node:fs";
 import os from "node:os";
 import path14 from "node:path";
 import { spawn } from "node:child_process";
+
+// src/services/ytDlpPlaylistSelection.ts
+function validateYtDlpPlaylistSelection(input, budget = {}) {
+  if (!input.enabled) throw new Error("\u64AD\u653E\u5217\u8868\u5FC5\u987B\u663E\u5F0F\u542F\u7528");
+  for (const [name, value] of Object.entries({ start: input.start, end: input.end, maxItems: input.maxItems })) {
+    if (!Number.isSafeInteger(value) || value < 1) throw new Error(`${name} \u5FC5\u987B\u662F\u6B63\u6574\u6570`);
+  }
+  if (input.end < input.start) throw new Error("\u64AD\u653E\u5217\u8868\u8303\u56F4\u65E0\u6548");
+  const count = input.end - input.start + 1;
+  const configuredMax = Number.parseInt(process.env.YTDLP_PLAYLIST_MAX_ITEMS || "25", 10) || 25;
+  const hardMaxItems = Math.max(1, budget.hardMaxItems ?? configuredMax);
+  if (count > input.maxItems || input.maxItems > hardMaxItems) throw new Error(`\u64AD\u653E\u5217\u8868\u8D85\u8FC7\u6700\u5927\u6761\u76EE\u4E0A\u9650 ${hardMaxItems}`);
+  const estimatedBytes = count * Math.max(0, budget.estimatedItemBytes ?? 0);
+  if (budget.maxBudgetBytes !== void 0 && estimatedBytes > budget.maxBudgetBytes) throw new Error("\u64AD\u653E\u5217\u8868\u9884\u8BA1\u5927\u5C0F\u8D85\u8FC7\u4E0B\u8F7D\u9884\u7B97");
+  return { ...input, count };
+}
+function buildYtDlpPlaylistArgs(url, input) {
+  const selection = validateYtDlpPlaylistSelection(input);
+  return ["--yes-playlist", "--playlist-start", String(selection.start), "--playlist-end", String(selection.end), "--max-downloads", String(selection.maxItems), "--", url];
+}
+
+// src/services/ytDlpDownload.ts
 init_storageCooldown();
 init_storageAccountLifecycle();
 var YTDLP_BIN = process.env.YTDLP_BIN || "yt-dlp";
@@ -10909,10 +11566,11 @@ function parseYtDlpProgress(line) {
   const eta = line.match(/\bETA\s+([^\s]+)/i)?.[1];
   return { percent: Math.max(0, Math.min(100, Number(match[1]))), speed, eta };
 }
-async function runYtDlpDownload(url, taskDir, signal, onProgress) {
+async function runYtDlpDownload(url, taskDir, signal, onProgress, format = "best", playlist) {
   ensureDir(taskDir);
   const outputTemplate = path14.join(taskDir, "%(title).200s-%(id)s.%(ext)s");
-  const args = ["--no-playlist", "--newline", "--merge-output-format", "mp4", "-o", outputTemplate, "--", url];
+  const formatArgs = format === "audio" ? ["-x", "--audio-format", "mp3"] : ["--merge-output-format", "mp4"];
+  const args = playlist ? [...buildYtDlpPlaylistArgs(url, playlist).slice(0, -2), "--newline", ...formatArgs, "-o", outputTemplate, "--", url] : ["--no-playlist", "--newline", ...formatArgs, "-o", outputTemplate, "--", url];
   await new Promise((resolve, reject) => {
     const binLower = YTDLP_BIN.toLowerCase();
     const needsShell = os.platform() === "win32" && (binLower.endsWith(".cmd") || binLower.endsWith(".bat"));
@@ -11002,7 +11660,7 @@ async function uploadDownloadedFile(task, execution, localFilePath, originalFile
       thumbnailPath = null;
     }
   }
-  const operationId = crypto13.randomUUID();
+  const operationId = crypto14.randomUUID();
   await beginYtDlpWrite(pool, {
     operationId,
     taskId: task.id,
@@ -11085,10 +11743,10 @@ function classifyYtDlpError(error) {
 }
 async function notifyTask(task, message) {
   if (!task.chatId || !taskNotifier) return;
-  await taskNotifier(task.chatId, message).catch(() => void 0);
+  await taskNotifier(task, message).catch(() => void 0);
 }
 async function executeYtDlpTask(id) {
-  const leaseToken = crypto13.randomUUID();
+  const leaseToken = crypto14.randomUUID();
   const execution = await claimYtDlpExecution(pool, id, leaseToken);
   if (!execution) return;
   const task = await getTransferTask("ytdlp", id);
@@ -11119,7 +11777,7 @@ async function executeYtDlpTask(id) {
         console.error(`[yt-dlp] progress persistence failed: ${id}`, error);
         controller.abort("progress_persistence_failed");
       });
-    });
+    }, String(task.payload.format || "best") === "audio" ? "audio" : "best", task.payload.playlist);
     const primary = selectPrimaryOutputFile(taskDir);
     if (!primary) throw new Error("\u4E0B\u8F7D\u5B8C\u6210\u4F46\u672A\u627E\u5230\u53EF\u4E0A\u4F20\u7684\u8F93\u51FA\u6587\u4EF6");
     const advancing = await updateYtDlpExecutionProgress(pool, id, execution.generation, execution.leaseToken, {
@@ -11187,8 +11845,8 @@ async function executeYtDlpTask(id) {
       ].join("\n"));
     }
   } catch (error) {
-    const current2 = await getTransferTask("ytdlp", id);
-    const cancelled = controller.signal.aborted || current2?.status === "cancelled" || current2?.status === "pending";
+    const current3 = await getTransferTask("ytdlp", id);
+    const cancelled = controller.signal.aborted || current3?.status === "cancelled" || current3?.status === "pending";
     if (!cancelled) {
       let message = classifyYtDlpError(error);
       if (isStorageQuotaCooldownError(error)) {
@@ -11221,8 +11879,8 @@ async function executeYtDlpTask(id) {
     clearInterval(heartbeat);
     activeControllers.delete(id);
     await safeRmDir(taskDir);
-    const current2 = await getTransferTask("ytdlp", id);
-    if (current2?.status === "pending") ytDlpQueue.enqueue(id);
+    const current3 = await getTransferTask("ytdlp", id);
+    if (current3?.status === "pending") ytDlpQueue.enqueue(id);
   }
 }
 var PersistentYtDlpQueue = class {
@@ -11291,9 +11949,9 @@ async function retryYtDlpTask(id) {
   ytDlpQueue.enqueue(id);
   return getTransferTask("ytdlp", id);
 }
-async function handleYtDlpCommand(message, url) {
-  const id = `yd-${crypto13.randomBytes(8).toString("hex")}`;
-  const target = storageManager.getActiveTarget();
+async function handleYtDlpCommand(message, url, explicitTarget, options = {}) {
+  const id = `yd-${crypto14.randomBytes(8).toString("hex")}`;
+  const target = explicitTarget || storageManager.getActiveTarget();
   await assertStorageTargetWritable(target);
   const client2 = target.accountId ? await pool.connect() : null;
   let admissionLease = null;
@@ -11319,9 +11977,15 @@ async function handleYtDlpCommand(message, url) {
       source: url,
       targetProvider: target.provider.name,
       targetAccountId: target.accountId,
-      targetFolder: "ytdlp",
+      targetFolder: options.folder || "ytdlp",
       totalItems: 1,
-      payload: { url, targetAccountName: account?.name || (target.provider.name === "local" ? "\u670D\u52A1\u5668\u672C\u5730\u76EE\u5F55" : null) },
+      payload: {
+        url,
+        format: options.format || "best",
+        metadata: options.metadata || {},
+        playlist: options.playlist,
+        targetAccountName: account?.name || (target.provider.name === "local" ? "\u670D\u52A1\u5668\u672C\u5730\u76EE\u5F55" : null)
+      },
       retryable: false
     });
     ytDlpQueue.enqueue(task.id);
@@ -11345,7 +12009,7 @@ async function handleYtDlpCommand(message, url) {
 }
 
 // src/services/destructiveConfirmation.ts
-import crypto14 from "crypto";
+import crypto15 from "crypto";
 var DestructiveConfirmationStore = class {
   confirmations = /* @__PURE__ */ new Map();
   ttlMs;
@@ -11354,7 +12018,7 @@ var DestructiveConfirmationStore = class {
   constructor(options = {}) {
     this.ttlMs = options.ttlMs ?? 5 * 60 * 1e3;
     this.now = options.now ?? (() => Date.now());
-    this.tokenFactory = options.tokenFactory ?? (() => crypto14.randomBytes(18).toString("base64url"));
+    this.tokenFactory = options.tokenFactory ?? (() => crypto15.randomBytes(18).toString("base64url"));
   }
   issue(binding) {
     const token = this.tokenFactory();
@@ -11388,6 +12052,424 @@ var DestructiveConfirmationStore = class {
   }
 };
 
+// src/services/telegramFileBrowser.ts
+init_db();
+
+// src/services/fileQuery.ts
+var FILE_TYPES = /* @__PURE__ */ new Set(["image", "video", "audio", "document", "other", "media"]);
+var SORTS = /* @__PURE__ */ new Set(["date", "name"]);
+var DIRECTIONS = /* @__PURE__ */ new Set(["asc", "desc"]);
+var UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+function single(value) {
+  if (Array.isArray(value)) throw new Error("query parameter must be singular");
+  return typeof value === "string" ? value : void 0;
+}
+function normalizeDateBound(value, field) {
+  const raw = single(value)?.trim();
+  if (!raw) return null;
+  const dateOnly = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (dateOnly) {
+    const [, year, month, day] = dateOnly;
+    const timestamp2 = Date.UTC(Number(year), Number(month) - 1, Number(day), field === "before" ? 23 : 0, field === "before" ? 59 : 0, field === "before" ? 59 : 0, field === "before" ? 999 : 0);
+    const parsed = new Date(timestamp2);
+    if (parsed.getUTCFullYear() !== Number(year) || parsed.getUTCMonth() !== Number(month) - 1 || parsed.getUTCDate() !== Number(day)) throw new Error(`invalid ${field}`);
+    return parsed.toISOString();
+  }
+  const timestamp = Date.parse(raw);
+  if (!Number.isFinite(timestamp)) throw new Error(`invalid ${field}`);
+  return new Date(timestamp).toISOString();
+}
+function normalizeFileQuery(input) {
+  const rawQ = single(input.q)?.trim() || null;
+  if (rawQ && rawQ.length > 200) throw new Error("q is too long");
+  const rawType = single(input.type)?.trim() || null;
+  if (rawType && !FILE_TYPES.has(rawType)) throw new Error("invalid type");
+  const rawFavorite = single(input.favorite);
+  let favorite = null;
+  if (rawFavorite !== void 0 && rawFavorite !== "") {
+    if (rawFavorite !== "true" && rawFavorite !== "false") throw new Error("invalid favorite");
+    favorite = rawFavorite === "true";
+  }
+  const rawSort = single(input.sort) || "date";
+  if (!SORTS.has(rawSort)) throw new Error("invalid sort");
+  const rawDirection = single(input.direction) || "desc";
+  if (!DIRECTIONS.has(rawDirection)) throw new Error("invalid direction");
+  const rawFolder = single(input.folder);
+  const folder = rawFolder === void 0 ? void 0 : rawFolder.trim() || null;
+  if (folder && folder.length > 500) throw new Error("folder is too long");
+  const parsedLimit = Number.parseInt(single(input.limit) || "200", 10);
+  const limit = Math.min(500, Math.max(1, Number.isFinite(parsedLimit) ? parsedLimit : 200));
+  return {
+    q: rawQ,
+    type: rawType,
+    folder,
+    favorite,
+    after: normalizeDateBound(input.after, "after"),
+    before: normalizeDateBound(input.before, "before"),
+    sort: rawSort,
+    direction: rawDirection,
+    limit,
+    cursor: single(input.cursor) || null
+  };
+}
+function encodeFileQueryCursor(cursor) {
+  return Buffer.from(JSON.stringify(cursor), "utf8").toString("base64url");
+}
+function decodeFileQueryCursor(encoded, sort, direction) {
+  if (!encoded) return null;
+  try {
+    const parsed = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8"));
+    if (parsed.sort !== sort || parsed.direction !== direction || typeof parsed.value !== "string" || !UUID_PATTERN.test(parsed.id || "")) {
+      return null;
+    }
+    if (sort === "date" && Number.isNaN(Date.parse(parsed.value))) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+function escapeLike(value) {
+  return value.replace(/[\\%_]/g, (match) => `\\${match}`);
+}
+function addScope(scope, where, params, alias = "") {
+  const prefix = alias ? `${alias}.` : "";
+  if (scope.kind === "local") {
+    params.push("local");
+    where.push(`${prefix}source = $${params.length}`);
+  } else {
+    params.push(scope.accountId);
+    where.push(`${prefix}storage_account_id = $${params.length}`);
+  }
+}
+function addFilters(options, where, params, alias = "", includeFolder = true) {
+  const prefix = alias ? `${alias}.` : "";
+  if (options.q) {
+    params.push(`%${escapeLike(options.q)}%`);
+    where.push(`(${prefix}name ILIKE $${params.length} ESCAPE '\\' OR ${prefix}folder ILIKE $${params.length} ESCAPE '\\')`);
+  }
+  if (options.type === "media") {
+    where.push(`${prefix}type IN ('image', 'video', 'audio')`);
+  } else if (options.type === "document") {
+    where.push(`${prefix}type NOT IN ('image', 'video', 'audio')`);
+  } else if (options.type) {
+    params.push(options.type);
+    where.push(`${prefix}type = $${params.length}`);
+  }
+  if (includeFolder && options.folder !== void 0) {
+    if (options.folder === null) {
+      where.push(`${prefix}folder IS NULL`);
+    } else {
+      params.push(options.folder);
+      where.push(`${prefix}folder = $${params.length}`);
+    }
+  }
+  if (options.favorite !== null) {
+    params.push(options.favorite);
+    where.push(`${prefix}is_favorite = $${params.length}`);
+  }
+  if (options.after) {
+    params.push(options.after);
+    where.push(`${prefix}created_at >= $${params.length}::timestamptz`);
+  }
+  if (options.before) {
+    params.push(options.before);
+    where.push(`${prefix}created_at <= $${params.length}::timestamptz`);
+  }
+}
+function buildFilePageQuery(scope, options) {
+  const where = [];
+  const params = [];
+  addScope(scope, where, params);
+  addFilters(options, where, params);
+  const cursor = decodeFileQueryCursor(options.cursor, options.sort, options.direction);
+  const comparator = options.direction === "asc" ? ">" : "<";
+  const direction = options.direction.toUpperCase();
+  if (cursor) {
+    if (options.sort === "name") {
+      params.push(cursor.value.toLocaleLowerCase(), cursor.id);
+      where.push(`(LOWER(name), id) ${comparator} ($${params.length - 1}, $${params.length}::uuid)`);
+    } else {
+      params.push(cursor.value, cursor.id);
+      where.push(`(created_at, id) ${comparator} ($${params.length - 1}::timestamptz, $${params.length}::uuid)`);
+    }
+  }
+  params.push(options.limit + 1);
+  const sortColumn = options.sort === "name" ? "LOWER(name)" : "created_at";
+  return {
+    text: `SELECT
+    id, name, stored_name, type, mime_type, size, thumbnail_path, preview_path,
+    width, height, source, folder, storage_account_id, is_favorite, created_at, updated_at
+FROM files
+WHERE ${where.join(" AND ")}
+ORDER BY ${sortColumn} ${direction}, id ${direction}
+LIMIT $${params.length}`,
+    params
+  };
+}
+function buildFolderAggregationQuery(scope, options) {
+  const where = ["folder IS NOT NULL"];
+  const params = [];
+  addScope(scope, where, params);
+  addFilters({ ...options, folder: void 0 }, where, params, "", false);
+  const direction = options.direction.toUpperCase();
+  const order = options.sort === "name" ? `folder ${direction}` : `latest_at ${direction}, folder ${direction}`;
+  return {
+    text: `WITH filtered AS (
+    SELECT * FROM files WHERE ${where.join(" AND ")}
+), grouped AS (
+    SELECT
+        folder,
+        COUNT(*) FILTER (WHERE name <> '.folder')::int AS file_count,
+        COALESCE(SUM(size) FILTER (WHERE name <> '.folder'), 0)::bigint AS total_size_bytes,
+        MAX(created_at) AS latest_at,
+        BOOL_AND(is_favorite)::boolean AS is_favorite
+    FROM filtered
+    GROUP BY folder
+)
+SELECT grouped.*, cover.id AS cover_id, cover.name AS cover_name, cover.type AS cover_type,
+       cover.mime_type AS cover_mime_type, cover.thumbnail_path AS cover_thumbnail_path,
+       cover.preview_path AS cover_preview_path, cover.created_at AS cover_created_at
+FROM grouped
+LEFT JOIN LATERAL (
+    SELECT id, name, type, mime_type, thumbnail_path, preview_path, created_at
+    FROM filtered candidate
+    WHERE candidate.folder = grouped.folder AND candidate.name <> '.folder'
+    ORDER BY candidate.created_at DESC, candidate.id DESC
+    LIMIT 1
+) cover ON TRUE
+ORDER BY ${order}`,
+    params
+  };
+}
+function cursorForFile(file, sort, direction) {
+  const value = sort === "name" ? String(file.name || "").toLocaleLowerCase() : new Date(String(file.created_at)).toISOString();
+  return encodeFileQueryCursor({ sort, direction, value, id: String(file.id) });
+}
+
+// src/services/telegramFileBrowser.ts
+function encodeTelegramFileCallback(action, fileId) {
+  const value = `fb_${action}_${fileId}`;
+  if (Buffer.byteLength(value, "utf8") > 64) throw new Error("Telegram callback data exceeds 64 bytes");
+  return value;
+}
+function parseTelegramFileCallback(data) {
+  const match = data.match(/^fb_(detail|copy|favorite|link|move|rename|delete)_([0-9a-f-]{36})$/i);
+  return match ? { action: match[1].toLowerCase(), fileId: match[2].toLowerCase() } : null;
+}
+function buildTelegramFileActionRows(file) {
+  const id = String(file.id);
+  const rows = [
+    [{ text: "\u8BE6\u60C5", data: encodeTelegramFileCallback("detail", id) }, { text: "\u590D\u5236 ID", data: encodeTelegramFileCallback("copy", id) }],
+    [{ text: file.is_favorite ? "\u53D6\u6D88\u6536\u85CF" : "\u6536\u85CF", data: encodeTelegramFileCallback("favorite", id) }],
+    [{ text: "\u7B7E\u540D\u94FE\u63A5", data: encodeTelegramFileCallback("link", id) }],
+    [{ text: "\u79FB\u52A8", data: encodeTelegramFileCallback("move", id) }, { text: "\u91CD\u547D\u540D", data: encodeTelegramFileCallback("rename", id) }],
+    [{ text: "\u5220\u9664\u2026", data: encodeTelegramFileCallback("delete", id) }]
+  ];
+  return rows;
+}
+function buildTelegramFileDetail(file) {
+  return [
+    `\u{1F4C4} **${file.name}**`,
+    `\u{1F194} ${file.id}`,
+    `\u{1F4E6} ${Number(file.size || 0)} bytes \xB7 ${file.type || "other"}`,
+    `\u{1F4CD} ${file.source || "local"}`,
+    `\u{1F4C1} ${file.folder || "\u6839\u76EE\u5F55"}`,
+    `\u{1F552} ${file.created_at ? new Date(file.created_at).toLocaleString("zh-CN", { hour12: false }) : "\u672A\u77E5"}`
+  ].join("\n");
+}
+async function resolveTelegramFileScope() {
+  const { storageManager: storageManager2 } = await Promise.resolve().then(() => (init_storage(), storage_exports));
+  const target = storageManager2.getActiveTarget();
+  return target.provider.name === "local" ? { kind: "local" } : { kind: "account", accountId: target.accountId || "" };
+}
+async function queryTelegramFiles(rawOptions, dependencies = {}) {
+  const options = normalizeFileQuery({ ...rawOptions, limit: String(rawOptions.limit || 8) });
+  const scope = dependencies.scope || await resolveTelegramFileScope();
+  const built = buildFilePageQuery(scope, options);
+  const result = await (dependencies.runQuery || query)(built.text, built.params);
+  const files = result.rows.slice(0, options.limit);
+  return {
+    files,
+    hasMore: result.rows.length > options.limit,
+    nextCursor: result.rows.length > options.limit && files.length > 0 ? cursorForFile(files[files.length - 1], options.sort, options.direction) : null
+  };
+}
+function buildTelegramFileCard(file, index) {
+  const shortId = String(file.id || "").slice(0, 12);
+  const createdAt = file.created_at ? new Date(file.created_at).toLocaleString("zh-CN", { hour12: false }) : "\u672A\u77E5";
+  return [
+    `${index + 1}. ${file.is_favorite ? "\u2B50 " : ""}${file.name}`,
+    `   \u{1F194} ${shortId} \xB7 ${file.type || "other"} \xB7 ${Number(file.size || 0)} bytes`,
+    `   \u{1F4C1} ${file.folder || "\u6839\u76EE\u5F55"} \xB7 ${createdAt}`
+  ].join("\n");
+}
+function buildTelegramFileBrowserText(page, queryText) {
+  return [
+    `\u{1F50E} **\u6587\u4EF6\u641C\u7D22**\uFF1A${queryText || "\u6700\u8FD1\u6587\u4EF6"}`,
+    "",
+    ...page.files.length > 0 ? page.files.map(buildTelegramFileCard) : ["\u6CA1\u6709\u5339\u914D\u6587\u4EF6\u3002"],
+    "",
+    "\u70B9\u51FB\u6587\u4EF6\u53EF\u67E5\u770B\u8BE6\u60C5\u3001\u590D\u5236 ID\u3001\u6536\u85CF\u3001\u751F\u6210\u94FE\u63A5\u3001\u79FB\u52A8/\u91CD\u547D\u540D\u6216\u8FDB\u5165\u5220\u9664\u786E\u8BA4\u3002"
+  ].join("\n");
+}
+
+// src/services/telegramStatusPanel.ts
+function sanitizeTelegramStatusText(value) {
+  if (!value) return "\u65E0";
+  const text = String(value);
+  if (/(?:^|\s)(?:\/[^\s]+|[A-Za-z]:\\[^\s]+)/.test(text) || /(?:bearer|token|secret|password|api[_-]?key|access[_-]?key|refresh[_-]?token)[=: ]/i.test(text) || /AKIA[0-9A-Z-]+/i.test(text)) return "[\u5DF2\u8131\u654F]";
+  return text.length > 120 ? `${text.slice(0, 117)}\u2026` : text;
+}
+function percent(used, total) {
+  return total > 0 ? Math.max(0, Math.min(100, Math.round(used / total * 100))) : 0;
+}
+function buildTelegramStatusPanel(input) {
+  const used = Math.max(0, input.disk.totalBytes - input.disk.freeBytes);
+  return [
+    "\u{1FA7A} **TG Vault \u8BCA\u65AD\u72B6\u6001**",
+    `\u64CD\u4F5C ID\uFF1A${sanitizeTelegramStatusText(input.requestId)}`,
+    "",
+    `Bot\uFF1A${input.bot.status}${input.bot.degraded ? "\uFF08\u964D\u7EA7\uFF09" : ""} \xB7 \u91CD\u8FDE ${input.bot.reconnectCount || 0}`,
+    `\u8D26\u53F7\u4E0B\u8F7D\u5668\uFF1A${input.userClient.status}${input.userClient.username ? ` / @${sanitizeTelegramStatusText(input.userClient.username)}` : ""}`,
+    input.userClient.action ? `\u8D26\u53F7\u6062\u590D\uFF1A${sanitizeTelegramStatusText(input.userClient.action)}` : null,
+    "",
+    `Target\uFF1A${input.target.provider} / ${sanitizeTelegramStatusText(input.target.accountName)}`,
+    `Probe\uFF1A${input.target.probeStatus || "unknown"}`,
+    input.target.cooldownUntil ? `Cooldown\uFF1A${sanitizeTelegramStatusText(input.target.cooldownUntil)}` : "Cooldown\uFF1A\u65E0",
+    input.target.probeError ? `Probe \u9519\u8BEF\uFF1A${sanitizeTelegramStatusText(input.target.probeError)}` : null,
+    "",
+    `\u4E34\u65F6\u78C1\u76D8\uFF1A${input.disk.freeBytes}/${input.disk.totalBytes} bytes \u53EF\u7528 \xB7 \u5DF2\u7528 ${percent(used, input.disk.totalBytes)}%`,
+    `\u961F\u5217\uFF1A\u6D3B\u8DC3 ${input.queue.active} \xB7 \u7B49\u5F85 ${input.queue.pending} \xB7 \u5931\u8D25 ${input.queue.failed}${input.queue.paused ? " \xB7 \u5DF2\u6682\u505C" : ""}`,
+    `\u8BA2\u9605\uFF1A\u542F\u7528 ${input.subscriptions.enabled} \xB7 \u6700\u8FD1\u626B\u63CF ${sanitizeTelegramStatusText(input.subscriptions.lastScanAt || "\u65E0")}`,
+    input.subscriptions.lastError ? `\u8BA2\u9605\u9519\u8BEF\uFF1A${sanitizeTelegramStatusText(input.subscriptions.lastError)}` : null,
+    `\u5BF9\u8D26\uFF1A\u5F85\u5BF9\u8D26\uFF1A${input.reconciliation.pending} \xB7 \u9700\u4EBA\u5DE5\uFF1A${input.reconciliation.operatorRequired}`,
+    "",
+    input.bot.action ? `\u5EFA\u8BAE\uFF1A${sanitizeTelegramStatusText(input.bot.action)}` : "\u5EFA\u8BAE\uFF1A\u5982\u7EC4\u4EF6\u5F02\u5E38\uFF0C\u8BF7\u643A\u5E26\u64CD\u4F5C ID \u67E5\u770B\u7ED3\u6784\u5316\u65E5\u5FD7\u3002"
+  ].filter(Boolean).join("\n");
+}
+
+// src/services/telegramBotStatus.ts
+function requiredFromEnv() {
+  return /^(1|true|yes|on)$/i.test(process.env.TELEGRAM_REQUIRED || "false");
+}
+var current2 = {
+  status: "not_configured",
+  configured: false,
+  required: requiredFromEnv(),
+  degraded: false,
+  checkedAt: (/* @__PURE__ */ new Date()).toISOString(),
+  lastConnectedAt: null,
+  lastRecoveredAt: null,
+  lastError: null,
+  action: "\u914D\u7F6E TELEGRAM_BOT_TOKEN\u3001TELEGRAM_API_ID \u548C TELEGRAM_API_HASH",
+  reconnectCount: 0
+};
+function resetTelegramBotStatus(configured2, checkedAt = (/* @__PURE__ */ new Date()).toISOString()) {
+  current2 = {
+    status: configured2 ? "stopped" : "not_configured",
+    configured: configured2,
+    required: requiredFromEnv(),
+    degraded: false,
+    checkedAt,
+    lastConnectedAt: null,
+    lastRecoveredAt: null,
+    lastError: null,
+    action: configured2 ? "\u542F\u52A8 Telegram Bot" : "\u914D\u7F6E TELEGRAM_BOT_TOKEN\u3001TELEGRAM_API_ID \u548C TELEGRAM_API_HASH",
+    reconnectCount: 0
+  };
+}
+function getTelegramBotStatus() {
+  return { ...current2, required: requiredFromEnv() };
+}
+function markTelegramBotStarting(checkedAt = (/* @__PURE__ */ new Date()).toISOString()) {
+  current2 = {
+    ...current2,
+    configured: true,
+    required: requiredFromEnv(),
+    status: "starting",
+    degraded: false,
+    checkedAt,
+    lastError: null,
+    action: "\u7B49\u5F85 Telegram \u8FDE\u63A5\u5EFA\u7ACB"
+  };
+}
+function markTelegramBotReady(checkedAt = (/* @__PURE__ */ new Date()).toISOString()) {
+  const recovered = current2.status === "reconnecting" || current2.status === "auth_failed" || current2.status === "error";
+  current2 = {
+    ...current2,
+    configured: true,
+    required: requiredFromEnv(),
+    status: "ready",
+    degraded: false,
+    checkedAt,
+    lastConnectedAt: checkedAt,
+    lastRecoveredAt: recovered ? checkedAt : current2.lastRecoveredAt,
+    lastError: null,
+    action: null
+  };
+}
+function markTelegramBotError(status, message, action, checkedAt = (/* @__PURE__ */ new Date()).toISOString()) {
+  current2 = {
+    ...current2,
+    configured: true,
+    required: requiredFromEnv(),
+    status,
+    degraded: status !== "stopped",
+    checkedAt,
+    lastError: message,
+    action,
+    reconnectCount: status === "reconnecting" ? current2.reconnectCount + 1 : current2.reconnectCount
+  };
+}
+function classifyTelegramBotStartupError(error) {
+  const message = error instanceof Error ? error.message : String(error);
+  return /token|auth|unauthorized|forbidden|401|403/i.test(message) ? "auth_failed" : "error";
+}
+function telegramBotBlocksReadiness(status, required = requiredFromEnv()) {
+  if (!required) return false;
+  return status.status !== "ready";
+}
+
+// src/services/telegramCommands.ts
+import crypto16 from "crypto";
+
+// src/utils/folderPath.ts
+var INVALID_SEGMENT_CHARACTERS = /[\\:*?"<>|\x00-\x1f\x7f]/;
+var MAX_FOLDER_PATH_LENGTH = 255;
+function normalizeFolderPath(value) {
+  if (typeof value !== "string") throw new Error("\u6587\u4EF6\u5939\u8DEF\u5F84\u683C\u5F0F\u9519\u8BEF");
+  const normalized = value.trim().replace(/^\/+|\/+$/g, "");
+  if (!normalized) throw new Error("\u6587\u4EF6\u5939\u8DEF\u5F84\u4E0D\u80FD\u4E3A\u7A7A");
+  if (normalized.length > MAX_FOLDER_PATH_LENGTH) throw new Error(`\u6587\u4EF6\u5939\u8DEF\u5F84\u4E0D\u80FD\u8D85\u8FC7 ${MAX_FOLDER_PATH_LENGTH} \u4E2A\u5B57\u7B26`);
+  const segments = normalized.split("/");
+  if (segments.some((segment) => !segment || segment === "." || segment === "..")) {
+    throw new Error("\u6587\u4EF6\u5939\u8DEF\u5F84\u5305\u542B\u7A7A\u76EE\u5F55\u6216\u76F8\u5BF9\u8DEF\u5F84");
+  }
+  if (segments.some((segment) => segment !== segment.trim() || INVALID_SEGMENT_CHARACTERS.test(segment))) {
+    throw new Error("\u6587\u4EF6\u5939\u8DEF\u5F84\u5305\u542B\u975E\u6CD5\u5B57\u7B26");
+  }
+  return segments.join("/");
+}
+function normalizeFolderName(value) {
+  const name = normalizeFolderPath(value);
+  if (name.includes("/")) throw new Error("\u6587\u4EF6\u5939\u540D\u79F0\u4E0D\u80FD\u5305\u542B\u8DEF\u5F84\u5206\u9694\u7B26");
+  return name;
+}
+function folderBaseName(folder) {
+  const segments = folder.split("/");
+  return segments[segments.length - 1];
+}
+function folderParent(folder) {
+  const segments = folder.split("/");
+  return segments.length > 1 ? segments.slice(0, -1).join("/") : null;
+}
+function joinFolderPath(parent, name) {
+  return normalizeFolderPath(parent ? `${parent}/${name}` : name);
+}
+function isFolderWithin(folder, ancestor) {
+  return folder === ancestor || folder.startsWith(`${ancestor}/`);
+}
+
 // src/services/telegramCommands.ts
 var checkDiskSpace = checkDiskSpaceModule.default || checkDiskSpaceModule;
 var DOWNLOAD_WORKER_OPTIONS = [4, 8, 12, 16];
@@ -11397,9 +12479,28 @@ var ON_VALUES = /* @__PURE__ */ new Set(["1", "true", "yes", "on"]);
 var UPLOAD_DIR4 = process.env.UPLOAD_DIR || "./data/uploads";
 var THUMBNAIL_DIR4 = process.env.THUMBNAIL_DIR || "./data/thumbnails";
 var pendingDeleteConfirmations = /* @__PURE__ */ new Map();
+var pendingTelegramFileMutations = /* @__PURE__ */ new Map();
 var pendingStorageClearSnapshots = /* @__PURE__ */ new Map();
 var pendingBulkTaskCancellations = /* @__PURE__ */ new Map();
 var destructiveConfirmations = new DestructiveConfirmationStore();
+function buildFileActionKeyboard(file) {
+  return new Api6.ReplyInlineMarkup({
+    rows: buildTelegramFileActionRows(file).map((row) => new Api6.KeyboardButtonRow({
+      buttons: row.map((button) => new Api6.KeyboardButtonCallback({ text: button.text, data: Buffer.from(button.data) }))
+    }))
+  });
+}
+function buildFileSearchKeyboard(files) {
+  if (files.length === 0) return void 0;
+  return new Api6.ReplyInlineMarkup({
+    rows: files.slice(0, 8).map((file) => new Api6.KeyboardButtonRow({
+      buttons: [new Api6.KeyboardButtonCallback({
+        text: `${file.is_favorite ? "\u2B50 " : ""}${String(file.name).slice(0, 38)}`,
+        data: Buffer.from(encodeTelegramFileCallback("detail", String(file.id)))
+      })]
+    }))
+  });
+}
 function buildDeleteConfirmKeyboard(confirmId) {
   return new Api6.ReplyInlineMarkup({
     rows: [new Api6.KeyboardButtonRow({
@@ -11428,7 +12529,7 @@ async function getCurrentDownloadWorkers() {
   const value = await getSetting("telegram_download_workers", process.env.TELEGRAM_DOWNLOAD_WORKERS || "4");
   return normalizeDownloadWorkers(value);
 }
-function buildDownloadWorkersKeyboard(current2, confirmValue) {
+function buildDownloadWorkersKeyboard(current3, confirmValue) {
   if (confirmValue) {
     return new Api6.ReplyInlineMarkup({
       rows: [
@@ -11445,14 +12546,14 @@ function buildDownloadWorkersKeyboard(current2, confirmValue) {
     rows: [
       new Api6.KeyboardButtonRow({
         buttons: [
-          new Api6.KeyboardButtonCallback({ text: `${current2 === 4 ? "\u2705 " : ""}4`, data: Buffer.from("dw_set_4") }),
-          new Api6.KeyboardButtonCallback({ text: `${current2 === 8 ? "\u2705 " : ""}8`, data: Buffer.from("dw_set_8") })
+          new Api6.KeyboardButtonCallback({ text: `${current3 === 4 ? "\u2705 " : ""}4`, data: Buffer.from("dw_set_4") }),
+          new Api6.KeyboardButtonCallback({ text: `${current3 === 8 ? "\u2705 " : ""}8`, data: Buffer.from("dw_set_8") })
         ]
       }),
       new Api6.KeyboardButtonRow({
         buttons: [
-          new Api6.KeyboardButtonCallback({ text: `${current2 === 12 ? "\u2705 " : ""}12 \u26A0\uFE0F`, data: Buffer.from("dw_set_12") }),
-          new Api6.KeyboardButtonCallback({ text: `${current2 === 16 ? "\u2705 " : ""}16 \u26A0\uFE0F`, data: Buffer.from("dw_set_16") })
+          new Api6.KeyboardButtonCallback({ text: `${current3 === 12 ? "\u2705 " : ""}12 \u26A0\uFE0F`, data: Buffer.from("dw_set_12") }),
+          new Api6.KeyboardButtonCallback({ text: `${current3 === 16 ? "\u2705 " : ""}16 \u26A0\uFE0F`, data: Buffer.from("dw_set_16") })
         ]
       })
     ]
@@ -11588,11 +12689,11 @@ async function pruneEmptyDirs(dir, baseDir = path15.resolve(UPLOAD_DIR4)) {
     await pruneEmptyDirs(path15.dirname(dir), baseDir);
   }
 }
-function buildDownloadWorkersText(current2) {
+function buildDownloadWorkersText(current3) {
   return [
     "\u2699\uFE0F **Telegram \u5206\u7247\u5E76\u53D1\u8BBE\u7F6E**",
     "",
-    `\u5F53\u524D worker \u6570\uFF1A**${current2}**`,
+    `\u5F53\u524D worker \u6570\uFF1A**${current3}**`,
     "",
     "\u8BF4\u660E\uFF1ATelegram \u5355\u6B21\u8BF7\u6C42\u4E0A\u9650\u4ECD\u662F 512KB\uFF0C\u8FD9\u91CC\u8C03\u6574\u7684\u662F\u5355\u4E2A\u6587\u4EF6\u5185\u90E8\u7684\u5E76\u53D1\u5206\u7247\u8BF7\u6C42\u6570\u3002",
     "\u5982\u679C\u8981\u8C03\u6574\u201C\u4E00\u6B21\u540C\u65F6\u4E0B\u8F7D\u51E0\u4E2A\u6587\u4EF6\u201D\uFF0C\u8BF7\u4F7F\u7528 /file_concurrency\u3002",
@@ -11611,7 +12712,7 @@ async function getCurrentFileConcurrency() {
   const value = await getSetting("telegram_file_download_concurrency", process.env.TELEGRAM_FILE_DOWNLOAD_CONCURRENCY || String(getFileDownloadConcurrency()));
   return normalizeFileConcurrency(value);
 }
-function buildFileConcurrencyKeyboard(current2, confirmValue) {
+function buildFileConcurrencyKeyboard(current3, confirmValue) {
   if (confirmValue) {
     return new Api6.ReplyInlineMarkup({
       rows: [
@@ -11628,25 +12729,25 @@ function buildFileConcurrencyKeyboard(current2, confirmValue) {
     rows: [
       new Api6.KeyboardButtonRow({
         buttons: [
-          new Api6.KeyboardButtonCallback({ text: `${current2 === 1 ? "\u2705 " : ""}1`, data: Buffer.from("fc_set_1") }),
-          new Api6.KeyboardButtonCallback({ text: `${current2 === 2 ? "\u2705 " : ""}2`, data: Buffer.from("fc_set_2") })
+          new Api6.KeyboardButtonCallback({ text: `${current3 === 1 ? "\u2705 " : ""}1`, data: Buffer.from("fc_set_1") }),
+          new Api6.KeyboardButtonCallback({ text: `${current3 === 2 ? "\u2705 " : ""}2`, data: Buffer.from("fc_set_2") })
         ]
       }),
       new Api6.KeyboardButtonRow({
         buttons: [
-          new Api6.KeyboardButtonCallback({ text: `${current2 === 3 ? "\u2705 " : ""}3`, data: Buffer.from("fc_set_3") }),
-          new Api6.KeyboardButtonCallback({ text: `${current2 === 4 ? "\u2705 " : ""}4 \u26A0\uFE0F`, data: Buffer.from("fc_set_4") })
+          new Api6.KeyboardButtonCallback({ text: `${current3 === 3 ? "\u2705 " : ""}3`, data: Buffer.from("fc_set_3") }),
+          new Api6.KeyboardButtonCallback({ text: `${current3 === 4 ? "\u2705 " : ""}4 \u26A0\uFE0F`, data: Buffer.from("fc_set_4") })
         ]
       })
     ]
   });
 }
-function buildFileConcurrencyText(current2) {
+function buildFileConcurrencyText(current3) {
   const stats = getDownloadQueueStats();
   return [
     "\u{1F4E6} **Telegram \u6587\u4EF6\u7EA7\u5E76\u53D1\u8BBE\u7F6E**",
     "",
-    `\u5F53\u524D\u540C\u65F6\u4E0B\u8F7D\u6587\u4EF6\u6570\uFF1A**${current2}**`,
+    `\u5F53\u524D\u540C\u65F6\u4E0B\u8F7D\u6587\u4EF6\u6570\uFF1A**${current3}**`,
     `\u5F53\u524D\u961F\u5217\uFF1A\u8FDB\u884C\u4E2D ${stats.active}\uFF0C\u7B49\u5F85\u4E2D ${stats.pending}`,
     "",
     "\u8BF4\u660E\uFF1A\u8FD9\u91CC\u63A7\u5236\u201C\u4E00\u6B21\u540C\u65F6\u4E0B\u8F7D\u51E0\u4E2A\u6587\u4EF6\u201D\u3002",
@@ -11737,6 +12838,92 @@ async function handleStart(message, senderId, buttons) {
 async function handleHelp(message) {
   await message.reply({ message: buildHelp() });
 }
+async function handleNotifications(message, args = []) {
+  const userId = message.senderId?.toJSNumber();
+  if (!userId || !await isAuthenticatedAsync(userId)) {
+    await message.reply({ message: MSG.AUTH_REQUIRED });
+    return;
+  }
+  const chatId = canonicalTelegramChatKey(message.chatId?.toString() || userId);
+  const current3 = await getTelegramNotificationPreferences(userId, chatId);
+  if (args.length === 0) {
+    await message.reply({ message: [
+      "\u{1F514} **\u901A\u77E5\u504F\u597D**",
+      `\u5931\u8D25\uFF1A${current3.failureImmediate ? "\u5373\u65F6" : "\u6458\u8981"}`,
+      `\u6210\u529F\uFF1A${current3.successMode}`,
+      `\u5B89\u5168\uFF1A\u59CB\u7EC8\u5373\u65F6\uFF08\u4E0D\u53EF\u5173\u95ED\uFF09`,
+      `\u8BA2\u9605\uFF1A${current3.subscriptionDigest ? "\u6458\u8981" : "\u5373\u65F6"}`,
+      `\u65F6\u533A\uFF1A${current3.timezone}`,
+      `\u5B89\u9759\u65F6\u6BB5\uFF1A${current3.quietStart && current3.quietEnd ? `${current3.quietStart}-${current3.quietEnd}` : "\u5173\u95ED"}`,
+      "",
+      "\u7528\u6CD5\uFF1A/notifications timezone Asia/Shanghai\uFF1B/notifications quiet 22:00-07:00\uFF1B/notifications success digest|immediate|off\uFF1B/notifications failure immediate|digest\uFF1B/notifications subscription digest|immediate"
+    ].join("\n") });
+    return;
+  }
+  const [key, value = ""] = args;
+  const update = { ...current3 };
+  if (key === "timezone") update.timezone = value;
+  else if (key === "quiet") {
+    const match = value.match(/^([0-2]\d:[0-5]\d)-([0-2]\d:[0-5]\d)$/);
+    if (!match) throw new Error("\u5B89\u9759\u65F6\u6BB5\u683C\u5F0F\u5FC5\u987B\u662F HH:MM-HH:MM");
+    update.quietStart = match[1];
+    update.quietEnd = match[2];
+  } else if (key === "success") update.successMode = value;
+  else if (key === "failure") update.failureImmediate = value === "immediate";
+  else if (key === "subscription") update.subscriptionDigest = value !== "immediate";
+  else throw new Error("\u672A\u77E5\u901A\u77E5\u8BBE\u7F6E");
+  const saved = await setTelegramNotificationPreferences(userId, chatId, update);
+  await message.reply({ message: `\u2705 \u901A\u77E5\u504F\u597D\u5DF2\u66F4\u65B0\u3002\u5B89\u5168\u544A\u8B66\u4ECD\u59CB\u7EC8\u5373\u65F6\u3002
+\u65F6\u533A\uFF1A${saved.timezone}\uFF1B\u5B89\u9759\u65F6\u6BB5\uFF1A${saved.quietStart || "-"}-${saved.quietEnd || "-"}` });
+}
+async function handleStatus(message) {
+  const senderId = message.senderId?.toJSNumber();
+  if (!senderId || !await isAuthenticatedAsync(senderId)) {
+    await message.reply({ message: MSG.AUTH_REQUIRED });
+    return;
+  }
+  const requestId = `tg-${crypto16.randomBytes(6).toString("hex")}`;
+  try {
+    const target = storageManager.getActiveTarget();
+    const accounts = await storageManager.getAccounts();
+    const account = target.accountId ? accounts.find((row) => row.id === target.accountId) : null;
+    const diskSpace = await checkDiskSpace(path15.resolve(UPLOAD_DIR4));
+    const queue = getDownloadQueueStats();
+    const [subscriptionRows, reconciliation] = await Promise.all([
+      query(`SELECT COUNT(*)::int AS enabled, MAX(last_scan_at) AS last_scan_at,
+                          MAX(last_error) FILTER (WHERE last_error IS NOT NULL) AS last_error
+                   FROM telegram_channel_subscriptions WHERE enabled = true`),
+      query(`SELECT COUNT(*) FILTER (WHERE status = 'pending')::int AS pending,
+                          COUNT(*) FILTER (WHERE resolution = 'operator_required')::int AS operator_required
+                   FROM (
+                       SELECT status, resolution FROM telegram_write_reconciliations
+                       UNION ALL SELECT status, resolution FROM chunk_upload_reconciliations
+                       UNION ALL SELECT status, resolution FROM ytdlp_write_reconciliations
+                   ) reconciliations`)
+    ]);
+    const subscription = subscriptionRows.rows[0] || {};
+    const reconcile = reconciliation.rows[0] || {};
+    await message.reply({ message: buildTelegramStatusPanel({
+      requestId,
+      bot: getTelegramBotStatus(),
+      userClient: getTelegramUserClientStatus(),
+      target: {
+        provider: target.provider.name,
+        accountName: account?.name || (target.provider.name === "local" ? "\u670D\u52A1\u5668\u672C\u5730\u76EE\u5F55" : target.accountId || "\u9ED8\u8BA4\u8D26\u6237"),
+        probeStatus: account?.last_probe_status || (target.provider.name === "local" ? "available" : null),
+        cooldownUntil: null,
+        probeError: account?.last_probe_error || null
+      },
+      disk: { freeBytes: Number(diskSpace.free || 0), totalBytes: Number(diskSpace.size || 0) },
+      queue: { active: queue.active, pending: queue.pending, failed: getTaskStatus().history.filter((task) => task.status === "failed").length, paused: queue.paused },
+      subscriptions: { enabled: Number(subscription.enabled || 0), lastScanAt: subscription.last_scan_at || null, lastError: subscription.last_error || null },
+      reconciliation: { pending: Number(reconcile.pending || 0), operatorRequired: Number(reconcile.operator_required || 0) }
+    }) });
+  } catch (error) {
+    console.error(`\u{1F916} status panel failed request=${requestId}:`, error);
+    await message.reply({ message: `\u274C \u8BCA\u65AD\u72B6\u6001\u8BFB\u53D6\u5931\u8D25\u3002\u64CD\u4F5C ID\uFF1A${requestId}` });
+  }
+}
 async function handleStorage(message) {
   try {
     const scope = await getCurrentStorageScope();
@@ -11772,6 +12959,61 @@ async function handleStorage(message) {
     console.error("\u{1F916} \u83B7\u53D6\u5B58\u50A8\u7EDF\u8BA1\u5931\u8D25:", error);
     await message.reply({ message: MSG.ERR_STORAGE });
   }
+}
+async function handleTarget(message, args = []) {
+  const senderId = message.senderId?.toJSNumber();
+  if (!senderId || !await isAuthenticatedAsync(senderId)) {
+    await message.reply({ message: MSG.AUTH_REQUIRED });
+    return;
+  }
+  const chatId = canonicalTelegramChatKey(message.chatId?.toString() || senderId);
+  const modeInput = (args[0] || "").toLowerCase();
+  if (modeInput === "clear") {
+    await clearTelegramTargetState(chatId);
+    await message.reply({ message: "\u2705 \u5DF2\u6E05\u9664\u5F53\u524D\u804A\u5929\u7684\u5B58\u50A8\u76EE\u6807\u8986\u76D6\uFF1B\u540E\u7EED\u4EFB\u52A1\u4F7F\u7528\u7CFB\u7EDF\u9ED8\u8BA4\u3002" });
+    return;
+  }
+  if (!modeInput) {
+    const once = await getTelegramTargetState(void 0, chatId, "once");
+    const session = await getTelegramTargetState(void 0, chatId, "session");
+    const active = storageManager.getActiveTarget();
+    await message.reply({
+      message: [
+        "\u{1F3AF} **\u5F53\u524D\u804A\u5929\u5B58\u50A8\u76EE\u6807**",
+        `\u4E0B\u4E00\u6B21\uFF1A${once ? `${once.provider} / ${once.accountId || "local"}` : "\u672A\u8BBE\u7F6E"}`,
+        `\u4F1A\u8BDD\uFF1A${session ? `${session.provider} / ${session.accountId || "local"}` : "\u672A\u8BBE\u7F6E"}`,
+        `\u7CFB\u7EDF\u9ED8\u8BA4\uFF1A${active.provider.name} / ${active.accountId || "local"}`,
+        "",
+        "\u7528\u6CD5\uFF1A`/target once <local|\u8D26\u6237ID>`\u3001`/target session <local|\u8D26\u6237ID>`\u3001`/target clear`"
+      ].join("\n")
+    });
+    return;
+  }
+  if (!["once", "session"].includes(modeInput) || !args[1]) {
+    await message.reply({ message: "\u274C \u7528\u6CD5\uFF1A/target once <local|\u8D26\u6237ID>\u3001/target session <local|\u8D26\u6237ID>\u3001/target clear" });
+    return;
+  }
+  const mode = modeInput;
+  const selector = String(args[1]);
+  let provider = "local";
+  let accountId = null;
+  let accountName = "\u670D\u52A1\u5668\u672C\u5730\u76EE\u5F55";
+  if (selector !== "local") {
+    const accounts = await storageManager.getAccounts();
+    const account = accounts.find((row) => String(row.id) === selector || String(row.id).startsWith(selector));
+    if (!account) {
+      await message.reply({ message: "\u274C \u672A\u627E\u5230\u8BE5\u5B58\u50A8\u8D26\u6237\uFF1B\u8BF7\u4ECE /storage_switch \u67E5\u770B\u5B8C\u6574\u8D26\u6237\u5217\u8868\u3002" });
+      return;
+    }
+    provider = account.type;
+    accountId = account.id;
+    accountName = account.name || account.type;
+    storageManager.getTarget(provider, accountId);
+  }
+  const expiresAt = new Date(Date.now() + (mode === "once" ? 24 * 60 * 60 * 1e3 : 7 * 24 * 60 * 60 * 1e3));
+  await setTelegramTargetState(void 0, chatId, mode, provider, accountId, expiresAt);
+  await message.reply({ message: `\u2705 \u5DF2\u8BBE\u7F6E${mode === "once" ? "\u4E0B\u4E00\u6B21" : "\u5F53\u524D\u804A\u5929\u4F1A\u8BDD"}\u76EE\u6807\uFF1A${provider} / ${accountName}
+\u4E0D\u4F1A\u4FEE\u6539\u7CFB\u7EDF\u5168\u5C40\u9ED8\u8BA4\u3002` });
 }
 async function handleStorageSwitch(message) {
   try {
@@ -11943,6 +13185,33 @@ async function handleStorageCleanupCallback(client2, update, data) {
     await client2.invoke(new Api6.messages.SetBotCallbackAnswer({ queryId: update.queryId, message: `\u6E05\u7406\u5931\u8D25: ${error.message}`, alert: true }));
   }
 }
+async function handleFind(message, args = []) {
+  const senderId = message.senderId?.toJSNumber();
+  if (!senderId || !await isAuthenticatedAsync(senderId)) {
+    await message.reply({ message: MSG.AUTH_REQUIRED });
+    return;
+  }
+  const rawOptions = { limit: "8", sort: "date", direction: "desc" };
+  const queryParts = [];
+  for (const arg of args) {
+    if (arg.startsWith("type:")) rawOptions.type = arg.slice(5);
+    else if (arg.startsWith("folder:")) rawOptions.folder = arg.slice(7);
+    else if (arg.startsWith("after:")) rawOptions.after = arg.slice(6);
+    else if (arg.startsWith("before:")) rawOptions.before = arg.slice(7);
+    else if (arg === "fav" || arg === "favorite") rawOptions.favorite = "true";
+    else queryParts.push(arg);
+  }
+  if (queryParts.length > 0) rawOptions.q = queryParts.join(" ");
+  try {
+    const page = await queryTelegramFiles(rawOptions);
+    await message.reply({
+      message: buildTelegramFileBrowserText(page, rawOptions.q || ""),
+      buttons: buildFileSearchKeyboard(page.files)
+    });
+  } catch (error) {
+    await message.reply({ message: `\u274C \u641C\u7D22\u5931\u8D25\uFF1A${error.message}` });
+  }
+}
 async function handleList(message, args) {
   try {
     let limit = 10;
@@ -11978,6 +13247,102 @@ async function handleList(message, args) {
     console.error("\u{1F916} \u83B7\u53D6\u6587\u4EF6\u5217\u8868\u5931\u8D25:", error);
     await message.reply({ message: MSG.ERR_FILE_LIST });
   }
+}
+async function handleTelegramFileBrowserCallback(client2, update, data) {
+  const actorId = update.userId.toJSNumber();
+  if (!await isAuthenticatedAsync(actorId)) {
+    await client2.invoke(new Api6.messages.SetBotCallbackAnswer({ queryId: update.queryId, message: MSG.AUTH_REQUIRED, alert: true }));
+    return;
+  }
+  const parsed = parseTelegramFileCallback(data);
+  if (!parsed) return;
+  const file = await getScopedFileById(parsed.fileId);
+  if (!file) {
+    await client2.invoke(new Api6.messages.SetBotCallbackAnswer({ queryId: update.queryId, message: "\u6587\u4EF6\u5DF2\u4E0D\u5B58\u5728\u6216\u4E0D\u5728\u5F53\u524D\u5B58\u50A8\u8303\u56F4\u5185", alert: true }));
+    return;
+  }
+  const chatId = getCallbackChatKey(update);
+  const messageId = Number(update.msgId);
+  if (parsed.action === "detail") {
+    await client2.editMessage(update.peer, { message: messageId, text: buildTelegramFileDetail(file), buttons: buildFileActionKeyboard(file) });
+    await client2.invoke(new Api6.messages.SetBotCallbackAnswer({ queryId: update.queryId, message: "\u6587\u4EF6\u8BE6\u60C5" }));
+    return;
+  }
+  if (parsed.action === "copy") {
+    await client2.invoke(new Api6.messages.SetBotCallbackAnswer({ queryId: update.queryId, message: String(file.id), alert: true }));
+    return;
+  }
+  if (parsed.action === "favorite") {
+    await updateScopedFileById(String(file.id), "is_favorite = $1, updated_at = NOW()", [!file.is_favorite]);
+    file.is_favorite = !file.is_favorite;
+    await client2.editMessage(update.peer, { message: messageId, text: buildTelegramFileDetail(file), buttons: buildFileActionKeyboard(file) });
+    await client2.invoke(new Api6.messages.SetBotCallbackAnswer({ queryId: update.queryId, message: file.is_favorite ? "\u5DF2\u6536\u85CF" : "\u5DF2\u53D6\u6D88\u6536\u85CF" }));
+    return;
+  }
+  if (parsed.action === "link") {
+    const capabilities = buildStorageCapabilities(String(file.source));
+    if (!capabilities.share && String(file.source) !== "local") {
+      await client2.invoke(new Api6.messages.SetBotCallbackAnswer({ queryId: update.queryId, message: "\u5F53\u524D provider \u4E0D\u652F\u6301\u5206\u4EAB\uFF1B\u53EF\u5728 Web \u4E2D\u4E0B\u8F7D", alert: true }));
+      return;
+    }
+    const relative = getSignedUrl(String(file.id), "download", 3600);
+    const base = (process.env.VITE_API_URL || process.env.OAUTH_CALLBACK_BASE_URL || "").replace(/\/$/, "");
+    const link = base ? `${base}${relative}` : relative;
+    await client2.sendMessage(update.peer, { message: `\u{1F517} 1 \u5C0F\u65F6\u7B7E\u540D\u94FE\u63A5\uFF1A
+${link}` });
+    await client2.invoke(new Api6.messages.SetBotCallbackAnswer({ queryId: update.queryId, message: "\u5DF2\u751F\u6210\u7B7E\u540D\u94FE\u63A5" }));
+    return;
+  }
+  if (parsed.action === "move" || parsed.action === "rename") {
+    const key = `${actorId}:${chatId}`;
+    pendingTelegramFileMutations.set(key, { actorId, chatId, messageId, fileId: String(file.id), action: parsed.action, expiresAt: Date.now() + 5 * 60 * 1e3 });
+    await client2.sendMessage(update.peer, { message: parsed.action === "move" ? "\u8BF7\u53D1\u9001\u76EE\u6807\u76EE\u5F55\uFF1B\u53D1\u9001\u201C\u53D6\u6D88\u201D\u9000\u51FA\u3002" : "\u8BF7\u53D1\u9001\u65B0\u6587\u4EF6\u540D\uFF08\u5FC5\u987B\u4FDD\u7559\u539F\u6269\u5C55\u540D\uFF09\uFF1B\u53D1\u9001\u201C\u53D6\u6D88\u201D\u9000\u51FA\u3002" });
+    await client2.invoke(new Api6.messages.SetBotCallbackAnswer({ queryId: update.queryId, message: parsed.action === "move" ? "\u7B49\u5F85\u76EE\u6807\u76EE\u5F55" : "\u7B49\u5F85\u65B0\u6587\u4EF6\u540D" }));
+    return;
+  }
+  const sent = await client2.sendMessage(update.peer, {
+    message: ["\u26A0\uFE0F **\u786E\u8BA4\u5220\u9664\u8FD9\u4E2A\u6587\u4EF6\uFF1F**", "", `\u{1F4C4} ${file.name}`, `\u{1F194} ${String(file.id).slice(0, 13)}`, "", "\u8BE5\u64CD\u4F5C\u4F1A\u5220\u9664\u5B9E\u4F53\u6587\u4EF6\u548C\u7D22\u5F15\u3002"].join("\n")
+  });
+  const confirmId = destructiveConfirmations.issue({ actorId, chatId, messageId: sent.id, action: "delete_file", objectId: String(file.id) });
+  pendingDeleteConfirmations.set(confirmId, { fileId: String(file.id), name: String(file.name), size: Number(file.size || 0), selector: String(file.id), actorId, chatId, messageId: sent.id });
+  await sent.edit({ text: sent.message, buttons: buildDeleteConfirmKeyboard(confirmId) });
+  await client2.invoke(new Api6.messages.SetBotCallbackAnswer({ queryId: update.queryId, message: "\u9700\u8981\u4E8C\u6B21\u786E\u8BA4" }));
+}
+async function applyPendingTelegramFileMutation(message, actorId, input) {
+  const chatId = canonicalTelegramChatKey(message.chatId?.toString());
+  const key = `${actorId}:${chatId}`;
+  const pending = pendingTelegramFileMutations.get(key);
+  if (!pending) return false;
+  if (pending.expiresAt < Date.now()) {
+    pendingTelegramFileMutations.delete(key);
+    await message.reply({ message: "\u64CD\u4F5C\u5DF2\u8FC7\u671F\uFF0C\u8BF7\u91CD\u65B0\u6253\u5F00\u6587\u4EF6\u8BE6\u60C5\u3002" });
+    return true;
+  }
+  if (input.trim() === "\u53D6\u6D88") {
+    pendingTelegramFileMutations.delete(key);
+    await message.reply({ message: "\u5DF2\u53D6\u6D88\u6587\u4EF6\u64CD\u4F5C\u3002" });
+    return true;
+  }
+  const file = await getScopedFileById(pending.fileId);
+  if (!file) {
+    pendingTelegramFileMutations.delete(key);
+    await message.reply({ message: "\u6587\u4EF6\u5DF2\u4E0D\u5B58\u5728\u6216\u4E0D\u5728\u5F53\u524D\u5B58\u50A8\u8303\u56F4\u5185\u3002" });
+    return true;
+  }
+  if (pending.action === "move") {
+    const folder = normalizeFolderPath(input);
+    await updateScopedFileById(pending.fileId, "folder = $1, updated_at = NOW()", [folder]);
+    await message.reply({ message: `\u2705 \u5DF2\u79FB\u52A8\u5230\uFF1A${folder}` });
+  } else {
+    const name = input.trim();
+    if (!name || /[\/\\:*?"<>|]/.test(name)) throw new Error("\u6587\u4EF6\u540D\u5305\u542B\u975E\u6CD5\u5B57\u7B26");
+    const extension = (value) => path15.extname(value).toLowerCase();
+    if (extension(name) !== extension(String(file.name))) throw new Error("\u4E0D\u5141\u8BB8\u4FEE\u6539\u6587\u4EF6\u540E\u7F00");
+    await updateScopedFileById(pending.fileId, "name = $1, updated_at = NOW()", [name]);
+    await message.reply({ message: `\u2705 \u5DF2\u91CD\u547D\u540D\u4E3A\uFF1A${name}` });
+  }
+  pendingTelegramFileMutations.delete(key);
+  return true;
 }
 async function handleDelete(message, args) {
   if (args.length === 0) {
@@ -12713,10 +14078,10 @@ async function handleRetryFailedTasks(message, args) {
 }
 async function handleDownloadWorkers(message) {
   try {
-    const current2 = await getCurrentDownloadWorkers();
+    const current3 = await getCurrentDownloadWorkers();
     await message.reply({
-      message: buildDownloadWorkersText(current2),
-      buttons: buildDownloadWorkersKeyboard(current2)
+      message: buildDownloadWorkersText(current3),
+      buttons: buildDownloadWorkersKeyboard(current3)
     });
   } catch (error) {
     console.error("\u{1F916} \u83B7\u53D6\u5206\u7247\u5E76\u53D1\u8BBE\u7F6E\u5931\u8D25:", error);
@@ -12725,11 +14090,11 @@ async function handleDownloadWorkers(message) {
 }
 async function handleFileConcurrency(message) {
   try {
-    const current2 = await getCurrentFileConcurrency();
-    setFileDownloadConcurrency(current2);
+    const current3 = await getCurrentFileConcurrency();
+    setFileDownloadConcurrency(current3);
     await message.reply({
-      message: buildFileConcurrencyText(current2),
-      buttons: buildFileConcurrencyKeyboard(current2)
+      message: buildFileConcurrencyText(current3),
+      buttons: buildFileConcurrencyKeyboard(current3)
     });
   } catch (error) {
     console.error("\u{1F916} \u83B7\u53D6\u6587\u4EF6\u7EA7\u5E76\u53D1\u8BBE\u7F6E\u5931\u8D25:", error);
@@ -12889,11 +14254,11 @@ async function handleDownloadWorkersCallback(client2, update, data) {
   }
   try {
     if (data === "dw_cancel") {
-      const current2 = await getCurrentDownloadWorkers();
+      const current3 = await getCurrentDownloadWorkers();
       await client2.editMessage(update.peer, {
         message: Number(update.msgId),
-        text: buildDownloadWorkersText(current2),
-        buttons: buildDownloadWorkersKeyboard(current2)
+        text: buildDownloadWorkersText(current3),
+        buttons: buildDownloadWorkersKeyboard(current3)
       });
       await client2.invoke(new Api6.messages.SetBotCallbackAnswer({ queryId: update.queryId, message: "\u5DF2\u53D6\u6D88" }));
       return;
@@ -12964,12 +14329,12 @@ async function handleFileConcurrencyCallback(client2, update, data) {
   }
   try {
     if (data === "fc_cancel") {
-      const current2 = await getCurrentFileConcurrency();
-      setFileDownloadConcurrency(current2);
+      const current3 = await getCurrentFileConcurrency();
+      setFileDownloadConcurrency(current3);
       await client2.editMessage(update.peer, {
         message: Number(update.msgId),
-        text: buildFileConcurrencyText(current2),
-        buttons: buildFileConcurrencyKeyboard(current2)
+        text: buildFileConcurrencyText(current3),
+        buttons: buildFileConcurrencyKeyboard(current3)
       });
       await client2.invoke(new Api6.messages.SetBotCallbackAnswer({ queryId: update.queryId, message: "\u5DF2\u53D6\u6D88" }));
       return;
@@ -13030,8 +14395,9 @@ async function handleFileConcurrencyCallback(client2, update, data) {
   }
 }
 
-// src/services/telegramBot.ts
-init_db();
+// src/services/ytDlpProbe.ts
+import os3 from "node:os";
+import { spawn as spawn2 } from "node:child_process";
 
 // src/utils/networkSecurity.ts
 import dns from "dns/promises";
@@ -13053,9 +14419,25 @@ function isPrivateIPv4(ip) {
   ];
   return ranges.some(([start, end]) => n >= ipv4ToInt(start) && n <= ipv4ToInt(end));
 }
+function embeddedIPv4FromIPv6(ip) {
+  const normalized = ip.toLowerCase().split("%", 1)[0];
+  const dotted = normalized.match(/(?:^|:)(\d{1,3}(?:\.\d{1,3}){3})$/)?.[1];
+  if (dotted && net.isIP(dotted) === 4) return dotted;
+  const segments = normalized.split(":").filter(Boolean);
+  if (segments.length < 2) return null;
+  const high = Number.parseInt(segments.at(-2) || "", 16);
+  const low = Number.parseInt(segments.at(-1) || "", 16);
+  if (!Number.isInteger(high) || !Number.isInteger(low) || high < 0 || high > 65535 || low < 0 || low > 65535) return null;
+  return `${high >>> 8}.${high & 255}.${low >>> 8}.${low & 255}`;
+}
 function isPrivateIPv6(ip) {
   const normalized = ip.toLowerCase();
-  return normalized === "::1" || normalized === "::" || normalized.startsWith("fc") || normalized.startsWith("fd") || normalized.startsWith("fe80:");
+  if (normalized === "::1" || normalized === "::" || normalized.startsWith("fc") || normalized.startsWith("fd") || normalized.startsWith("fe80:")) return true;
+  const isMapped = normalized.startsWith("::ffff:");
+  const isNat64 = normalized.startsWith("64:ff9b::");
+  if (!isMapped && !isNat64) return false;
+  const embedded = embeddedIPv4FromIPv6(normalized);
+  return !embedded || isPrivateIPv4(embedded);
 }
 function isPrivateAddress(ip) {
   const version2 = net.isIP(ip);
@@ -13092,40 +14474,309 @@ async function assertPublicStorageEndpoint(rawUrl) {
   return parsed;
 }
 
+// src/services/ytDlpProbe.ts
+var YTDLP_BIN2 = process.env.YTDLP_BIN || "yt-dlp";
+function buildYtDlpProbeArgs(url) {
+  return ["--dump-single-json", "--skip-download", "--no-playlist", "--no-warnings", "--", url];
+}
+function parseYtDlpProbeOutput(output) {
+  let parsed;
+  try {
+    parsed = JSON.parse(output);
+  } catch {
+    throw new Error("yt-dlp \u8FD4\u56DE\u4E86\u65E0\u6548\u5143\u6570\u636E");
+  }
+  const entries = Array.isArray(parsed?.entries) ? parsed.entries : null;
+  const isPlaylist = parsed?._type === "playlist" || Boolean(entries);
+  if (isPlaylist) throw new Error("\u64AD\u653E\u5217\u8868\u9ED8\u8BA4\u7981\u7528\uFF1B\u8BF7\u663E\u5F0F\u542F\u7528\u5E76\u6307\u5B9A\u8303\u56F4\u4E0E\u6700\u5927\u6761\u76EE");
+  return {
+    id: String(parsed?.id || ""),
+    title: String(parsed?.title || "\u672A\u547D\u540D\u5A92\u4F53").slice(0, 300),
+    durationSeconds: Number.isFinite(Number(parsed?.duration)) ? Math.max(0, Number(parsed.duration)) : null,
+    site: String(parsed?.extractor_key || parsed?.extractor || "unknown").slice(0, 100),
+    webpageUrl: String(parsed?.webpage_url || parsed?.original_url || "").slice(0, 2e3),
+    isPlaylist: false,
+    playlistCount: null
+  };
+}
+async function runYtDlpProbe(url, options = {}) {
+  await (options.assertUrl || assertPublicHttpUrl)(url);
+  const timeoutMs = Math.max(1e3, options.timeoutMs ?? 2e4);
+  const maxOutputBytes = Math.max(32, options.maxOutputBytes ?? 512 * 1024);
+  const spawnProcess = options.spawnProcess || spawn2;
+  const binLower = YTDLP_BIN2.toLowerCase();
+  const shell = os3.platform() === "win32" && (binLower.endsWith(".cmd") || binLower.endsWith(".bat"));
+  const child = spawnProcess(YTDLP_BIN2, buildYtDlpProbeArgs(url), { windowsHide: true, shell });
+  return new Promise((resolve, reject) => {
+    let stdout = Buffer.alloc(0);
+    let stderr = "";
+    let settled = false;
+    let aborted = false;
+    const abortError = () => Object.assign(new Error("yt-dlp probe cancelled"), { name: "AbortError" });
+    const finish = (error, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      options.signal?.removeEventListener("abort", abortChild);
+      error ? reject(error) : resolve(value);
+    };
+    const kill = (error) => {
+      if (settled) return;
+      aborted = error.name === "AbortError";
+      finish(error);
+      child.kill("SIGTERM");
+    };
+    const abortChild = () => kill(abortError());
+    const timeout = setTimeout(() => kill(new Error(`yt-dlp \u63A2\u6D4B\u8D85\u65F6\uFF08${timeoutMs}ms\uFF09`)), timeoutMs);
+    child.stdout.on("data", (chunk) => {
+      const bytes = Buffer.from(chunk);
+      if (stdout.length + bytes.length > maxOutputBytes) return kill(new Error("yt-dlp \u63A2\u6D4B\u8F93\u51FA\u8D85\u8FC7\u9650\u5236"));
+      stdout = Buffer.concat([stdout, bytes]);
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += String(chunk);
+      if (stderr.length > 8e3) stderr = stderr.slice(-8e3);
+    });
+    child.once("error", (error) => finish(aborted ? abortError() : error));
+    child.once("close", (code) => {
+      if (settled) return;
+      if (options.signal?.aborted || aborted) return finish(abortError());
+      if (code !== 0) return finish(new Error(stderr.trim() || `yt-dlp probe exited with code ${code}`));
+      try {
+        finish(void 0, parseYtDlpProbeOutput(stdout.toString("utf8")));
+      } catch (error) {
+        finish(error);
+      }
+    });
+    if (options.signal?.aborted) abortChild();
+    else options.signal?.addEventListener("abort", abortChild, { once: true });
+  });
+}
+
+// src/services/ytDlpConfirmation.ts
+import crypto17 from "node:crypto";
+var YtDlpConfirmationStore = class {
+  values = /* @__PURE__ */ new Map();
+  ttlMs;
+  maxEntries;
+  now;
+  tokenFactory;
+  constructor(options = {}) {
+    this.ttlMs = Math.max(1, options.ttlMs ?? 5 * 6e4);
+    this.maxEntries = Math.max(1, options.maxEntries ?? 500);
+    this.now = options.now ?? Date.now;
+    this.tokenFactory = options.tokenFactory ?? (() => crypto17.randomBytes(12).toString("base64url"));
+  }
+  cleanup() {
+    const now = this.now();
+    for (const [token, value] of this.values) if (value.expiresAt <= now) this.values.delete(token);
+    while (this.values.size >= this.maxEntries) this.values.delete(this.values.keys().next().value);
+  }
+  issue(value) {
+    this.cleanup();
+    const token = this.tokenFactory();
+    const expiresAt = this.now() + this.ttlMs;
+    this.values.set(token, { ...value, expiresAt });
+    return { token, expiresAt };
+  }
+  consume(token, binding) {
+    const value = this.values.get(token);
+    if (!value) return { status: "missing" };
+    if (value.expiresAt <= this.now()) {
+      this.values.delete(token);
+      return { status: "expired" };
+    }
+    if (value.actorId !== binding.actorId || value.chatKey !== binding.chatKey || value.messageId !== binding.messageId) return { status: "mismatch" };
+    this.values.delete(token);
+    return { status: "ok", value };
+  }
+  cancel(token, binding) {
+    const result = this.consume(token, binding);
+    return result.status === "ok";
+  }
+};
+
+// src/services/telegramBot.ts
+init_db();
+init_authSettings();
+
+// src/services/telegramCommandDispatcher.ts
+var CATEGORY_LABELS = {
+  main: "\u9996\u9875",
+  files: "\u6587\u4EF6",
+  channels: "\u9891\u9053",
+  settings: "\u8BBE\u7F6E",
+  security: "\u5B89\u5168"
+};
+function buildCommandHomePage(requestedPage) {
+  const visible = BOT_COMMANDS.filter((command) => command.help);
+  const categories = [...new Set(visible.map((command) => command.category))];
+  const totalPages = Math.max(1, categories.length);
+  const page = Math.min(totalPages - 1, Math.max(0, requestedPage));
+  const category = categories[page] || "main";
+  const commands = visible.filter((command) => command.category === category);
+  const buttons = commands.map((command) => [{
+    text: `/${command.command} \xB7 ${command.description}`,
+    data: `home_open_${command.command}`
+  }]);
+  const navigation = [];
+  if (page > 0) navigation.push({ text: "\u25C0\uFE0F", data: `home_page_${page - 1}` });
+  navigation.push({ text: `${CATEGORY_LABELS[category] || category} ${page + 1}/${totalPages}`, data: `home_page_${page}` });
+  if (page + 1 < totalPages) navigation.push({ text: "\u25B6\uFE0F", data: `home_page_${page + 1}` });
+  buttons.push(navigation);
+  return { page, totalPages, category, commands, buttons };
+}
+
 // src/services/telegramSubscriptionVisibility.ts
 var TELEGRAM_USER_CANCELLED_SUBSCRIPTION_REASON = "\u7528\u6237\u624B\u52A8\u53D6\u6D88\u8BA2\u9605";
 function isTelegramSubscriptionVisibleInManagement(row) {
   return row.enabled || row.disabled_reason !== TELEGRAM_USER_CANCELLED_SUBSCRIPTION_REASON;
 }
 
-// src/services/telegramSubscriptionManagement.ts
-var TELEGRAM_SUBSCRIPTION_PAGE_SIZE = 5;
-function buildTelegramSubscriptionPage(rows, requestedPage = 0) {
-  const totalPages = Math.max(1, Math.ceil(rows.length / TELEGRAM_SUBSCRIPTION_PAGE_SIZE));
-  const page = Math.min(Math.max(0, Math.floor(requestedPage || 0)), totalPages - 1);
-  const startIndex = page * TELEGRAM_SUBSCRIPTION_PAGE_SIZE;
-  return {
-    page,
-    totalPages,
-    startIndex,
-    visibleRows: rows.slice(startIndex, startIndex + TELEGRAM_SUBSCRIPTION_PAGE_SIZE)
-  };
-}
-function parseTelegramSubscriptionCallback(data) {
-  let match = data.match(/^tsub_page_(\d{1,6})$/);
-  if (match) return { kind: "page", page: Number(match[1]) };
-  match = data.match(/^tsub_(view|folder|clear|cancel)_([0-9a-f-]{36})(?:_(\d{1,6}))?$/i);
-  if (match) {
-    return {
-      kind: "action",
-      action: match[1],
-      id: match[2],
-      page: Number(match[3] || 0)
-    };
+// src/services/telegramInteractionState.ts
+var TelegramInteractionStore = class {
+  entries = /* @__PURE__ */ new Map();
+  ttlMs;
+  maxEntries;
+  now;
+  constructor(options = {}) {
+    this.ttlMs = Math.max(1, options.ttlMs ?? 15 * 6e4);
+    this.maxEntries = Math.max(1, options.maxEntries ?? 1e3);
+    this.now = options.now ?? Date.now;
   }
-  match = data.match(/^tsub_(confirm|back)_([A-Za-z0-9_-]{1,64})$/);
-  if (match) return { kind: match[1], token: match[2] };
-  return null;
+  key(userId, chatKey) {
+    return `${userId}:${canonicalTelegramChatKey(chatKey)}`;
+  }
+  removeExpired(now = this.now()) {
+    let removed = 0;
+    for (const [key, value] of this.entries) {
+      if (value.expiresAt <= now) {
+        this.entries.delete(key);
+        removed += 1;
+      }
+    }
+    return removed;
+  }
+  enforceCapacity() {
+    while (this.entries.size >= this.maxEntries) {
+      let oldestKey;
+      let oldestCreatedAt = Number.POSITIVE_INFINITY;
+      for (const [key, value] of this.entries) {
+        if (value.createdAt < oldestCreatedAt) {
+          oldestCreatedAt = value.createdAt;
+          oldestKey = key;
+        }
+      }
+      if (!oldestKey) break;
+      this.entries.delete(oldestKey);
+    }
+  }
+  set(input) {
+    const now = this.now();
+    this.removeExpired(now);
+    const key = this.key(input.userId, input.chatKey);
+    if (!this.entries.has(key)) this.enforceCapacity();
+    const record = {
+      ...input,
+      chatKey: canonicalTelegramChatKey(input.chatKey),
+      createdAt: now,
+      expiresAt: now + this.ttlMs
+    };
+    this.entries.set(key, record);
+    return record;
+  }
+  lookup(userId, chatKey) {
+    const key = this.key(userId, chatKey);
+    const record = this.entries.get(key);
+    if (!record) return { status: "missing" };
+    if (record.expiresAt <= this.now()) {
+      this.entries.delete(key);
+      return { status: "expired" };
+    }
+    return { status: "active", record };
+  }
+  get(userId, chatKey) {
+    const result = this.lookup(userId, chatKey);
+    return result.status === "active" ? result.record : void 0;
+  }
+  update(userId, chatKey, input) {
+    const current3 = this.lookup(userId, chatKey);
+    if (current3.status !== "active") return void 0;
+    const now = this.now();
+    const record = {
+      ...current3.record,
+      kind: input.kind,
+      step: input.step,
+      value: input.value,
+      originMessageId: input.originMessageId ?? current3.record.originMessageId,
+      expiresAt: now + this.ttlMs
+    };
+    this.entries.set(this.key(userId, chatKey), record);
+    return record;
+  }
+  delete(userId, chatKey) {
+    return this.entries.delete(this.key(userId, chatKey));
+  }
+  cleanup() {
+    return this.removeExpired();
+  }
+  validateCallback(input) {
+    const record = this.get(input.userId, input.chatKey);
+    if (!record) return { ok: false, reason: "expired-or-missing" };
+    if (record.originMessageId !== input.messageId) return { ok: false, reason: "message-mismatch" };
+    if (!input.allowedActions.includes(input.action)) return { ok: false, reason: "action-not-allowed" };
+    return { ok: true, record };
+  }
+  get size() {
+    this.removeExpired();
+    return this.entries.size;
+  }
+};
+
+// src/bot/context.ts
+function messageChatKey(message, senderId) {
+  return canonicalTelegramChatKey(message.chatId?.toString() || senderId);
+}
+function callbackChatKey(update, userId) {
+  return telegramChatKeyFromPeerParts(update.peer, userId);
+}
+function telegramSubscriptionPeerKey(peer) {
+  const value = peer?.userId || peer?.chatId || peer?.channelId;
+  return String(value?.toString?.() || value || peer?.toString?.() || "").replace(/^-100/, "").replace(/^-/, "");
+}
+
+// src/bot/presentation/subscription.ts
+function buildSubscriptionDisplayLines(row, index) {
+  const status = row.enabled ? "\u2705" : "\u23F8\uFE0F";
+  const sourceLine = row.source_original && row.source_original !== row.source ? `   ${row.source_original} \u2192 ${row.source} \xB7 last_id=${row.last_message_id || 0}` : `   ${row.source} \xB7 last_id=${row.last_message_id || 0}`;
+  return [
+    `${index + 1}. ${status} ${row.title || row.source_original || row.source}`,
+    sourceLine,
+    row.folder_override ? `   \u{1F4C1} \u4E13\u5C5E\u76EE\u5F55\uFF1A${row.folder_override}` : "   \u{1F4C1} \u4FDD\u5B58\u7B56\u7565\uFF1A\u9ED8\u8BA4\u81EA\u52A8\u5206\u7C7B",
+    `   \u{1F3AF} Target\uFF1A${row.target_mode === "fixed" ? `${row.target_provider} / ${row.target_account_id || "local"}\uFF08\u56FA\u5B9A\uFF09` : "\u8DDF\u968F\u7CFB\u7EDF\u9ED8\u8BA4\uFF08\u6BCF\u6B21 admission \u5FEB\u7167\uFF09"}`,
+    row.last_scan_at ? `   \u{1F50E} \u4E0A\u6B21\u626B\u63CF\uFF1A${new Date(row.last_scan_at).toLocaleString("zh-CN", { hour12: false })}` : "   \u{1F50E} \u5C1A\u672A\u626B\u63CF",
+    row.last_success_at ? `   \u2705 \u4E0A\u6B21\u6210\u529F\uFF1A${new Date(row.last_success_at).toLocaleString("zh-CN", { hour12: false })}` : null,
+    row.next_scan_at ? `   \u23ED\uFE0F \u4E0B\u6B21\u626B\u63CF\u7EA6\uFF1A${new Date(row.next_scan_at).toLocaleString("zh-CN", { hour12: false })}` : null,
+    row.last_result ? `   \u{1F4CA} \u6700\u8FD1\u7ED3\u679C\uFF1A${row.last_result.status || "unknown"}${row.last_result.found !== void 0 ? `\uFF0C\u53D1\u73B0 ${row.last_result.found}` : ""}${row.last_result.failed ? `\uFF0C\u5931\u8D25 ${row.last_result.failed}` : ""}` : null,
+    row.last_error ? `   \u26A0\uFE0F \u6700\u8FD1\u9519\u8BEF\uFF1A${row.last_error}` : null,
+    !row.enabled && row.disabled_reason ? `   \u26A0\uFE0F ${row.disabled_reason}` : null,
+    !row.enabled && row.disabled_at ? `   \u6682\u505C\u65F6\u95F4\uFF1A${new Date(row.disabled_at).toLocaleString("zh-CN", { hour12: false })}` : null
+  ].filter(Boolean).join("\n");
+}
+function buildSubscriptionManagePanel(rows, page) {
+  return [
+    "\u{1F4E1} **\u9891\u9053\u8BA2\u9605\u7BA1\u7406**",
+    ...page.totalPages > 1 ? [`\u7B2C ${page.page + 1}/${page.totalPages} \u9875 \xB7 \u5171 ${rows.length} \u4E2A\u8BA2\u9605`] : [],
+    "",
+    page.visibleRows.length > 0 ? page.visibleRows.map((row, index) => buildSubscriptionDisplayLines(row, page.startIndex + index)).join("\n") : "\u5F53\u524D\u6CA1\u6709\u8BA2\u9605\u3002",
+    "",
+    rows.length > 0 ? "\u53EF\u4F7F\u7528\u64CD\u4F5C\u6309\u94AE\u540C\u6B65\u3001\u6682\u505C\u3001\u4FEE\u6539\u76EE\u6807\u3001\u8865\u6293\u6216\u91CD\u8BD5\uFF1B\u5DF2\u4FDD\u5B58\u6587\u4EF6\u4E0D\u4F1A\u968F\u53D6\u6D88\u8BA2\u9605\u5220\u9664\u3002" : "\u56DE\u590D\u9891\u9053\u7528\u6237\u540D\u6216\u94FE\u63A5\u53EF\u65B0\u589E\u8BA2\u9605\u3002",
+    "\u56DE\u590D\u9891\u9053\u7528\u6237\u540D\u6216\u94FE\u63A5\u4E5F\u53EF\u65B0\u589E\u8BA2\u9605\u3002",
+    "\u4F8B\u5982\uFF1A`@channel_username`\u3001`https://t.me/channel_username` \u6216\u5DF2\u52A0\u5165\u7684 `https://t.me/+hash` \u79C1\u5BC6\u94FE\u63A5",
+    "",
+    "\u65B0\u589E\u8BA2\u9605\u65F6\u53EF\u6307\u5B9A\u72EC\u7ACB\u76EE\u5F55\uFF0C\u4E0D\u4F1A\u6539\u53D8\u5168\u5C40 /path_rules\u3002",
+    "\u53D1\u9001\u201C\u53D6\u6D88\u201D\u53EF\u9000\u51FA\u3002"
+  ].join("\n");
 }
 
 // src/services/telegramBot.ts
@@ -13143,21 +14794,70 @@ function buildBotStartKeyboard() {
     ]
   });
 }
-function buildBotMoreKeyboard() {
-  const visible = BOT_COMMANDS.filter((command) => command.help && !["start", "tasks", "storage", "help"].includes(command.command));
+function homePageKeyboard(requestedPage) {
+  const page = buildCommandHomePage(requestedPage);
   return new Api7.ReplyInlineMarkup({
-    rows: visible.slice(0, 12).map((command) => new Api7.KeyboardButtonRow({
-      buttons: [new Api7.KeyboardButtonCallback({ text: `/${command.command} \xB7 ${command.description}`, data: Buffer.from(`home_cmd_${command.command}`) })]
+    rows: page.buttons.map((row) => new Api7.KeyboardButtonRow({
+      buttons: row.map((button) => new Api7.KeyboardButtonCallback({ text: button.text, data: Buffer.from(button.data) }))
     }))
   });
+}
+function homePageText(requestedPage) {
+  const page = buildCommandHomePage(requestedPage);
+  const labels = { main: "\u5E38\u7528\u5165\u53E3", files: "\u6587\u4EF6\u4E0E\u4FDD\u5B58\u4F4D\u7F6E", channels: "\u9891\u9053\u4E0E\u8BA2\u9605", settings: "\u4EFB\u52A1\u4E0E\u7CFB\u7EDF\u8BBE\u7F6E", security: "\u5B89\u5168" };
+  return [`\u2630 **${labels[page.category] || page.category}**`, `\u7B2C ${page.page + 1}/${page.totalPages} \u9875`, "", "\u70B9\u51FB\u6309\u94AE\u53EF\u76F4\u63A5\u6253\u5F00\u5BF9\u5E94\u529F\u80FD\u3002"].join("\n");
 }
 async function handleBotHomeCallback(update, data) {
   const userId = update.userId.toJSNumber();
   if (!await isAuthenticatedAsync(userId)) return;
-  if (data === "home_tasks") return handleTasks(await client.getMessages(update.peer, { ids: Number(update.msgId) }).then((messages) => messages[0]));
-  if (data === "home_storage") return handleStorage(await client.getMessages(update.peer, { ids: Number(update.msgId) }).then((messages) => messages[0]));
-  const text = data === "home_upload" ? "\u{1F4E4} \u76F4\u63A5\u53D1\u9001\u6216\u8F6C\u53D1\u4EFB\u610F\u6587\u4EF6\u5373\u53EF\u4E0A\u4F20\u3002\n\n\u4F7F\u7528 /path_rules \u9009\u62E9\u4FDD\u5B58\u4F4D\u7F6E\uFF0C\u4F7F\u7528 /tasks \u67E5\u770B\u8FDB\u5EA6\u3002" : data === "home_more" ? "\u2630 **\u66F4\u591A\u80FD\u529B**\n\n\u8BF7\u9009\u62E9\u4E0B\u65B9\u547D\u4EE4\uFF0C\u6216\u53D1\u9001 /help \u67E5\u770B\u5B8C\u6574\u8BF4\u660E\u3002" : `\u8BF7\u53D1\u9001 /${data.replace(/^home_cmd_/, "")} \u4F7F\u7528\u6B64\u80FD\u529B\u3002`;
-  await client.editMessage(update.peer, { message: Number(update.msgId), text, buttons: data === "home_more" ? buildBotMoreKeyboard() : buildBotStartKeyboard() });
+  const currentMessage = async () => client.getMessages(update.peer, { ids: Number(update.msgId) }).then((messages) => messages[0]);
+  if (data === "home_tasks" || data === "home_open_tasks") return handleTasks(await currentMessage());
+  if (data === "home_storage" || data === "home_open_storage") return handleStorage(await currentMessage());
+  if (data === "home_upload") {
+    await client.editMessage(update.peer, { message: Number(update.msgId), text: "\u{1F4E4} \u76F4\u63A5\u53D1\u9001\u6216\u8F6C\u53D1\u4EFB\u610F\u6587\u4EF6\u5373\u53EF\u4E0A\u4F20\u3002\n\n\u4F7F\u7528 /path_rules \u9009\u62E9\u4FDD\u5B58\u4F4D\u7F6E\uFF0C\u4F7F\u7528 /tasks \u67E5\u770B\u8FDB\u5EA6\u3002", buttons: buildBotStartKeyboard() });
+    return;
+  }
+  const pageMatch = data.match(/^home_page_(\d+)$/);
+  if (data === "home_more" || pageMatch) {
+    const page = pageMatch ? Number(pageMatch[1]) : 0;
+    await client.editMessage(update.peer, { message: Number(update.msgId), text: homePageText(page), buttons: homePageKeyboard(page) });
+    return;
+  }
+  const openMatch = data.match(/^home_open_([a-z0-9_]+)$/);
+  if (!openMatch) return;
+  const command = openMatch[1];
+  const message = await currentMessage();
+  if (command === "storage_switch") return handleStorageSwitch(message);
+  if (command === "target") return handleTarget(message, []);
+  if (command === "path_rules") return handlePathRules(message);
+  if (command === "tg_download") return startTelegramWizard(message, userId, "tg_download");
+  if (command === "tg_sub") return startTelegramWizard(message, userId, "tg_sub_manage");
+  if (command === "tg_subs") {
+    const rows = await listManageableTelegramSubscriptions(userId);
+    await message.reply({ message: formatSubscriptionList(rows) });
+    return;
+  }
+  if (command === "list") return handleList(message, []);
+  if (command === "find") return handleFind(message, []);
+  if (command === "status") return handleStatus(message);
+  if (command === "notifications") return handleNotifications(message, []);
+  if (command === "tasks") return handleTasks(message);
+  if (command === "task_pause") return handlePauseTasks(message, []);
+  if (command === "task_resume") return handleResumeTasks(message, []);
+  if (command === "stop_tasks") return handleStopTasks(message);
+  if (command === "tg_retry") return handleRetryFailedTasks(message, []);
+  if (command === "download_workers") return handleDownloadWorkers(message);
+  if (command === "file_concurrency") return handleFileConcurrency(message);
+  if (command === "pc") return handlePathClear(message);
+  if (command === "duplicate_mode") return handleDuplicateMode(message);
+  if (command === "cleanup_settings") return handleCleanupSettings(message);
+  if (command === "help") return handleHelp(message);
+  if (command === "logout") {
+    await client.sendMessage(update.peer, { message: "\u53D1\u9001 /logout \u53EF\u7ACB\u5373\u64A4\u9500\u5F53\u524D Bot \u8BA4\u8BC1\u3002" });
+    return;
+  }
+  const definition = BOT_COMMANDS.find((item) => item.command === command);
+  await client.sendMessage(update.peer, { message: `/${command}${definition?.usage ? ` ${definition.usage}` : ""}` });
 }
 var SESSION_FILE = process.env.TELEGRAM_SESSION_FILE || "./data/telegram_session.txt";
 var client = null;
@@ -13191,7 +14891,34 @@ function buildTelegramCommentsKeyboard() {
     ]
   });
 }
-var telegramWizardStates = /* @__PURE__ */ new Map();
+var TELEGRAM_INTERACTION_TTL_MS = Math.max(6e4, parseInt(process.env.TELEGRAM_INTERACTION_TTL_MS || "900000", 10) || 9e5);
+var TELEGRAM_INTERACTION_MAX_ENTRIES = Math.max(10, parseInt(process.env.TELEGRAM_INTERACTION_MAX_ENTRIES || "1000", 10) || 1e3);
+var telegramWizardStates = new TelegramInteractionStore({
+  ttlMs: TELEGRAM_INTERACTION_TTL_MS,
+  maxEntries: TELEGRAM_INTERACTION_MAX_ENTRIES
+});
+var ytDlpConfirmations = new YtDlpConfirmationStore({
+  ttlMs: Math.min(TELEGRAM_INTERACTION_TTL_MS, 5 * 6e4),
+  maxEntries: Math.min(TELEGRAM_INTERACTION_MAX_ENTRIES, 500)
+});
+function putTelegramWizardState(userId, chatKey, state, originMessageId) {
+  telegramWizardStates.set({
+    userId,
+    chatKey,
+    kind: state.kind,
+    step: state.step,
+    originMessageId,
+    value: state
+  });
+}
+function refreshTelegramWizardState(userId, chatKey, state, originMessageId) {
+  telegramWizardStates.update(userId, chatKey, {
+    kind: state.kind,
+    step: state.step,
+    value: state,
+    originMessageId
+  });
+}
 var pendingSubscriptionCancels = /* @__PURE__ */ new Map();
 var TELEGRAM_SUBSCRIPTION_CONFIRM_TTL_MS = 2 * 60 * 1e3;
 var telegramRateBuckets = /* @__PURE__ */ new Map();
@@ -13217,8 +14944,8 @@ function getPinLockSeconds(userId) {
 }
 function recordPinFailure(userId) {
   const now = Date.now();
-  const current2 = pinFailureState.get(userId);
-  const state = !current2 || now - current2.windowStartedAt >= TELEGRAM_PIN_FAIL_WINDOW_MS ? { windowStartedAt: now, failed: 0 } : current2;
+  const current3 = pinFailureState.get(userId);
+  const state = !current3 || now - current3.windowStartedAt >= TELEGRAM_PIN_FAIL_WINDOW_MS ? { windowStartedAt: now, failed: 0 } : current3;
   state.failed += 1;
   if (state.failed >= TELEGRAM_PIN_FAIL_MAX) {
     state.lockedUntil = now + TELEGRAM_PIN_LOCK_MS;
@@ -13319,12 +15046,17 @@ function buildTelegramWizardPrompt(state) {
   }
   if (state.step === "confirm") {
     const range = state.kind === "tg_tag" ? `\u6807\u7B7E\uFF1A#${state.tag}` : `\u65E5\u671F\uFF1A${state.startDate} \u2192 ${state.endDate}`;
+    const dateRangeLines = state.kind === "tg_date" ? [
+      `\u{1F4C5} \u5171 ${state.dayCount || 0} \u5929\uFF08\u542B\u9996\u5C3E\u65E5\u671F\uFF09`,
+      state.requiresLargeRangeConfirmation ? "\u26A0\uFE0F \u8303\u56F4\u8F83\u5927\uFF1A\u786E\u8BA4\u540E\u5C06\u6267\u884C\u5206\u6BB5\u626B\u63CF\uFF0C\u8BF7\u6838\u5BF9\u65E5\u671F\u548C\u5B58\u50A8\u76EE\u6807\u3002" : null
+    ] : [];
     return [
       title,
       "",
       "\u8BF7\u786E\u8BA4\u4EFB\u52A1\u8303\u56F4\uFF1A",
       `\u{1F4CD} \u9891\u9053\uFF1A${state.source}`,
       `\u{1F50E} ${range}`,
+      ...dateRangeLines,
       `\u{1F4AC} \u8BC4\u8BBA\u533A\uFF1A${state.includeComments ? `\u5305\u542B\uFF08\u6BCF\u5E16\u6700\u591A ${state.commentsMaxPerPost} \u6761\uFF09` : "\u4E0D\u5305\u542B"}`,
       `\u{1F4C1} \u76EE\u5F55\uFF1A${state.customFolder || "\u9ED8\u8BA4\u81EA\u52A8\u5206\u7C7B"}`,
       `\u2601\uFE0F \u56FA\u5B9A\u5B58\u50A8\uFF1A${state.targetProvider || "\u5F53\u524D\u5B58\u50A8"} / ${state.targetAccountName || state.targetAccountId || "\u5F53\u524D\u8D26\u6237"}`,
@@ -13367,7 +15099,12 @@ function buildTelegramWizardPrompt(state) {
   ].join("\n");
 }
 function isDateOnly(text) {
-  return /^\d{4}-\d{2}-\d{2}$/.test(text.trim());
+  try {
+    parseDateOnlyStrict(text.trim());
+    return true;
+  } catch {
+    return false;
+  }
 }
 function buildLegacyJobProgressPresentation(summary) {
   const totalDone = summary.completed + summary.failed + summary.skipped;
@@ -13431,24 +15168,36 @@ ID: ${String(result.jobId).slice(0, 12)}
 }
 async function startTelegramWizard(message, senderId, kind) {
   const state = { kind, step: kind === "tg_download" ? "mode" : "source" };
-  telegramWizardStates.set(senderId, state);
+  const chatKey = messageChatKey(message, senderId);
+  let originMessageId;
   if (kind === "tg_sub_manage") {
     const rows = await listManageableTelegramSubscriptions(senderId);
-    await message.reply({ message: buildSubscriptionManagePanel(rows, 0), buttons: buildSubscriptionActionKeyboard(rows, 0) });
+    const reply2 = await message.reply({ message: buildSubscriptionManagePanel2(rows, 0), buttons: buildSubscriptionActionKeyboard(rows, 0) });
+    originMessageId = reply2.id;
+    putTelegramWizardState(senderId, chatKey, state, originMessageId);
     return;
   }
-  await message.reply({
+  const reply = await message.reply({
     message: buildTelegramWizardPrompt(state),
     buttons: kind === "tg_download" ? buildTelegramDownloadModeKeyboard() : void 0
   });
+  originMessageId = reply.id;
+  putTelegramWizardState(senderId, chatKey, state, originMessageId);
 }
 async function handleTelegramWizardMessage(message, senderId, text) {
-  const state = telegramWizardStates.get(senderId);
-  if (!state) return false;
+  const chatKey = messageChatKey(message, senderId);
+  const lookup2 = telegramWizardStates.lookup(senderId, chatKey);
+  if (lookup2.status === "expired") {
+    await message.reply({ message: "\u231B \u5F53\u524D\u5411\u5BFC\u5DF2\u8FC7\u671F\uFF0C\u8BF7\u91CD\u65B0\u6253\u5F00\u3002" });
+    return true;
+  }
+  if (lookup2.status === "missing") return false;
+  const state = lookup2.record.value;
   const input = text.trim();
   if (!input) return true;
+  refreshTelegramWizardState(senderId, chatKey, state, lookup2.record.originMessageId);
   if (isCancelInput(input)) {
-    telegramWizardStates.delete(senderId);
+    telegramWizardStates.delete(senderId, chatKey);
     await message.reply({ message: "\u5DF2\u53D6\u6D88 Telegram \u9891\u9053\u64CD\u4F5C\u5411\u5BFC\u3002" });
     return true;
   }
@@ -13489,7 +15238,7 @@ async function handleTelegramWizardMessage(message, senderId, text) {
           await message.reply({ message: "\u274C \u6CA1\u6709\u8FD9\u4E2A\u5E8F\u53F7\uFF0C\u8BF7\u56DE\u590D\u5217\u8868\u4E2D\u7684\u5E8F\u53F7\uFF0C\u6216\u53D1\u9001\u9891\u9053\u7528\u6237\u540D/\u94FE\u63A5\u6765\u65B0\u589E\u8BA2\u9605\u3002" });
           return true;
         }
-        telegramWizardStates.delete(senderId);
+        telegramWizardStates.delete(senderId, chatKey);
         await sendSubscriptionCancelConfirmation(message, senderId, target2, 0);
         return true;
       }
@@ -13520,7 +15269,7 @@ async function handleTelegramWizardMessage(message, senderId, text) {
       }
     }
     if (state.kind === "tg_sub_manage") {
-      telegramWizardStates.delete(senderId);
+      telegramWizardStates.delete(senderId, chatKey);
       try {
         if (state.subscriptionId) {
           const sub = await updateTelegramSubscriptionFolder(senderId, state.subscriptionId, state.customFolder || null);
@@ -13531,7 +15280,7 @@ async function handleTelegramWizardMessage(message, senderId, text) {
               sub && state.customFolder ? `\u{1F4C1} \u4E13\u5C5E\u76EE\u5F55\uFF1A${state.customFolder}
 ${buildPathPreviewLine(state.customFolder)}` : "\u{1F4C1} \u4FDD\u5B58\u7B56\u7565\uFF1A\u9ED8\u8BA4\u81EA\u52A8\u5206\u7C7B",
               "",
-              buildSubscriptionManagePanel(rowsAfterUpdate, 0)
+              buildSubscriptionManagePanel2(rowsAfterUpdate, 0)
             ].filter(Boolean).join("\n"),
             buttons: buildSubscriptionActionKeyboard(rowsAfterUpdate, 0)
           });
@@ -13577,7 +15326,7 @@ ${buildPathPreviewLine(state.customFolder)}` : "\u{1F4C1} \u672C\u8BA2\u9605\u4F
       await message.reply({ message: "\u8BF7\u53D1\u9001 `\u786E\u8BA4` \u5F00\u59CB\u4EFB\u52A1\uFF0C\u6216\u53D1\u9001 `\u53D6\u6D88` \u653E\u5F03\u3002" });
       return true;
     }
-    telegramWizardStates.delete(senderId);
+    telegramWizardStates.delete(senderId, chatKey);
     try {
       if (state.kind === "tg_tag") {
         const queuedMsg = await message.reply({ message: `\u23F3 \u5DF2\u786E\u8BA4\uFF0C\u5F00\u59CB\u540E\u53F0\u626B\u63CF ${state.source} \u4E2D\u5E26\u6709 ${state.tag?.startsWith("#") ? state.tag : `#${state.tag}`} \u7684\u5A92\u4F53\u6D88\u606F\u2026` });
@@ -13586,8 +15335,7 @@ ${buildPathPreviewLine(state.customFolder)}` : "\u{1F4C1} \u672C\u8BA2\u9605\u4F
           commentsMaxPerPost: state.commentsMaxPerPost || TELEGRAM_COMMENTS_MAX_PER_POST,
           onScanComplete: (summary) => updateScanStatusMessage(queuedMsg, summary),
           onProgress: (summary) => updateJobProgressMessage(queuedMsg, summary),
-          targetProvider: state.targetProvider,
-          targetAccountId: state.targetAccountId
+          target: state.target
         }), "tag");
       } else {
         const queuedMsg = await message.reply({ message: `\u23F3 \u5DF2\u786E\u8BA4\uFF0C\u5F00\u59CB\u540E\u53F0\u626B\u63CF ${state.source}\uFF1A${state.startDate} \u2192 ${state.endDate}\u2026` });
@@ -13596,8 +15344,7 @@ ${buildPathPreviewLine(state.customFolder)}` : "\u{1F4C1} \u672C\u8BA2\u9605\u4F
           commentsMaxPerPost: state.commentsMaxPerPost || TELEGRAM_COMMENTS_MAX_PER_POST,
           onScanComplete: (summary) => updateScanStatusMessage(queuedMsg, summary),
           onProgress: (summary) => updateJobProgressMessage(queuedMsg, summary),
-          targetProvider: state.targetProvider,
-          targetAccountId: state.targetAccountId
+          target: state.target
         }), "date");
       }
     } catch (error) {
@@ -13607,8 +15354,10 @@ ${buildPathPreviewLine(state.customFolder)}` : "\u{1F4C1} \u672C\u8BA2\u9605\u4F
   }
   if (state.step === "tag") {
     state.tag = input;
-    const target2 = storageManager.getActiveTarget();
+    const selectedTarget2 = await consumeOrGetTelegramTargetState(chatKey);
+    const target2 = selectedTarget2 ? storageManager.getTarget(selectedTarget2.provider, selectedTarget2.accountId) : storageManager.getActiveTarget();
     const accounts2 = await storageManager.getAccounts();
+    state.target = target2;
     state.targetProvider = target2.provider.name;
     state.targetAccountId = target2.accountId;
     state.targetAccountName = accounts2.find((account) => String(account.id) === String(target2.accountId || ""))?.name || (target2.provider.name === "local" ? "\u670D\u52A1\u5668\u672C\u5730\u76EE\u5F55" : void 0);
@@ -13630,9 +15379,20 @@ ${buildPathPreviewLine(state.customFolder)}` : "\u{1F4C1} \u672C\u8BA2\u9605\u4F
     await message.reply({ message: "\u274C \u65E5\u671F\u683C\u5F0F\u5FC5\u987B\u662F YYYY-MM-DD\uFF0C\u4F8B\u5982\uFF1A2026-06-27" });
     return true;
   }
+  let dateRange;
+  try {
+    dateRange = parseTelegramDateRange(state.startDate, input);
+  } catch (error) {
+    await message.reply({ message: `\u274C ${error instanceof Error ? error.message : "\u65E5\u671F\u8303\u56F4\u65E0\u6548"}` });
+    return true;
+  }
   state.endDate = input;
-  const target = storageManager.getActiveTarget();
+  state.dayCount = dateRange.dayCount;
+  state.requiresLargeRangeConfirmation = dateRange.requiresLargeRangeConfirmation;
+  const selectedTarget = await consumeOrGetTelegramTargetState(chatKey);
+  const target = selectedTarget ? storageManager.getTarget(selectedTarget.provider, selectedTarget.accountId) : storageManager.getActiveTarget();
   const accounts = await storageManager.getAccounts();
+  state.target = target;
   state.targetProvider = target.provider.name;
   state.targetAccountId = target.accountId;
   state.targetAccountName = accounts.find((account) => String(account.id) === String(target.accountId || ""))?.name || (target.provider.name === "local" ? "\u670D\u52A1\u5668\u672C\u5730\u76EE\u5F55" : void 0);
@@ -13651,6 +15411,12 @@ function buildSubscriptionActionKeyboard(rows, requestedPage = 0) {
     new Api7.KeyboardButtonRow({
       buttons: [new Api7.KeyboardButtonCallback({ text: `${page.startIndex + localIndex + 1}. ${row.title || row.source}`, data: Buffer.from(`tsub_view_${row.id}_${page.page}`) })]
     }),
+    ...[0, 2, 5].map((start, index, starts) => new Api7.KeyboardButtonRow({
+      buttons: buildSubscriptionOperations(row).slice(start, starts[index + 1]).map((operation) => new Api7.KeyboardButtonCallback({
+        text: operation.label,
+        data: Buffer.from(`tsub_${operation.action}_${row.id}_${page.page}`)
+      }))
+    })),
     new Api7.KeyboardButtonRow({
       buttons: [
         new Api7.KeyboardButtonCallback({ text: "\u270F\uFE0F \u4FEE\u6539\u4E13\u5C5E\u76EE\u5F55", data: Buffer.from(`tsub_folder_${row.id}_${page.page}`) }),
@@ -13667,38 +15433,8 @@ function buildSubscriptionActionKeyboard(rows, requestedPage = 0) {
     rows: [...actionRows, new Api7.KeyboardButtonRow({ buttons: navigation })]
   });
 }
-function buildSubscriptionDisplayLines(row, index) {
-  const status = row.enabled ? "\u2705" : "\u23F8\uFE0F";
-  const sourceLine = row.source_original && row.source_original !== row.source ? `   ${row.source_original} \u2192 ${row.source} \xB7 last_id=${row.last_message_id || 0}` : `   ${row.source} \xB7 last_id=${row.last_message_id || 0}`;
-  return [
-    `${index + 1}. ${status} ${row.title || row.source_original || row.source}`,
-    sourceLine,
-    row.folder_override ? `   \u{1F4C1} \u4E13\u5C5E\u76EE\u5F55\uFF1A${row.folder_override}` : "   \u{1F4C1} \u4FDD\u5B58\u7B56\u7565\uFF1A\u9ED8\u8BA4\u81EA\u52A8\u5206\u7C7B",
-    row.last_scan_at ? `   \u{1F50E} \u4E0A\u6B21\u626B\u63CF\uFF1A${new Date(row.last_scan_at).toLocaleString("zh-CN", { hour12: false })}` : "   \u{1F50E} \u5C1A\u672A\u626B\u63CF",
-    row.last_success_at ? `   \u2705 \u4E0A\u6B21\u6210\u529F\uFF1A${new Date(row.last_success_at).toLocaleString("zh-CN", { hour12: false })}` : null,
-    row.next_scan_at ? `   \u23ED\uFE0F \u4E0B\u6B21\u626B\u63CF\u7EA6\uFF1A${new Date(row.next_scan_at).toLocaleString("zh-CN", { hour12: false })}` : null,
-    row.last_result ? `   \u{1F4CA} \u6700\u8FD1\u7ED3\u679C\uFF1A${row.last_result.status || "unknown"}${row.last_result.found !== void 0 ? `\uFF0C\u53D1\u73B0 ${row.last_result.found}` : ""}${row.last_result.failed ? `\uFF0C\u5931\u8D25 ${row.last_result.failed}` : ""}` : null,
-    row.last_error ? `   \u26A0\uFE0F \u6700\u8FD1\u9519\u8BEF\uFF1A${row.last_error}` : null,
-    !row.enabled && row.disabled_reason ? `   \u26A0\uFE0F ${row.disabled_reason}` : null,
-    !row.enabled && row.disabled_at ? `   \u6682\u505C\u65F6\u95F4\uFF1A${new Date(row.disabled_at).toLocaleString("zh-CN", { hour12: false })}` : null
-  ].filter(Boolean).join("\n");
-}
-function buildSubscriptionManagePanel(rows, requestedPage = 0) {
-  const page = buildTelegramSubscriptionPage(rows, requestedPage);
-  return [
-    "\u{1F4E1} **\u9891\u9053\u8BA2\u9605\u7BA1\u7406**",
-    ...page.totalPages > 1 ? [`\u7B2C ${page.page + 1}/${page.totalPages} \u9875 \xB7 \u5171 ${rows.length} \u4E2A\u8BA2\u9605`] : [],
-    "",
-    page.visibleRows.length > 0 ? page.visibleRows.map((row, index) => buildSubscriptionDisplayLines(row, page.startIndex + index)).join("\n") : "\u5F53\u524D\u6CA1\u6709\u8BA2\u9605\u3002",
-    "",
-    rows.length > 0 ? "\u53EF\u76F4\u63A5\u70B9\u51FB\u8BA2\u9605\u4E0B\u65B9\u6309\u94AE\u4FEE\u6539/\u6E05\u9664\u4E13\u5C5E\u76EE\u5F55\u6216\u53D6\u6D88\u8BA2\u9605\uFF1B\u7CFB\u7EDF\u81EA\u52A8\u6682\u505C\u7684\u8BA2\u9605\u4F1A\u4FDD\u7559\u63D0\u9192\uFF0C\u91CD\u65B0\u6DFB\u52A0\u540C\u4E00\u6765\u6E90\u53EF\u6062\u590D\u3002" : "\u56DE\u590D\u9891\u9053\u7528\u6237\u540D\u6216\u94FE\u63A5\u53EF\u65B0\u589E\u8BA2\u9605\u3002",
-    "\u56DE\u590D\u9891\u9053\u7528\u6237\u540D\u6216\u94FE\u63A5\u4E5F\u53EF\u65B0\u589E\u8BA2\u9605\u3002",
-    "\u4F8B\u5982\uFF1A`@channel_username`\u3001`https://t.me/channel_username` \u6216\u5DF2\u52A0\u5165\u7684 `https://t.me/+hash` \u79C1\u5BC6\u94FE\u63A5",
-    "",
-    "\u65B0\u589E\u8BA2\u9605\u65F6\u4F1A\u8BE2\u95EE\u662F\u5426\u4E3A\u672C\u8BA2\u9605\u5355\u72EC\u6307\u5B9A\u4FDD\u5B58\u76EE\u5F55\uFF1B\u8BE5\u76EE\u5F55\u53EA\u5F71\u54CD\u8FD9\u4E2A\u8BA2\u9605\uFF0C\u4E0D\u4F1A\u6539\u53D8\u5168\u5C40 /path_rules\u3002",
-    "",
-    "\u53D1\u9001\u201C\u53D6\u6D88\u201D\u53EF\u9000\u51FA\u3002"
-  ].join("\n");
+function buildSubscriptionManagePanel2(rows, requestedPage = 0) {
+  return buildSubscriptionManagePanel(rows, buildTelegramSubscriptionPage(rows, requestedPage));
 }
 function formatSubscriptionList(rows) {
   if (rows.length === 0) return "\u{1F4ED} \u6682\u65E0\u9891\u9053\u8BA2\u9605\u3002\n\n\u4F7F\u7528 `/tg_sub @\u9891\u9053` \u6DFB\u52A0\u8BA2\u9605\u3002";
@@ -13710,10 +15446,6 @@ function formatSubscriptionList(rows) {
       `   ID: ${String(row.id).slice(0, 8)}`
     ].join("\n"))
   ].join("\n");
-}
-function telegramSubscriptionPeerKey(peer) {
-  const value = peer?.userId || peer?.chatId || peer?.channelId;
-  return String(value?.toString?.() || value || peer?.toString?.() || "").replace(/^-100/, "").replace(/^-/, "");
 }
 function buildSubscriptionCancelConfirm(target, token) {
   return {
@@ -13738,7 +15470,7 @@ function buildSubscriptionCancelConfirm(target, token) {
   };
 }
 async function sendSubscriptionCancelConfirmation(message, userId, target, page) {
-  const token = crypto15.randomBytes(12).toString("base64url");
+  const token = crypto18.randomBytes(12).toString("base64url");
   const confirm = buildSubscriptionCancelConfirm(target, token);
   const sent = await message.reply({ message: confirm.text, buttons: confirm.buttons });
   const messageId = Number(sent.id);
@@ -13752,7 +15484,7 @@ async function sendSubscriptionCancelConfirmation(message, userId, target, page)
   });
 }
 async function editSubscriptionCancelConfirmation(update, userId, target, page) {
-  const token = crypto15.randomBytes(12).toString("base64url");
+  const token = crypto18.randomBytes(12).toString("base64url");
   pendingSubscriptionCancels.set(token, {
     userId,
     peerKey: telegramSubscriptionPeerKey(update.peer),
@@ -13814,6 +15546,68 @@ function generatePasswordKeyboard(currentLength) {
       })
     ]
   });
+}
+function buildYtDlpPreviewText(metadata, target, folder) {
+  const duration = metadata.durationSeconds == null ? "\u672A\u77E5" : `${Math.floor(metadata.durationSeconds / 60)}:${String(Math.floor(metadata.durationSeconds % 60)).padStart(2, "0")}`;
+  return [
+    "\u{1F517} **\u4F5C\u4E3A\u94FE\u63A5\u4E0B\u8F7D\uFF1F**",
+    "",
+    `\u6807\u9898\uFF1A${metadata.title}`,
+    `\u7AD9\u70B9\uFF1A${metadata.site}`,
+    `\u65F6\u957F\uFF1A${duration}`,
+    `\u76EE\u6807\uFF1A${target.provider.name} / ${target.accountId || "local"}`,
+    `\u76EE\u5F55\uFF1A${folder}`,
+    "",
+    "\u8BF7\u9009\u62E9\u683C\u5F0F\uFF1B\u6CA1\u6709\u786E\u8BA4\u4E0D\u4F1A\u521B\u5EFA\u4E0B\u8F7D\u4EFB\u52A1\u3002Cookie \u53EA\u80FD\u5728 Web \u7AEF\u52A0\u5BC6\u914D\u7F6E\uFF0C\u804A\u5929\u4E2D\u4E0D\u4F1A\u63A5\u6536\u3002"
+  ].join("\n");
+}
+function buildYtDlpConfirmKeyboard(token) {
+  return new Api7.ReplyInlineMarkup({ rows: [
+    new Api7.KeyboardButtonRow({ buttons: [
+      new Api7.KeyboardButtonCallback({ text: "\u6700\u4F73\u89C6\u9891", data: Buffer.from(`yp_best_${token}`) }),
+      new Api7.KeyboardButtonCallback({ text: "\u4EC5\u97F3\u9891", data: Buffer.from(`yp_audio_${token}`) })
+    ] }),
+    new Api7.KeyboardButtonRow({ buttons: [new Api7.KeyboardButtonCallback({ text: "\u53D6\u6D88", data: Buffer.from(`yp_cancel_${token}`) })] })
+  ] });
+}
+async function createYtDlpPreview(message, userId, url) {
+  await assertPublicHttpUrl(url);
+  const targetSelection = await consumeOrGetTelegramTargetState(messageChatKey(message, userId));
+  const target = targetSelection ? storageManager.getTarget(targetSelection.provider, targetSelection.accountId) : storageManager.getActiveTarget();
+  const metadata = await runYtDlpProbe(url);
+  const folder = "ytdlp";
+  const preview = await message.reply({ message: buildYtDlpPreviewText(metadata, target, folder) });
+  const issued = ytDlpConfirmations.issue({ actorId: userId, chatKey: messageChatKey(message, userId), messageId: preview.id, url, metadata, target, format: "best", folder });
+  await preview.edit({ text: preview.message, buttons: buildYtDlpConfirmKeyboard(issued.token) });
+}
+async function handleYtDlpPreviewCallback(update, data) {
+  if (!client) return;
+  const match = data.match(/^yp_(best|audio|cancel)_([A-Za-z0-9_-]+)$/);
+  if (!match) return;
+  const [, action, token] = match;
+  const actorId = update.userId.toJSNumber();
+  const binding = { actorId, chatKey: callbackChatKey(update, actorId), messageId: Number(update.msgId) };
+  if (action === "cancel") {
+    const cancelled = ytDlpConfirmations.cancel(token, binding);
+    await client.editMessage(update.peer, { message: update.msgId, text: cancelled ? "\u5DF2\u53D6\u6D88\u94FE\u63A5\u4E0B\u8F7D\uFF0C\u672A\u521B\u5EFA\u4EFB\u52A1\u3002" : "\u786E\u8BA4\u5DF2\u5931\u6548\uFF0C\u8BF7\u91CD\u65B0\u53D1\u9001\u94FE\u63A5\u3002" });
+    await client.invoke(new Api7.messages.SetBotCallbackAnswer({ queryId: update.queryId, message: cancelled ? "\u5DF2\u53D6\u6D88" : "\u5DF2\u5931\u6548", alert: !cancelled }));
+    return;
+  }
+  const consumed = ytDlpConfirmations.consume(token, binding);
+  if (consumed.status !== "ok") {
+    await client.invoke(new Api7.messages.SetBotCallbackAnswer({ queryId: update.queryId, message: "\u786E\u8BA4\u5DF2\u5931\u6548\u6216\u4E0D\u5C5E\u4E8E\u5F53\u524D\u804A\u5929", alert: true }));
+    return;
+  }
+  const currentMessage = (await client.getMessages(update.peer, { ids: [Number(update.msgId)] }))[0];
+  await handleYtDlpCommand(currentMessage, consumed.value.url, consumed.value.target, {
+    format: action === "audio" ? "audio" : "best",
+    folder: consumed.value.folder,
+    metadata: consumed.value.metadata
+  });
+  await client.editMessage(update.peer, { message: update.msgId, text: `${buildYtDlpPreviewText(consumed.value.metadata, consumed.value.target, consumed.value.folder)}
+
+\u2705 \u5DF2\u786E\u8BA4\u5E76\u63D0\u4EA4\u3002` });
+  await client.invoke(new Api7.messages.SetBotCallbackAnswer({ queryId: update.queryId, message: "\u4EFB\u52A1\u5DF2\u63D0\u4EA4" }));
 }
 function canTelegramUserAuthenticate(userId, allowedUsers) {
   return allowedUsers.length > 0 && allowedUsers.includes(userId);
@@ -13962,6 +15756,32 @@ async function handleCleanupButtonCallback(update, cleanupId) {
     }
   }
 }
+async function handleUploadReceiptCallback(update, data) {
+  if (!client) return;
+  const userId = update.userId.toJSNumber();
+  if (!await isAuthenticatedAsync(userId)) {
+    await client.invoke(new Api7.messages.SetBotCallbackAnswer({ queryId: update.queryId, message: MSG.AUTH_REQUIRED, alert: true }));
+    return;
+  }
+  const match = data.match(/^receipt_(retry|failures)_([A-Za-z0-9_-]+)$/);
+  if (!match) return;
+  const [, action, taskId] = match;
+  const chatId = resolveTaskChatIdForControl(taskId);
+  const callbackChatId = callbackChatKey(update, userId);
+  if (!chatId || callbackChatId !== messageChatKey({ chatId }, userId) || !canControlTask(taskId, chatId, userId)) {
+    await client.invoke(new Api7.messages.SetBotCallbackAnswer({ queryId: update.queryId, message: "\u4EFB\u52A1\u5361\u5DF2\u5931\u6548\u6216\u4E0D\u5C5E\u4E8E\u5F53\u524D\u804A\u5929", alert: true }));
+    return;
+  }
+  if (action === "retry") {
+    const result = await retryFailedDownloadTasks(50, taskId, chatId, userId);
+    await refreshSilentProgress(client, update.peer, userId);
+    await client.invoke(new Api7.messages.SetBotCallbackAnswer({ queryId: update.queryId, message: result.retried > 0 ? `\u5DF2\u91CD\u8BD5 ${result.retried} \u9879` : "\u6CA1\u6709\u53EF\u91CD\u8BD5\u5931\u8D25\u9879" }));
+    return;
+  }
+  const details = listFailedDownloadTaskDetails(taskId, chatId, userId);
+  await client.sendMessage(update.peer, { message: ["\u274C **\u5931\u8D25\u660E\u7EC6**", "", ...details.length ? details.slice(0, 30).map((item) => `\u2022 ${item}`) : ["\u5931\u8D25\u8BB0\u5F55\u5DF2\u6E05\u7406\u6216\u4EFB\u52A1\u5DF2\u91CD\u8BD5\u3002"]].join("\n") });
+  await client.invoke(new Api7.messages.SetBotCallbackAnswer({ queryId: update.queryId, message: "\u5DF2\u53D1\u9001\u5931\u8D25\u660E\u7EC6" }));
+}
 async function handleTaskQueueCallback(update, data) {
   if (!client) return;
   const userId = update.userId.toJSNumber();
@@ -14022,17 +15842,31 @@ async function handleTelegramDownloadModeCallback(update, data) {
     await client.invoke(new Api7.messages.SetBotCallbackAnswer({ queryId: update.queryId, message: MSG.AUTH_REQUIRED, alert: true }));
     return;
   }
+  const chatKey = callbackChatKey(update, userId);
+  const action = data.replace(/^tgd_/, "");
+  const validation = telegramWizardStates.validateCallback({
+    userId,
+    chatKey,
+    messageId: Number(update.msgId),
+    action,
+    allowedActions: ["cancel", "mode_date", "mode_tag", "comments_on", "comments_off"]
+  });
+  if (!validation.ok) {
+    await client.invoke(new Api7.messages.SetBotCallbackAnswer({ queryId: update.queryId, message: "\u5411\u5BFC\u5DF2\u5931\u6548\uFF0C\u8BF7\u91CD\u65B0\u6253\u5F00", alert: true }));
+    return;
+  }
+  const record = telegramWizardStates.get(userId, chatKey);
+  const state = record.value;
   if (data === "tgd_cancel") {
-    telegramWizardStates.delete(userId);
+    telegramWizardStates.delete(userId, chatKey);
     await client.editMessage(update.peer, { message: update.msgId, text: "\u5DF2\u53D6\u6D88\u9891\u9053\u6587\u4EF6\u4E0B\u8F7D\u5411\u5BFC\u3002" });
     await client.invoke(new Api7.messages.SetBotCallbackAnswer({ queryId: update.queryId, message: "\u5DF2\u53D6\u6D88" }));
     return;
   }
-  const state = telegramWizardStates.get(userId) || { kind: "tg_download", step: "mode" };
   if (data === "tgd_mode_date") {
     state.kind = "tg_date";
     state.step = "source";
-    telegramWizardStates.set(userId, state);
+    putTelegramWizardState(userId, chatKey, state, record.originMessageId);
     await client.editMessage(update.peer, { message: update.msgId, text: buildTelegramWizardPrompt(state) });
     await client.invoke(new Api7.messages.SetBotCallbackAnswer({ queryId: update.queryId, message: "\u6309\u65E5\u671F\u4E0B\u8F7D" }));
     return;
@@ -14040,7 +15874,7 @@ async function handleTelegramDownloadModeCallback(update, data) {
   if (data === "tgd_mode_tag") {
     state.kind = "tg_tag";
     state.step = "source";
-    telegramWizardStates.set(userId, state);
+    putTelegramWizardState(userId, chatKey, state, record.originMessageId);
     await client.editMessage(update.peer, { message: update.msgId, text: buildTelegramWizardPrompt(state) });
     await client.invoke(new Api7.messages.SetBotCallbackAnswer({ queryId: update.queryId, message: "\u6309\u6807\u7B7E\u4E0B\u8F7D" }));
     return;
@@ -14049,13 +15883,12 @@ async function handleTelegramDownloadModeCallback(update, data) {
     state.includeComments = data === "tgd_comments_on";
     state.commentsMaxPerPost = TELEGRAM_COMMENTS_MAX_PER_POST;
     state.step = state.kind === "tg_tag" ? "tag" : "start_date";
-    telegramWizardStates.set(userId, state);
+    putTelegramWizardState(userId, chatKey, state, record.originMessageId);
     await client.editMessage(update.peer, { message: update.msgId, text: buildTelegramWizardPrompt(state) });
     await client.invoke(new Api7.messages.SetBotCallbackAnswer({
       queryId: update.queryId,
       message: state.includeComments ? "\u5C06\u5305\u542B\u8BC4\u8BBA\u533A\u6587\u4EF6" : "\u4EC5\u4E0B\u8F7D\u9891\u9053\u6B63\u6587\u6587\u4EF6"
     }));
-    return;
   }
 }
 async function handleTelegramSubscriptionCallback(update, data) {
@@ -14075,7 +15908,7 @@ async function handleTelegramSubscriptionCallback(update, data) {
     const page = buildTelegramSubscriptionPage(rows, parsed.page);
     await client.editMessage(update.peer, {
       message: update.msgId,
-      text: buildSubscriptionManagePanel(rows, page.page),
+      text: buildSubscriptionManagePanel2(rows, page.page),
       buttons: buildSubscriptionActionKeyboard(rows, page.page)
     });
     await client.invoke(new Api7.messages.SetBotCallbackAnswer({ queryId: update.queryId, message: "\u8BA2\u9605\u5217\u8868\u5DF2\u5237\u65B0" }));
@@ -14098,7 +15931,7 @@ async function handleTelegramSubscriptionCallback(update, data) {
         text: [
           sub ? `\u2705 \u5DF2\u53D6\u6D88\u8BA2\u9605 ${sub.title || sub.source}` : "\u274C \u8BA2\u9605\u4E0D\u5B58\u5728\u6216\u5DF2\u7ECF\u53D6\u6D88",
           "",
-          buildSubscriptionManagePanel(rowsAfterCancel, page2.page)
+          buildSubscriptionManagePanel2(rowsAfterCancel, page2.page)
         ].join("\n"),
         buttons: buildSubscriptionActionKeyboard(rowsAfterCancel, page2.page)
       });
@@ -14108,7 +15941,7 @@ async function handleTelegramSubscriptionCallback(update, data) {
     const page = buildTelegramSubscriptionPage(rows, pending.page);
     await client.editMessage(update.peer, {
       message: update.msgId,
-      text: buildSubscriptionManagePanel(rows, page.page),
+      text: buildSubscriptionManagePanel2(rows, page.page),
       buttons: buildSubscriptionActionKeyboard(rows, page.page)
     });
     await client.invoke(new Api7.messages.SetBotCallbackAnswer({ queryId: update.queryId, message: "\u5DF2\u8FD4\u56DE\u8BA2\u9605\u5217\u8868" }));
@@ -14121,6 +15954,48 @@ async function handleTelegramSubscriptionCallback(update, data) {
   const target = rows.find((row) => String(row.id) === parsed.id);
   if (!target) {
     await client.invoke(new Api7.messages.SetBotCallbackAnswer({ queryId: update.queryId, message: "\u8BA2\u9605\u4E0D\u5B58\u5728\u6216\u5DF2\u53D6\u6D88", alert: true }));
+    return;
+  }
+  if (parsed.action === "sync") {
+    await requestTelegramSubscriptionSync(userId, parsed.id);
+    await client.invoke(new Api7.messages.SetBotCallbackAnswer({ queryId: update.queryId, message: "\u5DF2\u8BF7\u6C42\u7ACB\u5373\u540C\u6B65" }));
+    return;
+  }
+  if (parsed.action === "pause" || parsed.action === "resume") {
+    await setTelegramSubscriptionEnabled(userId, parsed.id, parsed.action === "resume");
+    const refreshed = await listManageableTelegramSubscriptions(userId);
+    await client.editMessage(update.peer, { message: update.msgId, text: buildSubscriptionManagePanel2(refreshed, parsed.page), buttons: buildSubscriptionActionKeyboard(refreshed, parsed.page) });
+    await client.invoke(new Api7.messages.SetBotCallbackAnswer({ queryId: update.queryId, message: parsed.action === "resume" ? "\u5DF2\u6062\u590D\u8BA2\u9605" : "\u5DF2\u6682\u505C\u8BA2\u9605" }));
+    return;
+  }
+  if (parsed.action === "from_now") {
+    await setTelegramSubscriptionFromNow(userId, parsed.id);
+    await client.invoke(new Api7.messages.SetBotCallbackAnswer({ queryId: update.queryId, message: "\u6E38\u6807\u5DF2\u66F4\u65B0\u4E3A\u5F53\u524D\u6700\u65B0\u6D88\u606F" }));
+    return;
+  }
+  if (parsed.action === "target") {
+    const current3 = target.target_mode === "fixed";
+    await updateTelegramSubscriptionTarget(userId, parsed.id, current3 ? { mode: "follow_global" } : { mode: "fixed", provider: storageManager.getActiveTarget().provider.name, accountId: storageManager.getActiveTarget().accountId });
+    const refreshed = await listManageableTelegramSubscriptions(userId);
+    await client.editMessage(update.peer, { message: update.msgId, text: buildSubscriptionManagePanel2(refreshed, parsed.page), buttons: buildSubscriptionActionKeyboard(refreshed, parsed.page) });
+    await client.invoke(new Api7.messages.SetBotCallbackAnswer({ queryId: update.queryId, message: current3 ? "\u5DF2\u6539\u4E3A\u8DDF\u968F\u5168\u5C40" : "\u5DF2\u56FA\u5B9A\u4E3A\u5F53\u524D\u76EE\u6807" }));
+    return;
+  }
+  if (parsed.action === "result") {
+    await client.invoke(new Api7.messages.SetBotCallbackAnswer({ queryId: update.queryId, message: target.last_result ? JSON.stringify(target.last_result).slice(0, 180) : "\u6682\u65E0\u8FD0\u884C\u7ED3\u679C", alert: true }));
+    return;
+  }
+  if (parsed.action === "retry") {
+    const failed = await query(`SELECT id FROM telegram_background_jobs WHERE kind = 'subscription_sync' AND params->>'subscriptionId' = $1 AND status IN ('failed','completed_with_errors') ORDER BY updated_at DESC LIMIT 1`, [String(target.id)]);
+    const retried = failed.rows[0] ? await retryTelegramBackgroundJob(userId, String(failed.rows[0].id), target.chat_id?.toString()) : null;
+    await client.invoke(new Api7.messages.SetBotCallbackAnswer({ queryId: update.queryId, message: retried ? "\u5DF2\u91CD\u8BD5\u6700\u8FD1\u5931\u8D25\u9879" : "\u6CA1\u6709\u53EF\u91CD\u8BD5\u5931\u8D25\u9879" }));
+    return;
+  }
+  if (parsed.action === "backfill") {
+    const state = { kind: "tg_date", step: "start_date", source: target.source };
+    const sent = await client.sendMessage(update.peer, { message: buildTelegramWizardPrompt(state) });
+    putTelegramWizardState(userId, callbackChatKey(update, userId), state, sent.id);
+    await client.invoke(new Api7.messages.SetBotCallbackAnswer({ queryId: update.queryId, message: "\u8BF7\u8F93\u5165\u8865\u6293\u5F00\u59CB\u65E5\u671F" }));
     return;
   }
   if (parsed.action === "view") {
@@ -14140,8 +16015,8 @@ async function handleTelegramSubscriptionCallback(update, data) {
       subscriptionTitle: target.title,
       subscriptionSource: target.source
     };
-    telegramWizardStates.set(userId, state);
-    await client.sendMessage(update.peer, { message: buildTelegramWizardPrompt(state) });
+    const sent = await client.sendMessage(update.peer, { message: buildTelegramWizardPrompt(state) });
+    putTelegramWizardState(userId, callbackChatKey(update, userId), state, sent.id);
     await client.invoke(new Api7.messages.SetBotCallbackAnswer({ queryId: update.queryId, message: "\u8BF7\u53D1\u9001\u65B0\u7684\u4E13\u5C5E\u76EE\u5F55" }));
     return;
   }
@@ -14151,7 +16026,7 @@ async function handleTelegramSubscriptionCallback(update, data) {
     const page = buildTelegramSubscriptionPage(rowsAfterClear, parsed.page);
     await client.editMessage(update.peer, {
       message: update.msgId,
-      text: buildSubscriptionManagePanel(rowsAfterClear, page.page),
+      text: buildSubscriptionManagePanel2(rowsAfterClear, page.page),
       buttons: buildSubscriptionActionKeyboard(rowsAfterClear, page.page)
     });
     await client.invoke(new Api7.messages.SetBotCallbackAnswer({ queryId: update.queryId, message: "\u5DF2\u6E05\u9664\u4E13\u5C5E\u76EE\u5F55" }));
@@ -14167,10 +16042,12 @@ async function initTelegramBot() {
   const apiHash = process.env.TELEGRAM_API_HASH || "";
   const botToken = process.env.TELEGRAM_BOT_TOKEN || "";
   if (!apiId || !apiHash || !botToken) {
+    resetTelegramBotStatus(false);
     console.log("\u26A0\uFE0F \u672A\u914D\u7F6E Telegram API \u51ED\u8BC1\uFF0CBot \u672A\u542F\u52A8");
     console.log("   \u9700\u8981\u8BBE\u7F6E: TELEGRAM_API_ID, TELEGRAM_API_HASH, TELEGRAM_BOT_TOKEN");
     return;
   }
+  markTelegramBotStarting();
   try {
     console.log("\u{1F916} Telegram Bot \u6B63\u5728\u540C\u6B65\u5B58\u50A8\u914D\u7F6E...");
     await storageManager.init();
@@ -14210,10 +16087,27 @@ async function initTelegramBot() {
       console.warn("\u{1F916} \u4FEE\u6B63 Telegram Bot session \u6587\u4EF6\u6743\u9650\u5931\u8D25:", e);
     }
     console.log("\u{1F916} Telegram Bot \u5DF2\u8FDE\u63A5!");
-    setYtDlpNotifier(async (chatId, text) => {
-      if (!client) return;
-      await client.sendMessage(chatId, { message: text });
+    setYtDlpNotifier(async (task, text) => {
+      if (!client || !task.chatId) return;
+      const kind = /^✅/.test(text) ? "success" : /^❌|^⚠️/.test(text) ? "failure" : "success";
+      const userId = resolveNotificationOwnerUserId(task.ownerUserId, task.chatId);
+      await enqueueTelegramNotification({ userId, chatId: task.chatId, kind, message: text }, {
+        send: async (targetChat, message) => {
+          await client.sendMessage(targetChat, { message });
+        }
+      });
     });
+    const digestTimer = setInterval(() => {
+      if (!client) return;
+      void getConfiguredTelegramAllowedUsers().then((users) => Promise.all(users.map(
+        (userId) => flushTelegramNotificationDigest(userId, String(userId), {
+          send: async (chatId, message) => {
+            await client.sendMessage(chatId, { message });
+          }
+        }).catch(() => 0)
+      ))).catch(() => void 0);
+    }, 6e4);
+    digestTimer.unref?.();
     try {
       await query(`
                 CREATE TABLE IF NOT EXISTS telegram_auth (
@@ -14254,7 +16148,9 @@ async function initTelegramBot() {
         const stats = await cleanupOrphanFiles();
         if (stats.deletedCount > 0) {
           console.log(`\u{1F9F9} \u542F\u52A8\u6E05\u7406: \u5220\u9664\u4E86 ${stats.deletedCount} \u4E2A\u5B64\u513F\u6587\u4EF6\uFF0C\u91CA\u653E ${stats.freedSpace}`);
-          for (const userId of authenticatedUsers.keys()) {
+          const allowedUsers = await getConfiguredTelegramAllowedUsers();
+          const recipients = allowedUsers.length > 0 ? (await reconcileTelegramAllowedUsers(allowedUsers)).recipients : [];
+          for (const userId of recipients) {
             try {
               await client.sendMessage(userId, {
                 message: buildCleanupNotice(stats.deletedCount, stats.freedSpace)
@@ -14336,6 +16232,18 @@ async function initTelegramBot() {
           await handleHelp(message);
           return;
         }
+        if (text === "/logout") {
+          if (!await isAuthenticatedAsync(senderId)) {
+            await message.reply({ message: MSG.AUTH_REQUIRED });
+            return;
+          }
+          await revokeAuthenticatedUser(senderId);
+          passwordInputState.delete(senderId);
+          userStates.delete(senderId);
+          telegramWizardStates.delete(senderId, messageChatKey(message, senderId));
+          await message.reply({ message: "\u2705 \u5F53\u524D Telegram \u7528\u6237\u7684 Bot \u8BA4\u8BC1\u5DF2\u64A4\u9500\u3002\u53D1\u9001 /start \u53EF\u91CD\u65B0\u8BA4\u8BC1\u3002" });
+          return;
+        }
         {
           const match = text.match(/^\s*\/ytdlp(?:@\w+)?(?:\s+([\s\S]*))?\s*$/i);
           if (match) {
@@ -14361,7 +16269,7 @@ async function initTelegramBot() {
               await message.reply({ message: `\u274C \u65E0\u6548\u94FE\u63A5\uFF1A${error instanceof Error ? error.message : "\u4E0D\u5141\u8BB8\u8BBF\u95EE\u8BE5\u5730\u5740"}` });
               return;
             }
-            await handleYtDlpCommand(message, url);
+            await createYtDlpPreview(message, senderId, url);
             return;
           }
         }
@@ -14398,6 +16306,22 @@ async function initTelegramBot() {
           return;
         }
         if (!text.startsWith("/")) {
+          const pastedUrl = text.trim();
+          if (/^https?:\/\/\S+$/i.test(pastedUrl) && await isAuthenticatedAsync(senderId)) {
+            try {
+              await createYtDlpPreview(message, senderId, pastedUrl);
+            } catch (error) {
+              await message.reply({ message: `\u274C \u65E0\u6CD5\u9884\u53D6\u94FE\u63A5\uFF1A${error instanceof Error ? error.message : "\u672A\u77E5\u9519\u8BEF"}` });
+            }
+            return;
+          }
+          try {
+            if (await applyPendingTelegramFileMutation(message, senderId, text)) return;
+          } catch (error) {
+            await message.reply({ message: `\u274C \u6587\u4EF6\u64CD\u4F5C\u5931\u8D25\uFF1A${error.message}
+\u8BF7\u91CD\u65B0\u8F93\u5165\u6216\u53D1\u9001\u201C\u53D6\u6D88\u201D\u3002` });
+            return;
+          }
           if (isCancelInput(text)) {
             const pendingMode = getPendingTelegramPathInput(chatId.toString(), senderId);
             if (pendingMode) {
@@ -14569,6 +16493,14 @@ ${buildPathPreviewLine(appliedPath.folder)}
           await handleStorageSwitch(message);
           return;
         }
+        if (text === "/target" || text.startsWith("/target ")) {
+          await handleTarget(message, text.split(/\s+/).slice(1));
+          return;
+        }
+        if (text === "/find" || text.startsWith("/find ")) {
+          await handleFind(message, text.split(/\s+/).slice(1));
+          return;
+        }
         if (text === "/list" || text.startsWith("/list ")) {
           if (!await isAuthenticatedAsync(senderId)) {
             await message.reply({ message: MSG.AUTH_REQUIRED });
@@ -14584,6 +16516,18 @@ ${buildPathPreviewLine(appliedPath.folder)}
           }
           const args = text.split(" ").slice(1);
           await handleDelete(message, args);
+          return;
+        }
+        if (text === "/notifications" || text.startsWith("/notifications ")) {
+          try {
+            await handleNotifications(message, text.split(/\s+/).slice(1));
+          } catch (error) {
+            await message.reply({ message: `\u274C \u901A\u77E5\u8BBE\u7F6E\u5931\u8D25\uFF1A${error.message}` });
+          }
+          return;
+        }
+        if (text === "/status") {
+          await handleStatus(message);
           return;
         }
         if (text === "/tasks" || text === "/task") {
@@ -14760,6 +16704,10 @@ ${buildPathPreviewLine(appliedPath.folder)}
           await handlePasswordCallback(callbackUpdate);
           return;
         }
+        if (data.startsWith("yp_")) {
+          await handleYtDlpPreviewCallback(callbackUpdate, data);
+          return;
+        }
         if (data.startsWith("cleanup_")) {
           await handleCleanupButtonCallback(callbackUpdate, data);
           return;
@@ -14778,6 +16726,10 @@ ${buildPathPreviewLine(appliedPath.folder)}
         }
         if (data.startsWith("storage_")) {
           await handleStorageCleanupCallback(activeClient, callbackUpdate, data);
+          return;
+        }
+        if (data.startsWith("fb_")) {
+          await handleTelegramFileBrowserCallback(activeClient, callbackUpdate, data);
           return;
         }
         if (data.startsWith("del_")) {
@@ -14812,6 +16764,10 @@ ${buildPathPreviewLine(appliedPath.folder)}
           await handleChannelTaskQueueCallback(activeClient, callbackUpdate, data);
           return;
         }
+        if (data.startsWith("receipt_")) {
+          await handleUploadReceiptCallback(callbackUpdate, data);
+          return;
+        }
         if (data.startsWith("tq_")) {
           await handleTaskQueueCallback(callbackUpdate, data);
           return;
@@ -14822,9 +16778,14 @@ ${buildPathPreviewLine(appliedPath.folder)}
         }
       }
     }, new Raw({}));
+    markTelegramBotReady();
     console.log("\u{1F916} Telegram Bot \u542F\u52A8\u6210\u529F! (\u6700\u5927 2GB\uFF0C\u8D26\u53F7\u7EA7\u4E0B\u8F7D\u5668\u4E0D\u53D7\u6B64\u9650\u5236)");
   } catch (error) {
+    const status = classifyTelegramBotStartupError(error);
+    const message = error instanceof Error ? error.message : String(error);
+    markTelegramBotError(status, message, status === "auth_failed" ? "\u68C0\u67E5 Telegram Bot token/API \u51ED\u8BC1\u540E\u91CD\u542F" : "\u68C0\u67E5\u7F51\u7EDC\u4E0E\u540E\u7AEF\u65E5\u5FD7\u540E\u91CD\u542F");
     console.error("\u{1F916} Telegram Bot \u542F\u52A8\u5931\u8D25:", error);
+    throw error;
   }
 }
 async function sendSecurityNotification(message) {
@@ -14832,8 +16793,10 @@ async function sendSecurityNotification(message) {
     console.warn("\u26A0\uFE0F Telegram Client \u672A\u8FDE\u63A5\uFF0C\u65E0\u6CD5\u53D1\u9001\u5B89\u5168\u901A\u77E5");
     return;
   }
-  const authUsers = Array.from(authenticatedUsers.keys());
-  for (const userId of authUsers) {
+  const allowedUsers = await getConfiguredTelegramAllowedUsers();
+  if (allowedUsers.length === 0) return;
+  const { recipients } = await reconcileTelegramAllowedUsers(allowedUsers);
+  for (const userId of recipients) {
     try {
       await client.sendMessage(userId, { message });
     } catch (e) {
@@ -14843,6 +16806,7 @@ async function sendSecurityNotification(message) {
 }
 
 // src/routes/auth.ts
+init_authSettings();
 async function getIPLocation(ip) {
   try {
     if (ip === "::1" || ip === "127.0.0.1") return "\u672C\u5730\u56DE\u73AF";
@@ -15162,7 +17126,7 @@ function generateSignature(fileId, typeOrExpires, expires) {
     throw new Error("Missing signed URL expiration timestamp");
   }
   const data = `${fileId}:${type}:${expiresTimestamp}`;
-  return crypto16.createHmac("sha256", SESSION_SECRET).update(data).digest("hex");
+  return crypto19.createHmac("sha256", SESSION_SECRET).update(data).digest("hex");
 }
 function getSignedUrl(fileId, type, expiresIn = 24 * 60 * 60) {
   const expires = Date.now() + expiresIn * 1e3;
@@ -15190,7 +17154,7 @@ function verifySignedUrl(req) {
   try {
     const received = Buffer.from(sign, "hex");
     const expected = Buffer.from(expectedSign, "hex");
-    if (received.length !== expected.length || !crypto16.timingSafeEqual(received, expected)) {
+    if (received.length !== expected.length || !crypto19.timingSafeEqual(received, expected)) {
       console.log("[SignedURL] Signature mismatch:", { id, type });
       return false;
     }
@@ -15245,9 +17209,9 @@ function createFileDeletionService(dependencies) {
 }
 
 // src/services/webDestructiveConfirmation.ts
-import crypto17 from "node:crypto";
+import crypto20 from "node:crypto";
 function hash(value) {
-  return crypto17.createHash("sha256").update(value).digest("hex");
+  return crypto20.createHash("sha256").update(value).digest("hex");
 }
 var WebDestructiveConfirmationStore = class {
   constructor(ttlMs = 5 * 60 * 1e3, now = () => Date.now()) {
@@ -15258,7 +17222,7 @@ var WebDestructiveConfirmationStore = class {
   now;
   values = /* @__PURE__ */ new Map();
   issue(input) {
-    const token = crypto17.randomBytes(24).toString("base64url");
+    const token = crypto20.randomBytes(24).toString("base64url");
     const expiresAt = this.now() + this.ttlMs;
     this.values.set(token, { action: input.action, objectId: input.objectId, context: input.context ?? null, authTokenHash: hash(input.authToken), expiresAt });
     return { confirmationToken: token, expiresAt };
@@ -15281,211 +17245,6 @@ var webDestructiveConfirmationStore = new WebDestructiveConfirmationStore();
 
 // src/routes/files.ts
 init_localPath();
-
-// src/services/fileQuery.ts
-var FILE_TYPES = /* @__PURE__ */ new Set(["image", "video", "audio", "document", "other", "media"]);
-var SORTS = /* @__PURE__ */ new Set(["date", "name"]);
-var DIRECTIONS = /* @__PURE__ */ new Set(["asc", "desc"]);
-var UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-function single(value) {
-  if (Array.isArray(value)) throw new Error("query parameter must be singular");
-  return typeof value === "string" ? value : void 0;
-}
-function normalizeFileQuery(input) {
-  const rawQ = single(input.q)?.trim() || null;
-  if (rawQ && rawQ.length > 200) throw new Error("q is too long");
-  const rawType = single(input.type)?.trim() || null;
-  if (rawType && !FILE_TYPES.has(rawType)) throw new Error("invalid type");
-  const rawFavorite = single(input.favorite);
-  let favorite = null;
-  if (rawFavorite !== void 0 && rawFavorite !== "") {
-    if (rawFavorite !== "true" && rawFavorite !== "false") throw new Error("invalid favorite");
-    favorite = rawFavorite === "true";
-  }
-  const rawSort = single(input.sort) || "date";
-  if (!SORTS.has(rawSort)) throw new Error("invalid sort");
-  const rawDirection = single(input.direction) || "desc";
-  if (!DIRECTIONS.has(rawDirection)) throw new Error("invalid direction");
-  const rawFolder = single(input.folder);
-  const folder = rawFolder === void 0 ? void 0 : rawFolder.trim() || null;
-  if (folder && folder.length > 500) throw new Error("folder is too long");
-  const parsedLimit = Number.parseInt(single(input.limit) || "200", 10);
-  const limit = Math.min(500, Math.max(1, Number.isFinite(parsedLimit) ? parsedLimit : 200));
-  return {
-    q: rawQ,
-    type: rawType,
-    folder,
-    favorite,
-    sort: rawSort,
-    direction: rawDirection,
-    limit,
-    cursor: single(input.cursor) || null
-  };
-}
-function encodeFileQueryCursor(cursor) {
-  return Buffer.from(JSON.stringify(cursor), "utf8").toString("base64url");
-}
-function decodeFileQueryCursor(encoded, sort, direction) {
-  if (!encoded) return null;
-  try {
-    const parsed = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8"));
-    if (parsed.sort !== sort || parsed.direction !== direction || typeof parsed.value !== "string" || !UUID_PATTERN.test(parsed.id || "")) {
-      return null;
-    }
-    if (sort === "date" && Number.isNaN(Date.parse(parsed.value))) return null;
-    return parsed;
-  } catch {
-    return null;
-  }
-}
-function escapeLike(value) {
-  return value.replace(/[\\%_]/g, (match) => `\\${match}`);
-}
-function addScope(scope, where, params, alias = "") {
-  const prefix = alias ? `${alias}.` : "";
-  if (scope.kind === "local") {
-    params.push("local");
-    where.push(`${prefix}source = $${params.length}`);
-  } else {
-    params.push(scope.accountId);
-    where.push(`${prefix}storage_account_id = $${params.length}`);
-  }
-}
-function addFilters(options, where, params, alias = "", includeFolder = true) {
-  const prefix = alias ? `${alias}.` : "";
-  if (options.q) {
-    params.push(`%${escapeLike(options.q)}%`);
-    where.push(`(${prefix}name ILIKE $${params.length} ESCAPE '\\' OR ${prefix}folder ILIKE $${params.length} ESCAPE '\\')`);
-  }
-  if (options.type === "media") {
-    where.push(`${prefix}type IN ('image', 'video', 'audio')`);
-  } else if (options.type === "document") {
-    where.push(`${prefix}type NOT IN ('image', 'video', 'audio')`);
-  } else if (options.type) {
-    params.push(options.type);
-    where.push(`${prefix}type = $${params.length}`);
-  }
-  if (includeFolder && options.folder !== void 0) {
-    if (options.folder === null) {
-      where.push(`${prefix}folder IS NULL`);
-    } else {
-      params.push(options.folder);
-      where.push(`${prefix}folder = $${params.length}`);
-    }
-  }
-  if (options.favorite !== null) {
-    params.push(options.favorite);
-    where.push(`${prefix}is_favorite = $${params.length}`);
-  }
-}
-function buildFilePageQuery(scope, options) {
-  const where = [];
-  const params = [];
-  addScope(scope, where, params);
-  addFilters(options, where, params);
-  const cursor = decodeFileQueryCursor(options.cursor, options.sort, options.direction);
-  const comparator = options.direction === "asc" ? ">" : "<";
-  const direction = options.direction.toUpperCase();
-  if (cursor) {
-    if (options.sort === "name") {
-      params.push(cursor.value.toLocaleLowerCase(), cursor.id);
-      where.push(`(LOWER(name), id) ${comparator} ($${params.length - 1}, $${params.length}::uuid)`);
-    } else {
-      params.push(cursor.value, cursor.id);
-      where.push(`(created_at, id) ${comparator} ($${params.length - 1}::timestamptz, $${params.length}::uuid)`);
-    }
-  }
-  params.push(options.limit + 1);
-  const sortColumn = options.sort === "name" ? "LOWER(name)" : "created_at";
-  return {
-    text: `SELECT
-    id, name, stored_name, type, mime_type, size, thumbnail_path, preview_path,
-    width, height, source, folder, storage_account_id, is_favorite, created_at, updated_at
-FROM files
-WHERE ${where.join(" AND ")}
-ORDER BY ${sortColumn} ${direction}, id ${direction}
-LIMIT $${params.length}`,
-    params
-  };
-}
-function buildFolderAggregationQuery(scope, options) {
-  const where = ["folder IS NOT NULL"];
-  const params = [];
-  addScope(scope, where, params);
-  addFilters({ ...options, folder: void 0 }, where, params, "", false);
-  const direction = options.direction.toUpperCase();
-  const order = options.sort === "name" ? `folder ${direction}` : `latest_at ${direction}, folder ${direction}`;
-  return {
-    text: `WITH filtered AS (
-    SELECT * FROM files WHERE ${where.join(" AND ")}
-), grouped AS (
-    SELECT
-        folder,
-        COUNT(*) FILTER (WHERE name <> '.folder')::int AS file_count,
-        COALESCE(SUM(size) FILTER (WHERE name <> '.folder'), 0)::bigint AS total_size_bytes,
-        MAX(created_at) AS latest_at,
-        BOOL_AND(is_favorite)::boolean AS is_favorite
-    FROM filtered
-    GROUP BY folder
-)
-SELECT grouped.*, cover.id AS cover_id, cover.name AS cover_name, cover.type AS cover_type,
-       cover.mime_type AS cover_mime_type, cover.thumbnail_path AS cover_thumbnail_path,
-       cover.preview_path AS cover_preview_path, cover.created_at AS cover_created_at
-FROM grouped
-LEFT JOIN LATERAL (
-    SELECT id, name, type, mime_type, thumbnail_path, preview_path, created_at
-    FROM filtered candidate
-    WHERE candidate.folder = grouped.folder AND candidate.name <> '.folder'
-    ORDER BY candidate.created_at DESC, candidate.id DESC
-    LIMIT 1
-) cover ON TRUE
-ORDER BY ${order}`,
-    params
-  };
-}
-function cursorForFile(file, sort, direction) {
-  const value = sort === "name" ? String(file.name || "").toLocaleLowerCase() : new Date(String(file.created_at)).toISOString();
-  return encodeFileQueryCursor({ sort, direction, value, id: String(file.id) });
-}
-
-// src/utils/folderPath.ts
-var INVALID_SEGMENT_CHARACTERS = /[\\:*?"<>|\x00-\x1f\x7f]/;
-var MAX_FOLDER_PATH_LENGTH = 255;
-function normalizeFolderPath(value) {
-  if (typeof value !== "string") throw new Error("\u6587\u4EF6\u5939\u8DEF\u5F84\u683C\u5F0F\u9519\u8BEF");
-  const normalized = value.trim().replace(/^\/+|\/+$/g, "");
-  if (!normalized) throw new Error("\u6587\u4EF6\u5939\u8DEF\u5F84\u4E0D\u80FD\u4E3A\u7A7A");
-  if (normalized.length > MAX_FOLDER_PATH_LENGTH) throw new Error(`\u6587\u4EF6\u5939\u8DEF\u5F84\u4E0D\u80FD\u8D85\u8FC7 ${MAX_FOLDER_PATH_LENGTH} \u4E2A\u5B57\u7B26`);
-  const segments = normalized.split("/");
-  if (segments.some((segment) => !segment || segment === "." || segment === "..")) {
-    throw new Error("\u6587\u4EF6\u5939\u8DEF\u5F84\u5305\u542B\u7A7A\u76EE\u5F55\u6216\u76F8\u5BF9\u8DEF\u5F84");
-  }
-  if (segments.some((segment) => segment !== segment.trim() || INVALID_SEGMENT_CHARACTERS.test(segment))) {
-    throw new Error("\u6587\u4EF6\u5939\u8DEF\u5F84\u5305\u542B\u975E\u6CD5\u5B57\u7B26");
-  }
-  return segments.join("/");
-}
-function normalizeFolderName(value) {
-  const name = normalizeFolderPath(value);
-  if (name.includes("/")) throw new Error("\u6587\u4EF6\u5939\u540D\u79F0\u4E0D\u80FD\u5305\u542B\u8DEF\u5F84\u5206\u9694\u7B26");
-  return name;
-}
-function folderBaseName(folder) {
-  const segments = folder.split("/");
-  return segments[segments.length - 1];
-}
-function folderParent(folder) {
-  const segments = folder.split("/");
-  return segments.length > 1 ? segments.slice(0, -1).join("/") : null;
-}
-function joinFolderPath(parent, name) {
-  return normalizeFolderPath(parent ? `${parent}/${name}` : name);
-}
-function isFolderWithin(folder, ancestor) {
-  return folder === ancestor || folder.startsWith(`${ancestor}/`);
-}
-
-// src/routes/files.ts
 init_mediaProxyError();
 
 // src/services/cloudMediaResponse.ts
@@ -16305,9 +18064,9 @@ function logOperationalEvent(event, requestId, data) {
 }
 
 // src/services/batchDeleteConfirmation.ts
-import crypto18 from "node:crypto";
+import crypto21 from "node:crypto";
 function hashAuthToken(token) {
-  return crypto18.createHash("sha256").update(token).digest("hex");
+  return crypto21.createHash("sha256").update(token).digest("hex");
 }
 function normalizeFileIds(fileIds) {
   return [...new Set(fileIds)].sort();
@@ -16320,7 +18079,7 @@ var BatchDeleteConfirmationStore = class {
   constructor(options = {}) {
     this.ttlMs = options.ttlMs ?? 5 * 60 * 1e3;
     this.now = options.now ?? (() => Date.now());
-    this.tokenFactory = options.tokenFactory ?? (() => crypto18.randomBytes(24).toString("base64url"));
+    this.tokenFactory = options.tokenFactory ?? (() => crypto21.randomBytes(24).toString("base64url"));
   }
   issue(input) {
     const confirmationToken = this.tokenFactory();
@@ -16977,16 +18736,18 @@ var upload_default = router4;
 init_db();
 import { Router as Router5 } from "express";
 import checkDiskSpaceModule2 from "check-disk-space";
-import os3 from "os";
+init_settings();
+init_authSettings();
+import os4 from "os";
 import path19 from "path";
 import fs14 from "fs";
 import axios3 from "axios";
-import crypto20 from "crypto";
+import crypto23 from "crypto";
 
 // src/services/oauthFlowStore.ts
 init_db();
 init_credentialCrypto();
-import crypto19 from "node:crypto";
+import crypto22 from "node:crypto";
 var OAuthFlowError = class extends Error {
   code = "OAUTH_FLOW_INVALID";
   constructor() {
@@ -16995,7 +18756,7 @@ var OAuthFlowError = class extends Error {
   }
 };
 function sha256(value) {
-  return crypto19.createHash("sha256").update(value).digest("hex");
+  return crypto22.createHash("sha256").update(value).digest("hex");
 }
 function parsePendingConfig(value) {
   const parsed = typeof value === "string" ? JSON.parse(value) : value;
@@ -17012,8 +18773,8 @@ var OAuthFlowStore = class {
     this.db = options.db ?? pool;
     this.ttlMs = options.ttlMs ?? 10 * 60 * 1e3;
     this.now = options.now ?? (() => Date.now());
-    this.stateFactory = options.stateFactory ?? (() => crypto19.randomBytes(32).toString("base64url"));
-    this.nonceFactory = options.nonceFactory ?? (() => crypto19.randomBytes(24).toString("base64url"));
+    this.stateFactory = options.stateFactory ?? (() => crypto22.randomBytes(32).toString("base64url"));
+    this.nonceFactory = options.nonceFactory ?? (() => crypto22.randomBytes(24).toString("base64url"));
   }
   async ensureSchema() {
     if (!this.schemaPromise) {
@@ -17259,7 +19020,7 @@ function sendStorageEndpointValidationError(res, error) {
   res.status(400).json({ error: safeMessages.includes(message) ? message : "\u65E0\u6CD5\u89E3\u6790\u5B58\u50A8\u7AEF\u70B9\u5730\u5740" });
 }
 function sendOAuthSuccessPage(res, input) {
-  const nonce = crypto20.randomBytes(16).toString("base64");
+  const nonce = crypto23.randomBytes(16).toString("base64");
   res.setHeader("Content-Security-Policy", [
     "default-src 'self'",
     "style-src 'unsafe-inline'",
@@ -17285,7 +19046,7 @@ function sendOAuthFlowError(res, error) {
 }
 router5.get("/stats", requireAuth, async (_req, res) => {
   try {
-    const diskPath = os3.platform() === "win32" ? "C:" : path19.resolve(UPLOAD_DIR6);
+    const diskPath = os4.platform() === "win32" ? "C:" : path19.resolve(UPLOAD_DIR6);
     const diskSpace = await checkDiskSpace2(diskPath);
     const scope = await getCurrentStorageScope();
     const result = await query(`
@@ -17404,6 +19165,7 @@ router5.get("/config", requireAuth, async (req, res) => {
       telegramUserDownloadEnabled: telegramUserDownloadEnabled === "true",
       telegramUserSessionReady,
       telegramUserClientStatus: getTelegramUserClientStatus(),
+      telegramBotStatus: getTelegramBotStatus(),
       telegramAllowedUserIds,
       telegramAllowedUserIdsFromEnv
     });
@@ -17476,8 +19238,15 @@ router5.post("/config/telegram-allowed-users", requireAuth, async (req, res) => 
     if (userIds.length === 0) {
       return res.status(400).json({ error: "\u8BF7\u81F3\u5C11\u586B\u5199\u4E00\u4E2A Telegram user id" });
     }
-    const saved = await setTelegramAllowedUsers(userIds);
-    res.json({ success: true, userIds: saved });
+    const reconciliation = await setTelegramAllowedUsersAndReconcile(userIds);
+    res.json({
+      success: true,
+      userIds: reconciliation.allowed,
+      added: reconciliation.added.length,
+      removed: reconciliation.removed.length,
+      revoked: reconciliation.revoked.length,
+      message: reconciliation.revoked.length > 0 ? "\u5141\u8BB8\u5217\u8868\u5DF2\u4FDD\u5B58\uFF1B\u79FB\u9664\u7528\u6237\u7684 Bot \u8BA4\u8BC1\u5DF2\u7ACB\u5373\u64A4\u9500\u3002" : "\u5141\u8BB8\u5217\u8868\u5DF2\u4FDD\u5B58\u3002"
+    });
   } catch (error) {
     console.error("\u66F4\u65B0 Telegram \u5141\u8BB8\u7528\u6237\u5217\u8868\u5931\u8D25:", error);
     res.status(500).json({ error: "\u66F4\u65B0 Telegram \u5141\u8BB8\u7528\u6237\u5217\u8868\u5931\u8D25" });
@@ -17898,7 +19667,7 @@ var storage_default = router5;
 // src/routes/chunkedUpload.ts
 init_db();
 import { Router as Router6 } from "express";
-import crypto23 from "node:crypto";
+import crypto26 from "node:crypto";
 import fs16 from "node:fs";
 import fsPromises2 from "node:fs/promises";
 import path21 from "node:path";
@@ -17909,7 +19678,7 @@ init_storage();
 init_storageAccountLifecycle();
 
 // src/services/chunkUploadReconciliation.ts
-import crypto21 from "node:crypto";
+import crypto24 from "node:crypto";
 async function ownsChunkReconciliationLease(db, operationId, leaseToken) {
   const result = await db.query(
     `UPDATE chunk_upload_reconciliations
@@ -18008,7 +19777,7 @@ async function resolveClaimedChunkReconciliation(input) {
   return resolved ? "resolved" : "pending";
 }
 async function beginChunkCompletionReconciliation(db, input) {
-  const operationId = crypto21.randomUUID();
+  const operationId = crypto24.randomUUID();
   const result = await db.query(
     `INSERT INTO chunk_upload_reconciliations
          (operation_id, upload_id, completion_token, provider, account_id, object_state, index_state, reason, status, created_at, updated_at)
@@ -18098,7 +19867,7 @@ async function compensateChunkCompletionFailure(input) {
 }
 
 // src/services/chunkUploadSessions.ts
-import crypto22 from "node:crypto";
+import crypto25 from "node:crypto";
 import fs15 from "node:fs";
 import fsPromises from "node:fs/promises";
 import path20 from "node:path";
@@ -18111,7 +19880,7 @@ var ChunkUploadProtocolError = class extends Error {
 };
 async function writeChunkAtomically(input) {
   await fsPromises.mkdir(path20.dirname(input.finalPath), { recursive: true });
-  const committedPath = `${input.finalPath}.${crypto22.randomUUID()}.chunk`;
+  const committedPath = `${input.finalPath}.${crypto25.randomUUID()}.chunk`;
   const temporaryPath = `${committedPath}.part`;
   const lockPath = `${input.finalPath}.lock`;
   let lockHandle;
@@ -18121,7 +19890,7 @@ async function writeChunkAtomically(input) {
     if (error?.code === "EEXIST") throw new ChunkUploadProtocolError("ChunkWriteBusyError", "\u540C\u4E00\u5206\u5757\u6B63\u5728\u5199\u5165\uFF0C\u8BF7\u7A0D\u540E\u91CD\u8BD5");
     throw error;
   }
-  const hash2 = crypto22.createHash("sha256");
+  const hash2 = crypto25.createHash("sha256");
   let size = 0;
   const counter = new (await import("node:stream")).Transform({
     transform(chunk, _encoding, callback) {
@@ -18154,7 +19923,7 @@ async function verifyChunkIntegrity(chunk, expectedDirectory, maxChunkBytes) {
   if (stat.size !== chunk.size || stat.size < 1 || stat.size > maxChunkBytes) {
     throw new ChunkUploadProtocolError("ChunkSizeMismatchError", `\u5206\u5757 ${chunk.index} \u5927\u5C0F\u65E0\u6548`);
   }
-  const hash2 = crypto22.createHash("sha256");
+  const hash2 = crypto25.createHash("sha256");
   await pipeline(fs15.createReadStream(chunkPath), new (await import("node:stream")).Writable({
     write(buffer, _encoding, callback) {
       hash2.update(buffer);
@@ -18200,16 +19969,16 @@ var ChunkUploadSessionStore = class {
     const lockKey = `${input.uploadId}:${input.index}`;
     const previous = this.chunkWriteLocks.get(lockKey) || Promise.resolve();
     let release;
-    const current2 = new Promise((resolve) => {
+    const current3 = new Promise((resolve) => {
       release = resolve;
     });
-    this.chunkWriteLocks.set(lockKey, current2);
+    this.chunkWriteLocks.set(lockKey, current3);
     await previous;
     try {
       return await this.writeChunkUnlocked(input);
     } finally {
       release();
-      if (this.chunkWriteLocks.get(lockKey) === current2) this.chunkWriteLocks.delete(lockKey);
+      if (this.chunkWriteLocks.get(lockKey) === current3) this.chunkWriteLocks.delete(lockKey);
     }
   }
   async writeChunkUnlocked(input) {
@@ -18441,8 +20210,8 @@ var PostgresChunkUploadSessionRepository = class {
           [uploadId, chunk.index]
         );
         await client2.query("ROLLBACK");
-        const current2 = mapChunk(currentResult.rows[0]);
-        return current2.size === chunk.size && current2.sha256 === chunk.sha256 ? { status: "duplicate", chunk: current2 } : { status: "conflict", chunk: current2 };
+        const current3 = mapChunk(currentResult.rows[0]);
+        return current3.size === chunk.size && current3.sha256 === chunk.sha256 ? { status: "duplicate", chunk: current3 } : { status: "conflict", chunk: current3 };
       }
       const updated = await client2.query(
         `UPDATE chunk_upload_sessions SET received_bytes = received_bytes + $3, updated_at = NOW()
@@ -18660,7 +20429,7 @@ var chunkStore = new ChunkUploadSessionStore(chunkRepository, {
   getDiskFreeBytes: async () => (await checkDiskSpace3(path21.resolve(CHUNK_DIR))).free
 });
 var runChunkMaintenance = async () => {
-  const reconciliationLease = crypto23.randomUUID();
+  const reconciliationLease = crypto26.randomUUID();
   const pending = await claimChunkReconciliations(pool, reconciliationLease, 100);
   for (const row of pending) {
     const target = storageManager.getTarget(row.provider, row.accountId);
@@ -18694,7 +20463,7 @@ function ownerId(req) {
   return stableWebAdminPrincipalId();
 }
 function stableWebAdminPrincipalId() {
-  return crypto23.createHash("sha256").update("tg-vault:web-admin:v1").digest("hex");
+  return crypto26.createHash("sha256").update("tg-vault:web-admin:v1").digest("hex");
 }
 function decodeFilename2(filename) {
   try {
@@ -18770,7 +20539,7 @@ router6.post("/init", async (req, res) => {
     }
     const now = /* @__PURE__ */ new Date();
     const session = {
-      uploadId: crypto23.randomUUID(),
+      uploadId: crypto26.randomUUID(),
       ownerId: ownerId(req),
       filename: decodeFilename2(filename).slice(0, 255),
       mimeType: mimeType.slice(0, 100),
@@ -18858,7 +20627,7 @@ router6.post("/chunk", async (req, res) => {
   }
 });
 async function mergeChunks(uploadId, chunks, targetPath, expectedBytes) {
-  const temporary = `${targetPath}.${crypto23.randomUUID()}.part`;
+  const temporary = `${targetPath}.${crypto26.randomUUID()}.part`;
   await fsPromises2.mkdir(path21.dirname(targetPath), { recursive: true });
   const output = fs16.createWriteStream(temporary, { flags: "wx" });
   try {
@@ -18893,10 +20662,10 @@ router6.post("/complete", async (req, res) => {
   let completionLeaseError = null;
   try {
     owner = ownerId(req);
-    const current2 = await chunkStore.status(uploadId, owner);
-    if (!current2) return res.status(404).json({ error: "\u4E0A\u4F20\u4F1A\u8BDD\u4E0D\u5B58\u5728" });
-    if (current2.status === "completed" && current2.completedFileId) {
-      const existing = await query("SELECT id, name, type, size, created_at, source, thumbnail_path FROM files WHERE id = $1", [current2.completedFileId]);
+    const current3 = await chunkStore.status(uploadId, owner);
+    if (!current3) return res.status(404).json({ error: "\u4E0A\u4F20\u4F1A\u8BDD\u4E0D\u5B58\u5728" });
+    if (current3.status === "completed" && current3.completedFileId) {
+      const existing = await query("SELECT id, name, type, size, created_at, source, thumbnail_path FROM files WHERE id = $1", [current3.completedFileId]);
       if (!existing.rows[0]) return res.status(409).json({ error: "\u5B8C\u6210\u8BB0\u5F55\u6307\u5411\u7684\u6587\u4EF6\u4E0D\u5B58\u5728" });
       const file2 = existing.rows[0];
       return res.json({
@@ -18914,10 +20683,10 @@ router6.post("/complete", async (req, res) => {
         }
       });
     }
-    if (current2.status === "failed") {
-      return res.status(409).json({ error: "\u4E0A\u6B21\u5B8C\u6210\u5931\u8D25\uFF0C\u8BF7\u5148\u91CD\u8BD5\u4E0A\u4F20\u4F1A\u8BDD", retryable: true, lastError: current2.lastError });
+    if (current3.status === "failed") {
+      return res.status(409).json({ error: "\u4E0A\u6B21\u5B8C\u6210\u5931\u8D25\uFF0C\u8BF7\u5148\u91CD\u8BD5\u4E0A\u4F20\u4F1A\u8BDD", retryable: true, lastError: current3.lastError });
     }
-    token = crypto23.randomUUID();
+    token = crypto26.randomUUID();
     const claim = await chunkStore.claimCompletion(uploadId, owner, token, new Date(Date.now() + COMPLETION_LEASE_MS));
     if (!claim) return res.status(409).json({ error: "\u4E0A\u4F20\u672A\u5B8C\u6574\u3001\u5DF2\u7531\u5176\u4ED6\u8BF7\u6C42\u5904\u7406\u6216\u72B6\u6001\u4E0D\u53EF\u5B8C\u6210" });
     completionHeartbeat = setInterval(() => {
@@ -19203,25 +20972,9 @@ async function saveTaskCenterDismissals(items) {
 }
 
 // src/routes/tasks.ts
-import crypto24 from "node:crypto";
+import crypto27 from "node:crypto";
 var router7 = Router7();
 var CHUNK_DIR2 = process.env.CHUNK_DIR || "./data/chunks";
-function parseJsonObject(value) {
-  if (value && typeof value === "object" && !Array.isArray(value)) return value;
-  if (typeof value !== "string") return {};
-  try {
-    const parsed = JSON.parse(value);
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
-  } catch {
-    return {};
-  }
-}
-function channelStatus(status) {
-  if (status === "queued") return "pending";
-  if (status === "cooling") return "waiting";
-  if (status === "completed_with_errors") return "failed";
-  return status;
-}
 async function collectUnifiedTasks(limit) {
   const [transfers, channels, chunks, subscriptions, accounts] = await Promise.all([
     listTransferTasks({ limit }),
@@ -19252,66 +21005,8 @@ async function collectUnifiedTasks(limit) {
     query("SELECT id, name FROM storage_accounts")
   ]);
   const accountNames = new Map(accounts.rows.map((row) => [String(row.id), String(row.name)]));
-  const tasks = transfers.map((task) => ({
-    id: task.id,
-    sourceType: task.sourceType,
-    kind: task.kind,
-    title: task.title,
-    status: task.status,
-    stage: task.stage,
-    progress: task.progress,
-    ownerUserId: task.ownerUserId,
-    chatId: task.chatId,
-    source: task.source,
-    target: {
-      provider: task.targetProvider,
-      accountId: task.targetAccountId,
-      accountName: task.targetAccountId ? accountNames.get(task.targetAccountId) || null : task.targetProvider === "local" ? "\u670D\u52A1\u5668\u672C\u5730\u76EE\u5F55" : null,
-      folder: task.targetFolder
-    },
-    counts: { total: task.totalItems, completed: task.completedItems, failed: task.failedItems },
-    bytes: { total: task.totalBytes, transferred: task.transferredBytes },
-    detail: task.payload,
-    error: task.error,
-    retryable: task.retryable,
-    cancellable: ["pending", "running", "paused"].includes(task.status),
-    createdAt: task.createdAt,
-    updatedAt: task.updatedAt,
-    finishedAt: task.finishedAt
-  }));
-  for (const row of channels.rows) {
-    const params = parseJsonObject(row.params);
-    const total = Math.max(Number(row.total_count || 0), Number(row.item_count || 0));
-    const completed = Number(row.completed_items || 0);
-    const failed = Number(row.failed_items || 0);
-    tasks.push({
-      id: String(row.id),
-      sourceType: "telegram_channel",
-      kind: String(row.kind),
-      title: row.source || "Telegram \u9891\u9053\u4EFB\u52A1",
-      status: channelStatus(String(row.status)),
-      stage: row.scan_status !== "completed" ? "scanning" : "downloading",
-      progress: total > 0 ? Math.min(100, (completed + failed + Number(row.skipped_count || 0)) / total * 100) : 0,
-      ownerUserId: Number(row.user_id),
-      chatId: row.chat_id == null ? null : String(row.chat_id),
-      source: row.source,
-      target: {
-        provider: params.storageProvider || null,
-        accountId: params.storageAccountId || null,
-        accountName: params.storageAccountId ? accountNames.get(String(params.storageAccountId)) || null : params.storageProvider === "local" ? "\u670D\u52A1\u5668\u672C\u5730\u76EE\u5F55" : null,
-        folder: params.folderOverride || null
-      },
-      counts: { total, completed, failed },
-      bytes: { total: Number(row.total_bytes || 0), transferred: 0 },
-      detail: { scanStatus: row.scan_status, downloadStatus: row.download_status, skipped: Number(row.skipped_count || 0) },
-      error: row.error,
-      retryable: ["failed", "completed_with_errors"].includes(String(row.status)),
-      cancellable: ["queued", "running", "paused", "cooling"].includes(String(row.status)),
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-      finishedAt: row.finished_at
-    });
-  }
+  const tasks = transfers.map((task) => mapTransferTask(task, accountNames));
+  for (const row of channels.rows) tasks.push(mapTelegramChannelJob(row, accountNames));
   for (const row of chunks.rows) {
     const total = Number(row.total_size || 0);
     const received = Number(row.received_bytes || 0);
@@ -19375,8 +21070,10 @@ router7.get("/", requireAuth, async (req, res) => {
     const tasks = filterDismissedTasks(await collectUnifiedTasks(limit), await loadTaskCenterDismissals()).map((task) => ({ ...task, dismissible: isTaskDismissible(task) }));
     const source = String(req.query.source || "").trim();
     const status = String(req.query.status || "").trim();
-    const filtered = tasks.filter((task) => !source || task.sourceType === source).filter((task) => !status || task.status === status).sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()).slice(0, limit);
-    res.json({ tasks: filtered, total: filtered.length, generatedAt: (/* @__PURE__ */ new Date()).toISOString() });
+    const filtered = tasks.filter((task) => !source || task.sourceType === source).filter((task) => !status || task.status === status).sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+    const total = filtered.length;
+    const page = filtered.slice(0, limit);
+    res.json({ tasks: page, total, returned: page.length, generatedAt: (/* @__PURE__ */ new Date()).toISOString() });
   } catch (error) {
     console.error("\u83B7\u53D6\u7EDF\u4E00\u4EFB\u52A1\u5217\u8868\u5931\u8D25:", error);
     res.status(500).json({ error: "\u83B7\u53D6\u4EFB\u52A1\u5217\u8868\u5931\u8D25" });
@@ -19394,7 +21091,7 @@ router7.post("/dismissals/prepare", requireAuth, async (req, res) => {
     const selected = all.filter((task) => isTaskDismissible(task)).filter((task) => requestedKeys.size > 0 ? requestedKeys.has(`${task.sourceType}:${task.id}`) : (!source || task.sourceType === source) && (!status || task.status === status)).map((task) => ({ sourceType: task.sourceType, id: task.id, status: task.status, title: task.title, updatedAt: task.updatedAt }));
     if (selected.length === 0) return res.status(409).json({ error: "\u5F53\u524D\u8303\u56F4\u6CA1\u6709\u53EF\u5220\u9664\u7684\u7EC8\u6001\u8BB0\u5F55" });
     const context = JSON.stringify(selected);
-    const snapshotId = crypto24.createHash("sha256").update(context).digest("hex");
+    const snapshotId = crypto27.createHash("sha256").update(context).digest("hex");
     const bySource = Object.fromEntries([...new Set(selected.map((item) => item.sourceType))].map((key) => [key, selected.filter((item) => item.sourceType === key).length]));
     const byStatus = Object.fromEntries([...new Set(selected.map((item) => item.status))].map((key) => [key, selected.filter((item) => item.status === key).length]));
     res.json({
@@ -19523,9 +21220,10 @@ router7.post("/:sourceType/:id/:action", requireAuth, async (req, res) => {
 var tasks_default = router7;
 
 // src/index.ts
+init_authSettings();
 init_db();
 import helmet from "helmet";
-import crypto25 from "node:crypto";
+import crypto28 from "node:crypto";
 
 // src/utils/runtimeConfig.ts
 var NUMBER_SPECS = [
@@ -19728,7 +21426,7 @@ app.use(cors({
 app.use(express.json({ limit: process.env.JSON_BODY_LIMIT || "2mb" }));
 app.use((req, res, next) => {
   const provided = normalizeRequestId(req.headers["x-request-id"]);
-  const requestId = provided || crypto25.randomUUID();
+  const requestId = provided || crypto28.randomUUID();
   res.locals.requestId = requestId;
   res.setHeader("X-Request-Id", requestId);
   next();
@@ -19787,7 +21485,15 @@ app.get("/readyz", async (_req, res) => {
     await storageManager2.assertReady();
     const twoFactor = await get2FAReadiness();
     if (!twoFactor.ready) throw new Error("2FA \u5BC6\u94A5\u4E0D\u53EF\u8BFB\u53D6");
-    res.json({ status: "ready", timestamp: (/* @__PURE__ */ new Date()).toISOString() });
+    const bot = getTelegramBotStatus();
+    if (telegramBotBlocksReadiness(bot)) {
+      throw new Error(`Telegram Bot \u672A\u5C31\u7EEA\uFF1A${bot.status}${bot.action ? `\uFF1B${bot.action}` : ""}`);
+    }
+    res.json({
+      status: bot.degraded ? "degraded" : "ready",
+      timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+      components: { telegramBot: bot }
+    });
   } catch (error) {
     res.status(503).json({ status: "not_ready", error: error instanceof Error ? error.message : String(error) });
   }
@@ -19810,7 +21516,14 @@ async function initializeApplication() {
   if (!twoFactor.ready) throw new Error("2FA \u5DF2\u542F\u7528\u4F46\u5BC6\u94A5\u4E0D\u53EF\u8BFB\u53D6");
   if (telegramEnabled) {
     await initTelegramUserClient();
-    await initTelegramBot();
+    try {
+      await initTelegramBot();
+    } catch (error) {
+      if (/^(1|true|yes|on)$/i.test(process.env.TELEGRAM_REQUIRED || "false")) throw error;
+      const message = error instanceof Error ? error.message : String(error);
+      markTelegramBotError("error", message, "\u68C0\u67E5 Telegram \u51ED\u8BC1/\u7F51\u7EDC\u5E76\u91CD\u542F\u540E\u7AEF");
+      console.warn("Telegram Bot \u53EF\u9009\u7EC4\u4EF6\u542F\u52A8\u5931\u8D25\uFF0C\u5E94\u7528\u4EE5 degraded \u72B6\u6001\u7EE7\u7EED:", message);
+    }
   }
   await initializeYtDlpQueue();
   applicationReady = true;

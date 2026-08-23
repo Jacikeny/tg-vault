@@ -1,5 +1,6 @@
 import type { DownloadTaskGroupSnapshot } from './downloadTaskQueue.js';
 import type { TransferTaskRecord } from './transferTasks.js';
+import { telegramChannelJobTaskState } from './unifiedTaskMapper.js';
 
 export type TaskCenterSourceType = 'memory' | 'channel' | 'ytdlp';
 export type TaskCenterKind = 'single' | 'album' | 'channel' | 'ytdlp';
@@ -416,15 +417,22 @@ export function channelTaskCenterItem(row: any): TaskCenterItem | null {
                 : undefined,
         }
         : undefined;
+    const channelState = telegramChannelJobTaskState(row);
     const state: TaskCenterState = inCooldown
         ? 'cooling'
         : row.status === 'paused'
             ? (active > 0 ? 'pausing' : 'paused')
-            : row.status === 'queued' || row.status === 'pending'
-                ? 'waiting'
-                : active > 0 || row.scan_status === 'scanning' || row.is_actively_running
-                    ? 'running'
-                    : 'waiting';
+            : channelState.status === 'cancelled'
+                ? 'failed'
+                : channelState.status === 'completed'
+                    ? 'waiting'
+                    : channelState.status === 'failed'
+                        ? 'failed'
+                        : row.status === 'queued' || row.status === 'pending'
+                            ? 'waiting'
+                            : active > 0 || channelState.stage === 'scanning' || channelState.stage === 'downloading' || row.is_actively_running
+                                ? 'running'
+                                : 'waiting';
     const optionsSource = row.options ?? row.params ?? {};
     let options: Record<string, any>;
     if (typeof optionsSource === 'string') {
