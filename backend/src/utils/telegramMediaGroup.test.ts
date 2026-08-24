@@ -4,6 +4,7 @@ import {
     createTelegramMediaGroupDebouncer,
 
     getForwardedSourceLookup,
+    getOrCreateTelegramMediaGroupQueue,
     prefetchForwardedSourceMessages,
     takePendingMediaGroupSnapshot,
     telegramMediaGroupQueueKey,
@@ -83,6 +84,27 @@ function testPendingSnapshotSkipsProcessedAndDuplicateMessages() {
     assert.deepEqual(takePendingMediaGroupSnapshot(items).map(item => item.message.id), [2, 3]);
 }
 
+async function testConcurrentAlbumMessagesShareOneQueueCreation() {
+    const queues = new Map<string, { processingStarted: boolean; files: number[] }>();
+    const creations = new Map<string, Promise<{ processingStarted: boolean; files: number[] }>>();
+    let createCount = 0;
+    let releaseCreation!: () => void;
+    const creationGate = new Promise<void>(resolve => { releaseCreation = resolve; });
+    const create = async () => {
+        createCount += 1;
+        await creationGate;
+        return { processingStarted: false, files: [] };
+    };
+
+    const pending = Array.from({ length: 6 }, () => getOrCreateTelegramMediaGroupQueue(queues, creations, 'chat:album', create));
+    releaseCreation();
+    const resolved = await Promise.all(pending);
+
+    assert.equal(createCount, 1);
+    assert.equal(queues.size, 1);
+    assert.ok(resolved.every(queue => queue === resolved[0]));
+}
+
 async function testForwardedSourceLookupUsesOneFetchPerPeer() {
     const peerA = { className: 'PeerChannel', channelId: { toString: () => '100' } };
     const peerB = { className: 'PeerChannel', channelId: { toString: () => '200' } };
@@ -117,6 +139,7 @@ async function main() {
     await testAnnotatesMixedMediaInTelegramMessageOrder();
     await testQueueKeySeparatesChatsWithSameGroupedId();
     testPendingSnapshotSkipsProcessedAndDuplicateMessages();
+    await testConcurrentAlbumMessagesShareOneQueueCreation();
     await testForwardedSourceLookupUsesOneFetchPerPeer();
 }
 

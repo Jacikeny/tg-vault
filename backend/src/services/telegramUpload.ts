@@ -37,7 +37,7 @@ import {
 import { getUniqueStoredName } from '../utils/fileUtils.js';
 import { buildStorageFolderWithRules, getStoragePathRules, getTelegramBatchFolderName, getTelegramChatName, isOpaqueTelegramIdentifier } from '../utils/storagePath.js';
 import { resolveTelegramGeneratedFileName } from '../utils/telegramNaming.js';
-import { annotateTelegramMediaGroup, createTelegramMediaGroupDebouncer, getForwardedSourceLookup, prefetchForwardedSourceMessages, takePendingMediaGroupSnapshot, telegramMediaGroupQueueKey, type ForwardedSourceMessageCache } from '../utils/telegramMediaGroup.js';
+import { annotateTelegramMediaGroup, createTelegramMediaGroupDebouncer, getForwardedSourceLookup, getOrCreateTelegramMediaGroupQueue, prefetchForwardedSourceMessages, takePendingMediaGroupSnapshot, telegramMediaGroupQueueKey, type ForwardedSourceMessageCache } from '../utils/telegramMediaGroup.js';
 import { resolveTelegramStorageFolderPersistent, resolveTelegramTaskStorageFolderPersistent, previewTelegramStorageFolderPersistent } from '../utils/telegramPathSettings.js';
 import { consumeOrGetTelegramTargetState } from '../utils/telegramTargetStateStore.js';
 import { findDuplicateFile, getDuplicateMode } from '../utils/duplicatePolicy.js';
@@ -1388,6 +1388,7 @@ interface MediaGroupQueue {
 
 // 多文件上传队列 (key: mediaGroupId)
 const mediaGroupQueues = new Map<string, MediaGroupQueue>();
+const mediaGroupQueueCreations = new Map<string, Promise<MediaGroupQueue>>();
 
 // 多文件上传动态 debounce：每收到同组新消息后重置短等待窗口，同时设置最大等待兜底，避免已收齐相册还固定等 1.5s。
 const mediaGroupDebouncer = createTelegramMediaGroupDebouncer({
@@ -2586,14 +2587,14 @@ export async function handleFileUpload(client: TelegramClient, event: NewMessage
             await checkAndResetSession(client, message.chatId);
         }
         const queueKey = telegramMediaGroupQueueKey(message.chatId, mediaGroupId);
-        let queue = mediaGroupQueues.get(queueKey);
-        if (!queue) {
+        const existingQueue = mediaGroupQueues.get(queueKey) || mediaGroupQueueCreations.has(queueKey);
+        const queue = await getOrCreateTelegramMediaGroupQueue(mediaGroupQueues, mediaGroupQueueCreations, queueKey, async () => {
             const chatKey = message.chatId?.toString() || String(senderId);
             const selectedTarget = await consumeOrGetTelegramTargetState(chatKey);
             const storageTarget = selectedTarget
                 ? storageManager.getTarget(selectedTarget.provider, selectedTarget.accountId)
                 : storageManager.getActiveTarget();
-            queue = {
+            return {
                 mediaGroupId,
                 queueKey,
                 chatId: message.chatId,
@@ -2605,7 +2606,8 @@ export async function handleFileUpload(client: TelegramClient, event: NewMessage
                 createdAt: Date.now(),
                 lastAddedAt: Date.now(),
             };
-            mediaGroupQueues.set(queueKey, queue);
+        });
+        if (!existingQueue) {
             const queueInstance = queue;
             setTimeout(() => {
                 if (mediaGroupQueues.get(queueKey) === queueInstance && !queueInstance.processingStarted) {

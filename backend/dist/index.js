@@ -4517,6 +4517,20 @@ function createTelegramMediaGroupDebouncer(options) {
 function telegramMediaGroupQueueKey(chatId, mediaGroupId) {
   return `${chatId === void 0 || chatId === null ? "unknown" : String(chatId)}:${mediaGroupId}`;
 }
+async function getOrCreateTelegramMediaGroupQueue(queues, creations, queueKey, create) {
+  const existing = queues.get(queueKey);
+  if (existing) return existing;
+  const inFlight = creations.get(queueKey);
+  if (inFlight) return inFlight;
+  const creation = create().then((queue) => {
+    queues.set(queueKey, queue);
+    return queue;
+  }).finally(() => {
+    creations.delete(queueKey);
+  });
+  creations.set(queueKey, creation);
+  return creation;
+}
 function firstCaptionLine2(message) {
   return String(message.message || message.text || message.caption || "").split(/\r?\n/)[0].trim();
 }
@@ -7261,6 +7275,7 @@ function retryFailedDownloadTasks(limit = 10, taskId, chatId, userId) {
   return downloadQueue.retryFailed(limit, { chatId, userId }, taskId);
 }
 var mediaGroupQueues = /* @__PURE__ */ new Map();
+var mediaGroupQueueCreations = /* @__PURE__ */ new Map();
 var mediaGroupDebouncer = createTelegramMediaGroupDebouncer({
   delayMs: MEDIA_GROUP_DEBOUNCE_MS,
   onReady: (mediaGroupId) => processBatchUpload(void 0, mediaGroupId)
@@ -8230,12 +8245,12 @@ async function handleFileUpload(client2, event) {
       await checkAndResetSession(client2, message.chatId);
     }
     const queueKey = telegramMediaGroupQueueKey(message.chatId, mediaGroupId);
-    let queue = mediaGroupQueues.get(queueKey);
-    if (!queue) {
+    const existingQueue = mediaGroupQueues.get(queueKey) || mediaGroupQueueCreations.has(queueKey);
+    const queue = await getOrCreateTelegramMediaGroupQueue(mediaGroupQueues, mediaGroupQueueCreations, queueKey, async () => {
       const chatKey = message.chatId?.toString() || String(senderId);
       const selectedTarget = await consumeOrGetTelegramTargetState(chatKey);
       const storageTarget = selectedTarget ? storageManager.getTarget(selectedTarget.provider, selectedTarget.accountId) : storageManager.getActiveTarget();
-      queue = {
+      return {
         mediaGroupId,
         queueKey,
         chatId: message.chatId,
@@ -8247,7 +8262,8 @@ async function handleFileUpload(client2, event) {
         createdAt: Date.now(),
         lastAddedAt: Date.now()
       };
-      mediaGroupQueues.set(queueKey, queue);
+    });
+    if (!existingQueue) {
       const queueInstance = queue;
       setTimeout(() => {
         if (mediaGroupQueues.get(queueKey) === queueInstance && !queueInstance.processingStarted) {

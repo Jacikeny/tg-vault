@@ -51,6 +51,27 @@ export function telegramMediaGroupQueueKey(chatId: unknown, mediaGroupId: string
     return `${chatId === undefined || chatId === null ? 'unknown' : String(chatId)}:${mediaGroupId}`;
 }
 
+export async function getOrCreateTelegramMediaGroupQueue<T>(
+    queues: Map<string, T>,
+    creations: Map<string, Promise<T>>,
+    queueKey: string,
+    create: () => Promise<T>,
+): Promise<T> {
+    const existing = queues.get(queueKey);
+    if (existing) return existing;
+    const inFlight = creations.get(queueKey);
+    if (inFlight) return inFlight;
+
+    const creation = create().then(queue => {
+        queues.set(queueKey, queue);
+        return queue;
+    }).finally(() => {
+        creations.delete(queueKey);
+    });
+    creations.set(queueKey, creation);
+    return creation;
+}
+
 function firstCaptionLine(message: TelegramMediaGroupItemContext['message']): string {
     return String(message.message || message.text || message.caption || '').split(/\r?\n/)[0].trim();
 }
