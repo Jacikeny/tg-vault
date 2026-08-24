@@ -37,11 +37,34 @@ export async function getScopedFileById(id: string): Promise<any | null> {
     return result.rows[0] || null;
 }
 
+export interface PhysicalDeleteFile {
+    name?: string | null;
+    mime_type?: string | null;
+    source?: string | null;
+    path?: string | null;
+    stored_name?: string | null;
+    folder?: string | null;
+}
+
+export function resolvePhysicalDeletePath(file: PhysicalDeleteFile): string {
+    if (
+        file.source === 'webdav'
+        && file.name === '.folder'
+        && file.mime_type === 'application/x-directory'
+        && file.folder
+    ) {
+        return `${String(file.folder).replace(/^\/+|\/+$/g, '')}/`;
+    }
+    const storedPath = file.path || file.stored_name;
+    if (!storedPath) throw new Error('文件索引缺少物理存储路径');
+    return storedPath;
+}
+
 export async function removePhysicalFile(file: any): Promise<void> {
     if (CLOUD_SOURCES.has(file.source)) {
         const { storageManager } = await import('../services/storage.js');
         const provider = storageManager.getProvider(`${file.source}:${file.storage_account_id}`);
-        await provider.deleteFile(file.path);
+        await provider.deleteFile(resolvePhysicalDeletePath(file));
     } else {
         const filePath = file.path || path.join(UPLOAD_DIR, file.stored_name);
         if (!isPathInside(UPLOAD_DIR, filePath)) throw new Error('拒绝删除存储目录之外的文件');

@@ -90,6 +90,25 @@ test('WebDAV delete aborts a stalled request instead of hanging the API forever'
     await assert.rejects(() => provider.deleteFile('remote/object'), /WebDAV delete timed out after 20ms/);
 });
 
+test('WebDAV delete preserves structured 404 metadata through its contextual error', async () => {
+    const provider = new WebDAVStorageProvider('account-1', 'http://127.0.0.1:9');
+    const original = Object.assign(new Error('Invalid response: 404 Not Found'), {
+        status: 404,
+        response: { status: 404 },
+    });
+    (provider as any).client = {
+        deleteFile: async () => { throw original; },
+    };
+
+    await assert.rejects(
+        () => provider.deleteFile('demo/'),
+        (error: any) => error?.status === 404
+            && error?.response?.status === 404
+            && error?.cause === original
+            && /WebDAV delete failed/.test(error.message),
+    );
+});
+
 test('WebDAV upload aborts a stalled request after the configured inactivity timeout', async () => {
     const dir = await mkdtemp(path.join(os.tmpdir(), 'tg-vault-webdav-timeout-'));
     const input = path.join(dir, 'payload.bin');

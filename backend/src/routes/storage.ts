@@ -695,9 +695,25 @@ router.post('/accounts/:id/delete-confirmation', requireAuth, async (req: Reques
                FROM files WHERE storage_account_id = $1`, [req.params.id]),
         query(`SELECT COUNT(*)::int AS count FROM storage_account_leases
                WHERE storage_account_id = $1 AND released_at IS NULL AND expires_at > NOW()`, [req.params.id]),
-        query(`SELECT COUNT(*)::int AS count FROM transfer_tasks
-               WHERE target_account_id = $1
-                 AND (status IN ('pending', 'running', 'paused', 'interrupted', 'retry_required') OR retryable = true)`, [req.params.id]),
+        query(`SELECT COUNT(*)::int AS count FROM (
+                   SELECT 'transfer:' || source_type || ':' || id AS ref
+                   FROM transfer_tasks
+                   WHERE target_account_id = $1
+                     AND (status IN ('pending', 'running', 'paused', 'interrupted', 'retry_required') OR retryable = true)
+                   UNION ALL
+                   SELECT 'telegram-job:' || id::text AS ref
+                   FROM telegram_background_jobs
+                   WHERE finished_at IS NULL AND cancelled_at IS NULL
+                     AND params->>'storageAccountId' = $1
+                   UNION ALL
+                   SELECT 'telegram-target:' || chat_id::text AS ref
+                   FROM telegram_target_states
+                   WHERE account_id = $1 AND expires_at > NOW()
+                   UNION ALL
+                   SELECT 'subscription:' || id::text AS ref
+                   FROM telegram_channel_subscriptions
+                   WHERE target_mode = 'fixed' AND target_account_id = $1
+               ) active_references`, [req.params.id]),
         query(`SELECT COUNT(*)::int AS count FROM chunk_upload_sessions
                WHERE target_account_id = $1 AND status IN ('open', 'completing', 'failed')`, [req.params.id]),
     ]);

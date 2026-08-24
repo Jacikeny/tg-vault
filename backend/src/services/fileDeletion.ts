@@ -5,6 +5,8 @@ export interface IndexedFile {
     stored_name?: string | null;
     source?: string | null;
     storage_account_id?: string | null;
+    mime_type?: string | null;
+    folder?: string | null;
     thumbnail_path?: string | null;
     preview_path?: string | null;
 }
@@ -28,12 +30,16 @@ export function isPhysicalFileNotFound(error: unknown): boolean {
     const status = Number(candidate?.status ?? candidate?.statusCode ?? candidate?.code ?? candidate?.response?.status);
     if (status === 404) return true;
     const code = String(candidate?.code || '').toUpperCase();
-    return code === 'ENOENT' || code === 'NOT_FOUND' || code === 'NOSUCHKEY';
+    if (code === 'ENOENT' || code === 'NOT_FOUND' || code === 'NOSUCHKEY') return true;
+    const message = errorMessage(error);
+    // Last-resort compatibility for legacy providers that discarded structured 404 metadata.
+    return /(?:^|\D)404(?:\D|$).*not[\s_-]*found|not[\s_-]*found.*(?:^|\D)404(?:\D|$)/i.test(message);
 }
 
 export function createFileDeletionService(dependencies: FileDeletionDependencies) {
     return {
         async deleteIndexedFile(file: IndexedFile): Promise<FileDeletionResult> {
+            const directoryPlaceholder = file.name === '.folder' && file.mime_type === 'application/x-directory';
             let physicalNotFound = false;
             try {
                 await dependencies.removePhysicalFile(file);
@@ -53,7 +59,7 @@ export function createFileDeletionService(dependencies: FileDeletionDependencies
                 return { status: 'failed', error: errorMessage(error) };
             }
 
-            return { status: physicalNotFound ? 'not_found' : 'deleted' };
+            return { status: physicalNotFound && !directoryPlaceholder ? 'not_found' : 'deleted' };
         },
     };
 }

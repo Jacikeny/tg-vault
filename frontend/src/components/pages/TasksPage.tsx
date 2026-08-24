@@ -11,11 +11,12 @@ import { cn } from '../../lib/utils';
 import { useTranslation } from 'react-i18next';
 import { useRuntimeUiLocalization } from './useRuntimeUiLocalization';
 
-interface TasksPageProps { onUnauthorized?: () => void; onOpenUploads?: () => void; }
+interface TasksPageProps { onUnauthorized?: () => void; onOpenUploads?: () => void; initialAccountId?: string | null; }
 
 const SOURCE_OPTIONS: Array<{ value: '' | UnifiedTaskSource; label: string }> = [
     { value: '', label: '全部来源' }, { value: 'web_upload', label: 'Web 上传' },
     { value: 'telegram_bot', label: 'Telegram 文件' }, { value: 'telegram_channel', label: '频道下载' },
+    { value: 'telegram_target', label: 'Telegram 会话目标' },
     { value: 'ytdlp', label: 'yt-dlp' }, { value: 'subscription', label: '频道订阅' },
 ];
 const STATUS_OPTIONS = [
@@ -31,7 +32,7 @@ const STATUS_LABELS: Record<string, string> = Object.fromEntries(STATUS_OPTIONS.
 const STAGE_LABELS: Record<string, string> = {
     waiting: '排队等待', queued: '排队等待', scanning: '扫描消息', downloading: '下载源文件',
     uploading: '上传到存储', processing: '服务器处理中', awaiting_file: '等待重新选择原文件',
-    resumable: '上传会话可续传', waiting_for_next_scan: '等待下次扫描', completed: '处理完成',
+    resumable: '上传会话可续传', waiting_for_next_scan: '等待下次扫描', waiting_for_next_task: '等待后续任务', completed: '处理完成',
     failed: '处理失败', cancelled: '已取消', interrupted: '服务重启时中断',
     retry_required: '需要人工重试', disabled: '已停用',
 };
@@ -61,7 +62,7 @@ function StatusIcon({ status }: { status: string }) {
     return <Clock3 className="h-4 w-4" />;
 }
 
-export const TasksPage = ({ onUnauthorized, onOpenUploads }: TasksPageProps) => {
+export const TasksPage = ({ onUnauthorized, onOpenUploads, initialAccountId = null }: TasksPageProps) => {
     const { i18n } = useTranslation();
     const locale = i18n.resolvedLanguage?.startsWith('en') ? 'en-US' : 'zh-CN';
     const pageRef = useRef<HTMLDivElement>(null);
@@ -87,8 +88,11 @@ export const TasksPage = ({ onUnauthorized, onOpenUploads }: TasksPageProps) => 
         try {
             const result = await fileApi.getTasks({ source, status, limit: 300 });
             if (generation !== requestGeneration.current) return;
-            setTasks(result.tasks); setError(null);
-            setSelected(previous => previous.filter(key => result.tasks.some(task => task.dismissible && taskKey(task) === key)));
+            const relevantTasks = initialAccountId
+                ? result.tasks.filter(task => task.target.accountId === initialAccountId)
+                : result.tasks;
+            setTasks(relevantTasks); setError(null);
+            setSelected(previous => previous.filter(key => relevantTasks.some(task => task.dismissible && taskKey(task) === key)));
         } catch (loadError: any) {
             if (generation !== requestGeneration.current) return;
             if (loadError?.message === 'UNAUTHORIZED') { authService.clearToken(); onUnauthorized?.(); return; }
@@ -96,7 +100,7 @@ export const TasksPage = ({ onUnauthorized, onOpenUploads }: TasksPageProps) => 
         } finally {
             if (generation === requestGeneration.current) { setLoading(false); setRefreshing(false); }
         }
-    }, [onUnauthorized, source, status]);
+    }, [initialAccountId, onUnauthorized, source, status]);
 
     useEffect(() => {
         void loadTasks(false);
@@ -111,6 +115,12 @@ export const TasksPage = ({ onUnauthorized, onOpenUploads }: TasksPageProps) => 
     }), [tasks]);
     const dismissibleTasks = useMemo(() => tasks.filter(task => task.dismissible), [tasks]);
 
+    const taskActionLabel = (task: UnifiedTask, action: 'cancel' | 'retry'): string => {
+        if (action === 'retry') return task.sourceType === 'web_upload' ? '续传' : '重试';
+        if (task.sourceType === 'subscription') return '改为跟随默认';
+        if (task.sourceType === 'telegram_target') return '清除目标';
+        return '取消';
+    };
     const requestAction = (task: UnifiedTask, action: 'cancel' | 'retry') => {
         if (task.sourceType === 'web_upload' && action === 'retry') { onOpenUploads?.(); return; }
         setPendingAction({ task, action });
@@ -120,7 +130,12 @@ export const TasksPage = ({ onUnauthorized, onOpenUploads }: TasksPageProps) => 
         setActing(true);
         try {
             await fileApi.controlTask(pendingAction.task.sourceType, pendingAction.task.id, pendingAction.action);
-            setNotice(pendingAction.action === 'cancel' ? '任务已取消' : '任务已重新提交');
+            const cancelledNotice = pendingAction.task.sourceType === 'subscription'
+                ? '频道订阅已改为跟随系统默认存储'
+                : pendingAction.task.sourceType === 'telegram_target'
+                    ? 'Telegram 会话目标已清除'
+                    : '任务已取消';
+            setNotice(pendingAction.action === 'cancel' ? cancelledNotice : '任务已重新提交');
             setPendingAction(null); await loadTasks(true);
         } catch (actionError: any) {
             if (actionError?.message === 'UNAUTHORIZED') { authService.clearToken(); onUnauthorized?.(); }
@@ -163,7 +178,11 @@ export const TasksPage = ({ onUnauthorized, onOpenUploads }: TasksPageProps) => 
     return (
         <div ref={pageRef} className="mx-auto min-h-full max-w-7xl space-y-5">
             <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
-                <div><h2 className="text-2xl font-bold">任务中心</h2><p className="mt-1 text-sm text-muted-foreground">查看和管理 Web、Telegram、频道订阅及 yt-dlp 任务。</p></div>
+                <div>
+                    <h2 className="text-2xl font-bold">任务中心</h2>
+                    <p className="mt-1 text-sm text-muted-foreground">{initialAccountId ? '仅显示仍引用所选存储账户的任务或 Telegram 目标。' : '查看和管理 Web、Telegram、频道订阅及 yt-dlp 任务。'}</p>
+                    {initialAccountId && <button type="button" className="mt-2 text-sm font-medium text-primary hover:underline" onClick={() => { window.history.replaceState({}, '', '/tasks'); window.dispatchEvent(new PopStateEvent('popstate')); }}>显示全部任务</button>}
+                </div>
                 <div className="grid grid-cols-3 gap-2 text-center text-xs sm:text-sm">
                     <button className="rounded-md border px-2 py-2" onClick={() => setStatus('')}>进行中 {summary.active}</button>
                     <button className="rounded-md border border-red-200 bg-red-50 px-2 py-2 text-red-700" onClick={() => setStatus('failed')}>需处理 {summary.failed}</button>
@@ -207,14 +226,14 @@ export const TasksPage = ({ onUnauthorized, onOpenUploads }: TasksPageProps) => 
                                     <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">{task.counts.total > 0 && <span>条目 {task.counts.completed}/{task.counts.total}{task.counts.failed > 0 ? `，失败 ${task.counts.failed}` : ''}</span>}{task.bytes.total > 0 && <span>数据 {formatBytes(task.bytes.transferred)} / {formatBytes(task.bytes.total)}</span>}<span className="inline-flex items-center gap-1 font-mono" title={task.id}>ID {task.id.length > 18 ? `${task.id.slice(0, 18)}...` : task.id}<button title="复制任务 ID" aria-label="复制任务 ID" onClick={() => void navigator.clipboard.writeText(task.id)}><Copy className="h-3.5 w-3.5" /></button></span></div>
                                     {task.error && <p className="mt-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 break-words">{task.error}</p>}
                                 </div>
-                                {!selectionMode && <div className="flex shrink-0 flex-col items-end gap-2 sm:flex-row">{task.retryable && <Button size="sm" variant="outline" className="gap-1" onClick={() => requestAction(task, 'retry')}>{task.sourceType === 'web_upload' ? <UploadCloud className="h-4 w-4" /> : <RotateCcw className="h-4 w-4" />}{task.sourceType === 'web_upload' ? '续传' : '重试'}</Button>}{task.cancellable && <Button size="sm" variant="outline" className="gap-1 text-red-700" onClick={() => requestAction(task, 'cancel')}><Ban className="h-4 w-4" />取消</Button>}{task.dismissible && <Button size="sm" variant="ghost" className="gap-1 text-red-700" onClick={() => void prepareDismissal({ tasks: [task] })}><Trash2 className="h-4 w-4" /><span className="hidden sm:inline">删除记录</span></Button>}</div>}
+                                {!selectionMode && <div className="flex shrink-0 flex-col items-end gap-2 sm:flex-row">{task.retryable && <Button size="sm" variant="outline" className="gap-1" onClick={() => requestAction(task, 'retry')}>{task.sourceType === 'web_upload' ? <UploadCloud className="h-4 w-4" /> : <RotateCcw className="h-4 w-4" />}{taskActionLabel(task, 'retry')}</Button>}{task.cancellable && <Button size="sm" variant="outline" className="gap-1 text-red-700" onClick={() => requestAction(task, 'cancel')}><Ban className="h-4 w-4" />{taskActionLabel(task, 'cancel')}</Button>}{task.dismissible && <Button size="sm" variant="ghost" className="gap-1 text-red-700" onClick={() => void prepareDismissal({ tasks: [task] })}><Trash2 className="h-4 w-4" /><span className="hidden sm:inline">删除记录</span></Button>}</div>}
                             </div>
                         </article>;
                     })}
                 </div>
             )}
 
-            {pendingAction && <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/50 p-4" role="dialog" aria-modal="true"><div className="w-full max-w-md rounded-lg bg-background p-5 shadow-xl"><h3 className="font-semibold">{pendingAction.action === 'cancel' ? '确认取消任务' : '确认重试任务'}</h3><p className="mt-2 break-words text-sm text-muted-foreground">{pendingAction.task.title}</p><p className="mt-1 text-xs text-muted-foreground">目标保持为：{taskTarget(pendingAction.task)}</p><div className="mt-5 flex justify-end gap-2"><Button variant="outline" disabled={acting} onClick={() => setPendingAction(null)}>返回</Button><Button variant={pendingAction.action === 'cancel' ? 'destructive' : 'default'} disabled={acting} onClick={() => void confirmAction()}>{acting && <IndeterminateSpinner label="正在执行任务操作" size="sm" className="mr-2" />}{pendingAction.action === 'cancel' ? '确认取消' : '确认重试'}</Button></div></div></div>}
+            {pendingAction && <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/50 p-4" role="dialog" aria-modal="true"><div className="w-full max-w-md rounded-lg bg-background p-5 shadow-xl"><h3 className="font-semibold">{pendingAction.action === 'cancel' ? `确认${taskActionLabel(pendingAction.task, 'cancel')}` : '确认重试任务'}</h3><p className="mt-2 break-words text-sm text-muted-foreground">{pendingAction.task.title}</p><p className="mt-1 text-xs text-muted-foreground">目标保持为：{taskTarget(pendingAction.task)}</p><div className="mt-5 flex justify-end gap-2"><Button variant="outline" disabled={acting} onClick={() => setPendingAction(null)}>返回</Button><Button variant={pendingAction.action === 'cancel' ? 'destructive' : 'default'} disabled={acting} onClick={() => void confirmAction()}>{acting && <IndeterminateSpinner label="正在执行任务操作" size="sm" className="mr-2" />}{pendingAction.action === 'cancel' ? `确认${taskActionLabel(pendingAction.task, 'cancel')}` : '确认重试'}</Button></div></div></div>}
 
             {dismissalPreview && <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/50 p-4" role="dialog" aria-modal="true" aria-labelledby="dismiss-title"><div className="w-full max-w-md rounded-xl border bg-background p-5 shadow-xl"><div className="flex items-start gap-3"><Trash2 className="mt-0.5 h-5 w-5 text-red-600" /><div><h3 id="dismiss-title" className="font-semibold">确认从任务中心删除</h3><p className="mt-2 text-sm">将删除 {dismissalPreview.impact.count} 条终态记录。</p><p className="mt-2 rounded-md bg-muted p-3 text-xs text-muted-foreground">只会从任务中心隐藏记录，不会删除任何文件、云端对象、订阅配置或底层任务数据。任务状态再次变化后会重新出现。</p></div><button className="ml-auto" onClick={() => setDismissalPreview(null)} aria-label="关闭"><X className="h-5 w-5" /></button></div><div className="mt-5 flex justify-end gap-2"><Button variant="outline" disabled={acting} onClick={() => setDismissalPreview(null)}>返回</Button><Button variant="destructive" disabled={acting} onClick={() => void confirmDismissal()}>{acting && <IndeterminateSpinner label="正在执行任务操作" size="sm" className="mr-2" />}确认删除记录</Button></div></div></div>}
         </div>

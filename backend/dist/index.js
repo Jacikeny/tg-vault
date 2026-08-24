@@ -789,6 +789,14 @@ async function withStorageProbeDeadline(operation, provider, timeoutMs) {
     clearTimeout(timeout);
   }
 }
+function webDavDeleteError(error) {
+  const original = error;
+  const wrapped = new Error(`WebDAV delete failed: ${original?.message || String(error)}`, { cause: error });
+  for (const key of ["status", "statusCode", "code", "response"]) {
+    if (original?.[key] !== void 0) wrapped[key] = original[key];
+  }
+  return wrapped;
+}
 var StorageQuotaCooldownError, StorageProbeError, LocalStorageProvider, AliyunOSSStorageProvider, S3StorageProvider, WebDAVStorageProvider, OneDriveStorageProvider, GoogleDriveStorageProvider, StorageManager, storageManager;
 var init_storage = __esm({
   "src/services/storage.ts"() {
@@ -1198,7 +1206,7 @@ var init_storage = __esm({
           console.log("[WebDAV] Delete successful:", storedPath);
         } catch (error) {
           console.error("[WebDAV] Delete failed:", error.message);
-          throw new Error(`WebDAV delete failed: ${error.message}`);
+          throw webDavDeleteError(error);
         }
       }
       async getFileSize(storedPath) {
@@ -5673,9 +5681,9 @@ async function settleYtDlpExecution(db, input) {
 async function cancelYtDlpExecution(db, id) {
   const result = await db.query(
     `UPDATE transfer_tasks
-         SET status = 'cancelled', stage = 'cancelled', cancel_requested = true, retryable = true,
+         SET status = 'cancelled', stage = 'cancelled', cancel_requested = true, retryable = false,
              error = '\u7528\u6237\u53D6\u6D88\u4EFB\u52A1', finished_at = NOW(), lease_token = NULL, lease_expires_at = NULL, updated_at = NOW()
-         WHERE source_type = 'ytdlp' AND id = $1 AND status IN ('pending','running','paused','failed','interrupted','retry_required')
+         WHERE source_type = 'ytdlp' AND id = $1 AND status IN ('pending','running','paused','failed','interrupted','retry_required','cancelled')
          RETURNING id`,
     [id]
   );
@@ -11042,11 +11050,19 @@ async function getScopedFileById(id) {
   );
   return result.rows[0] || null;
 }
+function resolvePhysicalDeletePath(file) {
+  if (file.source === "webdav" && file.name === ".folder" && file.mime_type === "application/x-directory" && file.folder) {
+    return `${String(file.folder).replace(/^\/+|\/+$/g, "")}/`;
+  }
+  const storedPath = file.path || file.stored_name;
+  if (!storedPath) throw new Error("\u6587\u4EF6\u7D22\u5F15\u7F3A\u5C11\u7269\u7406\u5B58\u50A8\u8DEF\u5F84");
+  return storedPath;
+}
 async function removePhysicalFile(file) {
   if (CLOUD_SOURCES.has(file.source)) {
     const { storageManager: storageManager2 } = await Promise.resolve().then(() => (init_storage(), storage_exports));
     const provider = storageManager2.getProvider(`${file.source}:${file.storage_account_id}`);
-    await provider.deleteFile(file.path);
+    await provider.deleteFile(resolvePhysicalDeletePath(file));
   } else {
     const filePath = file.path || path13.join(UPLOAD_DIR3, file.stored_name);
     if (!isPathInside(UPLOAD_DIR3, filePath)) throw new Error("\u62D2\u7EDD\u5220\u9664\u5B58\u50A8\u76EE\u5F55\u4E4B\u5916\u7684\u6587\u4EF6");
@@ -11181,7 +11197,7 @@ function mapTransferTask(task, accountNames) {
     detail: task.payload,
     error: task.error,
     retryable: task.retryable,
-    cancellable: ["pending", "running", "paused"].includes(task.status),
+    cancellable: ["pending", "running", "paused"].includes(task.status) || task.retryable,
     createdAt: task.createdAt,
     updatedAt: task.updatedAt,
     finishedAt: task.finishedAt
@@ -11972,7 +11988,7 @@ async function initializeYtDlpQueue() {
 }
 async function cancelYtDlpTask(id) {
   const task = await getTransferTask("ytdlp", id);
-  if (!task || ["completed", "cancelled"].includes(task.status)) return task;
+  if (!task || task.status === "completed" || task.status === "cancelled" && !task.retryable) return task;
   const cancelled = await cancelYtDlpExecution(pool, id);
   if (!cancelled) return null;
   activeControllers.get(id)?.abort("user_cancelled");
@@ -17222,11 +17238,14 @@ function isPhysicalFileNotFound(error) {
   const status = Number(candidate?.status ?? candidate?.statusCode ?? candidate?.code ?? candidate?.response?.status);
   if (status === 404) return true;
   const code = String(candidate?.code || "").toUpperCase();
-  return code === "ENOENT" || code === "NOT_FOUND" || code === "NOSUCHKEY";
+  if (code === "ENOENT" || code === "NOT_FOUND" || code === "NOSUCHKEY") return true;
+  const message = errorMessage(error);
+  return /(?:^|\D)404(?:\D|$).*not[\s_-]*found|not[\s_-]*found.*(?:^|\D)404(?:\D|$)/i.test(message);
 }
 function createFileDeletionService(dependencies) {
   return {
     async deleteIndexedFile(file) {
+      const directoryPlaceholder = file.name === ".folder" && file.mime_type === "application/x-directory";
       let physicalNotFound = false;
       try {
         await dependencies.removePhysicalFile(file);
@@ -17244,7 +17263,7 @@ function createFileDeletionService(dependencies) {
       } catch (error) {
         return { status: "failed", error: errorMessage(error) };
       }
-      return { status: physicalNotFound ? "not_found" : "deleted" };
+      return { status: physicalNotFound && !directoryPlaceholder ? "not_found" : "deleted" };
     }
   };
 }
@@ -19624,9 +19643,25 @@ router5.post("/accounts/:id/delete-confirmation", requireAuth, async (req, res) 
                FROM files WHERE storage_account_id = $1`, [req.params.id]),
     query(`SELECT COUNT(*)::int AS count FROM storage_account_leases
                WHERE storage_account_id = $1 AND released_at IS NULL AND expires_at > NOW()`, [req.params.id]),
-    query(`SELECT COUNT(*)::int AS count FROM transfer_tasks
-               WHERE target_account_id = $1
-                 AND (status IN ('pending', 'running', 'paused', 'interrupted', 'retry_required') OR retryable = true)`, [req.params.id]),
+    query(`SELECT COUNT(*)::int AS count FROM (
+                   SELECT 'transfer:' || source_type || ':' || id AS ref
+                   FROM transfer_tasks
+                   WHERE target_account_id = $1
+                     AND (status IN ('pending', 'running', 'paused', 'interrupted', 'retry_required') OR retryable = true)
+                   UNION ALL
+                   SELECT 'telegram-job:' || id::text AS ref
+                   FROM telegram_background_jobs
+                   WHERE finished_at IS NULL AND cancelled_at IS NULL
+                     AND params->>'storageAccountId' = $1
+                   UNION ALL
+                   SELECT 'telegram-target:' || chat_id::text AS ref
+                   FROM telegram_target_states
+                   WHERE account_id = $1 AND expires_at > NOW()
+                   UNION ALL
+                   SELECT 'subscription:' || id::text AS ref
+                   FROM telegram_channel_subscriptions
+                   WHERE target_mode = 'fixed' AND target_account_id = $1
+               ) active_references`, [req.params.id]),
     query(`SELECT COUNT(*)::int AS count FROM chunk_upload_sessions
                WHERE target_account_id = $1 AND status IN ('open', 'completing', 'failed')`, [req.params.id])
   ]);
@@ -21017,7 +21052,7 @@ import crypto27 from "node:crypto";
 var router7 = Router7();
 var CHUNK_DIR2 = process.env.CHUNK_DIR || "./data/chunks";
 async function collectUnifiedTasks(limit) {
-  const [transfers, channels, chunks, subscriptions, accounts] = await Promise.all([
+  const [transfers, channels, chunks, subscriptions, targets, accounts] = await Promise.all([
     listTransferTasks({ limit }),
     query(
       `SELECT j.*,
@@ -21040,6 +21075,13 @@ async function collectUnifiedTasks(limit) {
     ),
     query(
       `SELECT * FROM telegram_channel_subscriptions
+                 ORDER BY updated_at DESC LIMIT $1`,
+      [limit]
+    ),
+    query(
+      `SELECT chat_id, mode, account_id, provider, expires_at, updated_at
+                 FROM telegram_target_states
+                 WHERE account_id IS NOT NULL AND expires_at > NOW()
                  ORDER BY updated_at DESC LIMIT $1`,
       [limit]
     ),
@@ -21080,6 +21122,8 @@ async function collectUnifiedTasks(limit) {
     });
   }
   for (const row of subscriptions.rows) {
+    const accountId = row.target_mode === "fixed" && row.target_account_id != null ? String(row.target_account_id) : null;
+    const provider = row.target_mode === "fixed" && row.target_provider != null ? String(row.target_provider) : null;
     tasks.push({
       id: String(row.id),
       sourceType: "subscription",
@@ -21091,14 +21135,49 @@ async function collectUnifiedTasks(limit) {
       ownerUserId: Number(row.user_id),
       chatId: row.chat_id == null ? null : String(row.chat_id),
       source: row.source,
-      target: { provider: null, accountId: null, accountName: null, folder: row.folder_override || null },
+      target: {
+        provider,
+        accountId,
+        accountName: accountId ? accountNames.get(accountId) || null : null,
+        folder: row.folder_override || null
+      },
       counts: { total: 0, completed: 0, failed: 0 },
       bytes: { total: 0, transferred: 0 },
-      detail: { lastMessageId: Number(row.last_message_id || 0) },
+      detail: { lastMessageId: Number(row.last_message_id || 0), targetMode: row.target_mode },
       error: row.disabled_reason,
       retryable: false,
-      cancellable: false,
+      cancellable: Boolean(accountId),
       createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      finishedAt: null
+    });
+  }
+  for (const row of targets.rows) {
+    const accountId = String(row.account_id);
+    tasks.push({
+      id: `${String(row.chat_id)}:${String(row.mode)}`,
+      sourceType: "telegram_target",
+      kind: "telegram_chat_target",
+      title: `Telegram \u4F1A\u8BDD ${String(row.chat_id)}`,
+      status: "scheduled",
+      stage: "waiting_for_next_task",
+      progress: 0,
+      ownerUserId: null,
+      chatId: String(row.chat_id),
+      source: "Telegram \u4F1A\u8BDD\u76EE\u6807",
+      target: {
+        provider: row.provider == null ? null : String(row.provider),
+        accountId,
+        accountName: accountNames.get(accountId) || null,
+        folder: null
+      },
+      counts: { total: 0, completed: 0, failed: 0 },
+      bytes: { total: 0, transferred: 0 },
+      detail: { expiresAt: row.expires_at, mode: row.mode },
+      error: null,
+      retryable: false,
+      cancellable: true,
+      createdAt: row.updated_at,
       updatedAt: row.updated_at,
       finishedAt: null
     });
@@ -21174,7 +21253,7 @@ router7.post("/dismissals/confirm", requireAuth, async (req, res) => {
 router7.post("/:sourceType/:id/cancel-confirmation", requireAuth, async (req, res) => {
   const sourceType = String(req.params.sourceType);
   const id = String(req.params.id);
-  if (!["ytdlp", "telegram_bot", "telegram_channel", "web_upload"].includes(sourceType)) {
+  if (!["ytdlp", "telegram_bot", "telegram_channel", "web_upload", "telegram_target", "subscription"].includes(sourceType)) {
     return res.status(400).json({ error: "\u8BE5\u4EFB\u52A1\u7C7B\u578B\u6682\u4E0D\u652F\u6301\u53D6\u6D88" });
   }
   const authToken = getAuthToken(req);
@@ -21217,11 +21296,22 @@ router7.post("/:sourceType/:id/:action", requireAuth, async (req, res) => {
       const task = await getTransferTask("telegram_bot", id);
       if (!task) return res.status(404).json({ error: "\u4EFB\u52A1\u4E0D\u5B58\u5728" });
       if (action === "cancel") {
+        if (["failed", "interrupted", "retry_required"].includes(task.status) || task.retryable) {
+          await updateTransferTask("telegram_bot", id, {
+            status: "cancelled",
+            stage: "cancelled",
+            retryable: false,
+            cancelRequested: true,
+            finishedAt: /* @__PURE__ */ new Date(),
+            error: "Web \u7BA1\u7406\u5458\u653E\u5F03\u91CD\u8BD5\u5E76\u53D6\u6D88\u4EFB\u52A1"
+          });
+          return res.json({ success: true });
+        }
         const cancelled = task.chatId && task.ownerUserId ? cancelDownloadTaskGroup(id, task.chatId, task.ownerUserId) : { status: "not_found" };
         if (cancelled.status !== "ok") {
           return res.status(409).json({ error: `\u4EFB\u52A1\u5F53\u524D\u4E0D\u80FD\u53D6\u6D88: ${cancelled.status}` });
         }
-        await updateTransferTask("telegram_bot", id, { status: "cancelled", stage: "cancelled", finishedAt: /* @__PURE__ */ new Date(), error: "Web \u7BA1\u7406\u5458\u53D6\u6D88\u4EFB\u52A1" });
+        await updateTransferTask("telegram_bot", id, { status: "cancelled", stage: "cancelled", retryable: false, cancelRequested: true, finishedAt: /* @__PURE__ */ new Date(), error: "Web \u7BA1\u7406\u5458\u53D6\u6D88\u4EFB\u52A1" });
         return res.json({ success: true });
       }
       if (!task.chatId || !task.ownerUserId || task.status === "interrupted") {
@@ -21240,6 +21330,33 @@ router7.post("/:sourceType/:id/:action", requireAuth, async (req, res) => {
       }
       const task = await retryTelegramBackgroundJob(Number(row.user_id), id, row.chat_id == null ? void 0 : String(row.chat_id));
       return res.status(task ? 200 : 409).json({ success: Boolean(task), error: task ? void 0 : "\u4EFB\u52A1\u5F53\u524D\u4E0D\u80FD\u91CD\u8BD5" });
+    }
+    if (sourceType === "subscription") {
+      if (action !== "cancel") return res.status(400).json({ error: "\u9891\u9053\u8BA2\u9605\u76EE\u6807\u4EC5\u652F\u6301\u89E3\u9664\u56FA\u5B9A\u76EE\u6807" });
+      const result = await query(
+        `UPDATE telegram_channel_subscriptions
+                 SET target_mode = 'follow_global', target_provider = NULL, target_account_id = NULL, updated_at = NOW()
+                 WHERE id = $1::uuid AND target_mode = 'fixed' AND target_account_id IS NOT NULL
+                 RETURNING id`,
+        [id]
+      );
+      if ((result.rowCount || 0) === 0) return res.status(409).json({ error: "\u9891\u9053\u8BA2\u9605\u5DF2\u4E0D\u518D\u56FA\u5B9A\u5230\u8BE5\u5B58\u50A8\u8D26\u6237" });
+      return res.json({ success: true });
+    }
+    if (sourceType === "telegram_target") {
+      if (action !== "cancel") return res.status(400).json({ error: "Telegram \u4F1A\u8BDD\u76EE\u6807\u4EC5\u652F\u6301\u6E05\u9664" });
+      const separator = id.lastIndexOf(":");
+      const chatId = separator >= 0 ? id.slice(0, separator) : id;
+      const mode = separator >= 0 ? id.slice(separator + 1) : "";
+      if (!["once", "session"].includes(mode)) return res.status(400).json({ error: "Telegram \u4F1A\u8BDD\u76EE\u6807\u6807\u8BC6\u65E0\u6548" });
+      const result = await query(
+        `DELETE FROM telegram_target_states
+                 WHERE chat_id = $1 AND mode = $2 AND account_id IS NOT NULL
+                 RETURNING chat_id`,
+        [chatId, mode]
+      );
+      if ((result.rowCount || 0) === 0) return res.status(409).json({ error: "Telegram \u4F1A\u8BDD\u76EE\u6807\u5DF2\u8FC7\u671F\u6216\u4E0D\u5B58\u5728" });
+      return res.json({ success: true });
     }
     if (sourceType === "web_upload") {
       if (action === "retry") return res.status(409).json({ error: "FILE_RESELECT_REQUIRED", message: "\u8BF7\u5728\u6587\u4EF6\u9875\u91CD\u65B0\u9009\u62E9\u539F\u6587\u4EF6\u540E\u7EED\u4F20" });

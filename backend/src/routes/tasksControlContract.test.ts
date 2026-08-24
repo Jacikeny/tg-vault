@@ -12,11 +12,18 @@ test('Web task cancellation requires an actor/action/object-bound one-time confi
     assert.match(source, /CONFIRMATION_REQUIRED/);
 });
 
-test('ordinary Bot cancellation changes durable state only after runtime control succeeds', () => {
+test('ordinary Bot cancellation changes durable state only after runtime control succeeds for active work', () => {
     const block = source.slice(source.indexOf("if (sourceType === 'telegram_bot')"), source.indexOf("if (sourceType === 'telegram_channel')"));
     assert.match(block, /cancelDownloadTaskGroup/);
     assert.match(block, /cancelled\.status !== 'ok'/);
-    assert.ok(block.indexOf("cancelled.status !== 'ok'") < block.indexOf("status: 'cancelled'"));
+    assert.ok(block.indexOf("cancelled.status !== 'ok'") < block.lastIndexOf("status: 'cancelled'"));
+});
+
+test('retryable terminal Bot tasks can be abandoned without a vanished runtime queue group', () => {
+    const block = source.slice(source.indexOf("if (sourceType === 'telegram_bot')"), source.indexOf("if (sourceType === 'telegram_channel')"));
+    assert.match(block, /\['failed', 'interrupted', 'retry_required'\]\.includes\(task\.status\) \|\| task\.retryable/);
+    assert.match(block, /retryable: false/);
+    assert.match(block, /放弃重试并取消任务/);
 });
 
 test('open chunk sessions are not falsely reported as paused', () => {

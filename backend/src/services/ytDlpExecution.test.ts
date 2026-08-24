@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import test from 'node:test';
 import {
     beginYtDlpWrite,
+    cancelYtDlpExecution,
     claimYtDlpExecution,
     reconcileCommittedYtDlpWrites,
     settleYtDlpExecution,
@@ -29,6 +30,16 @@ test('claim is atomic and increments execution generation while excluding unreso
 
     const loser = new ScriptedDb([{ rows: [], rowCount: 0 }]);
     assert.equal(await claimYtDlpExecution(loser, 'task-1', 'lease-b'), null);
+});
+
+test('cancelled yt-dlp tasks release retry retention so their storage account can be deleted', async () => {
+    const db = new ScriptedDb([{ rows: [{ id: 'task-1' }], rowCount: 1 }]);
+    assert.equal(await cancelYtDlpExecution(db, 'task-1'), true);
+    const sql = db.calls[0].text;
+    assert.match(sql, /status = 'cancelled'/);
+    assert.match(sql, /status IN \('pending','running','paused','failed','interrupted','retry_required','cancelled'\)/);
+    assert.match(sql, /retryable = false/);
+    assert.doesNotMatch(sql, /retryable = true/);
 });
 
 test('progress and terminal settlement are generation and lease scoped', async () => {

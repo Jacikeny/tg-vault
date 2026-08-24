@@ -19,6 +19,17 @@ test('Web and Telegram channel views consume the shared channel mapper', () => {
     assert.doesNotMatch(routes, /row\.scan_status !== 'completed'/);
 });
 
+test('task center exposes every account-blocking Telegram target and scopes the Web UI by account', () => {
+    assert.match(routes, /FROM telegram_target_states/);
+    assert.match(routes, /sourceType: 'telegram_target'/);
+    assert.match(routes, /row\.target_mode === 'fixed'/);
+    assert.match(routes, /accountName: accountId \? accountNames\.get\(accountId\)/);
+    assert.match(routes, /DELETE FROM telegram_target_states/);
+    assert.match(routes, /target_mode = 'follow_global'/);
+    assert.match(routes, /sourceType === 'subscription'[\s\S]*action !== 'cancel'/);
+    assert.match(routes, /sourceType === 'telegram_target'[\s\S]*action !== 'cancel'/);
+});
+
 test('task list reports filtered total separately from returned page size', () => {
     const listRoute = routeBlock("router.get('/', requireAuth", "router.post('/dismissals/prepare'");
     assert.match(listRoute, /const total = filtered\.length/);

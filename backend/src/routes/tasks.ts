@@ -16,7 +16,7 @@ const router = Router();
 const CHUNK_DIR = process.env.CHUNK_DIR || './data/chunks';
 
 async function collectUnifiedTasks(limit: number): Promise<any[]> {
-        const [transfers, channels, chunks, subscriptions, accounts] = await Promise.all([
+        const [transfers, channels, chunks, subscriptions, targets, accounts] = await Promise.all([
             listTransferTasks({ limit }),
             query(
                 `SELECT j.*,
@@ -39,6 +39,13 @@ async function collectUnifiedTasks(limit: number): Promise<any[]> {
             ),
             query(
                 `SELECT * FROM telegram_channel_subscriptions
+                 ORDER BY updated_at DESC LIMIT $1`,
+                [limit],
+            ),
+            query(
+                `SELECT chat_id, mode, account_id, provider, expires_at, updated_at
+                 FROM telegram_target_states
+                 WHERE account_id IS NOT NULL AND expires_at > NOW()
                  ORDER BY updated_at DESC LIMIT $1`,
                 [limit],
             ),
@@ -79,6 +86,8 @@ async function collectUnifiedTasks(limit: number): Promise<any[]> {
             });
         }
         for (const row of subscriptions.rows) {
+            const accountId = row.target_mode === 'fixed' && row.target_account_id != null ? String(row.target_account_id) : null;
+            const provider = row.target_mode === 'fixed' && row.target_provider != null ? String(row.target_provider) : null;
             tasks.push({
                 id: String(row.id),
                 sourceType: 'subscription',
@@ -90,14 +99,49 @@ async function collectUnifiedTasks(limit: number): Promise<any[]> {
                 ownerUserId: Number(row.user_id),
                 chatId: row.chat_id == null ? null : String(row.chat_id),
                 source: row.source,
-                target: { provider: null, accountId: null, accountName: null, folder: row.folder_override || null },
+                target: {
+                    provider,
+                    accountId,
+                    accountName: accountId ? accountNames.get(accountId) || null : null,
+                    folder: row.folder_override || null,
+                },
                 counts: { total: 0, completed: 0, failed: 0 },
                 bytes: { total: 0, transferred: 0 },
-                detail: { lastMessageId: Number(row.last_message_id || 0) },
+                detail: { lastMessageId: Number(row.last_message_id || 0), targetMode: row.target_mode },
                 error: row.disabled_reason,
                 retryable: false,
-                cancellable: false,
+                cancellable: Boolean(accountId),
                 createdAt: row.created_at,
+                updatedAt: row.updated_at,
+                finishedAt: null,
+            });
+        }
+        for (const row of targets.rows) {
+            const accountId = String(row.account_id);
+            tasks.push({
+                id: `${String(row.chat_id)}:${String(row.mode)}`,
+                sourceType: 'telegram_target',
+                kind: 'telegram_chat_target',
+                title: `Telegram 会话 ${String(row.chat_id)}`,
+                status: 'scheduled',
+                stage: 'waiting_for_next_task',
+                progress: 0,
+                ownerUserId: null,
+                chatId: String(row.chat_id),
+                source: 'Telegram 会话目标',
+                target: {
+                    provider: row.provider == null ? null : String(row.provider),
+                    accountId,
+                    accountName: accountNames.get(accountId) || null,
+                    folder: null,
+                },
+                counts: { total: 0, completed: 0, failed: 0 },
+                bytes: { total: 0, transferred: 0 },
+                detail: { expiresAt: row.expires_at, mode: row.mode },
+                error: null,
+                retryable: false,
+                cancellable: true,
+                createdAt: row.updated_at,
                 updatedAt: row.updated_at,
                 finishedAt: null,
             });
@@ -187,7 +231,7 @@ router.post('/dismissals/confirm', requireAuth, async (req: Request, res: Respon
 router.post('/:sourceType/:id/cancel-confirmation', requireAuth, async (req: Request, res: Response) => {
     const sourceType = String(req.params.sourceType);
     const id = String(req.params.id);
-    if (!['ytdlp', 'telegram_bot', 'telegram_channel', 'web_upload'].includes(sourceType)) {
+    if (!['ytdlp', 'telegram_bot', 'telegram_channel', 'web_upload', 'telegram_target', 'subscription'].includes(sourceType)) {
         return res.status(400).json({ error: '该任务类型暂不支持取消' });
     }
     const authToken = getAuthToken(req);
@@ -233,13 +277,24 @@ router.post('/:sourceType/:id/:action', requireAuth, async (req: Request, res: R
             const task = await getTransferTask('telegram_bot', id);
             if (!task) return res.status(404).json({ error: '任务不存在' });
             if (action === 'cancel') {
+                if (['failed', 'interrupted', 'retry_required'].includes(task.status) || task.retryable) {
+                    await updateTransferTask('telegram_bot', id, {
+                        status: 'cancelled',
+                        stage: 'cancelled',
+                        retryable: false,
+                        cancelRequested: true,
+                        finishedAt: new Date(),
+                        error: 'Web 管理员放弃重试并取消任务',
+                    });
+                    return res.json({ success: true });
+                }
                 const cancelled = task.chatId && task.ownerUserId
                     ? cancelDownloadTaskGroup(id, task.chatId, task.ownerUserId)
                     : { status: 'not_found' as const };
                 if (cancelled.status !== 'ok') {
                     return res.status(409).json({ error: `任务当前不能取消: ${cancelled.status}` });
                 }
-                await updateTransferTask('telegram_bot', id, { status: 'cancelled', stage: 'cancelled', finishedAt: new Date(), error: 'Web 管理员取消任务' });
+                await updateTransferTask('telegram_bot', id, { status: 'cancelled', stage: 'cancelled', retryable: false, cancelRequested: true, finishedAt: new Date(), error: 'Web 管理员取消任务' });
                 return res.json({ success: true });
             }
             if (!task.chatId || !task.ownerUserId || task.status === 'interrupted') {
@@ -258,6 +313,33 @@ router.post('/:sourceType/:id/:action', requireAuth, async (req: Request, res: R
             }
             const task = await retryTelegramBackgroundJob(Number(row.user_id), id, row.chat_id == null ? undefined : String(row.chat_id));
             return res.status(task ? 200 : 409).json({ success: Boolean(task), error: task ? undefined : '任务当前不能重试' });
+        }
+        if (sourceType === 'subscription') {
+            if (action !== 'cancel') return res.status(400).json({ error: '频道订阅目标仅支持解除固定目标' });
+            const result = await query(
+                `UPDATE telegram_channel_subscriptions
+                 SET target_mode = 'follow_global', target_provider = NULL, target_account_id = NULL, updated_at = NOW()
+                 WHERE id = $1::uuid AND target_mode = 'fixed' AND target_account_id IS NOT NULL
+                 RETURNING id`,
+                [id],
+            );
+            if ((result.rowCount || 0) === 0) return res.status(409).json({ error: '频道订阅已不再固定到该存储账户' });
+            return res.json({ success: true });
+        }
+        if (sourceType === 'telegram_target') {
+            if (action !== 'cancel') return res.status(400).json({ error: 'Telegram 会话目标仅支持清除' });
+            const separator = id.lastIndexOf(':');
+            const chatId = separator >= 0 ? id.slice(0, separator) : id;
+            const mode = separator >= 0 ? id.slice(separator + 1) : '';
+            if (!['once', 'session'].includes(mode)) return res.status(400).json({ error: 'Telegram 会话目标标识无效' });
+            const result = await query(
+                `DELETE FROM telegram_target_states
+                 WHERE chat_id = $1 AND mode = $2 AND account_id IS NOT NULL
+                 RETURNING chat_id`,
+                [chatId, mode],
+            );
+            if ((result.rowCount || 0) === 0) return res.status(409).json({ error: 'Telegram 会话目标已过期或不存在' });
+            return res.json({ success: true });
         }
         if (sourceType === 'web_upload') {
             if (action === 'retry') return res.status(409).json({ error: 'FILE_RESELECT_REQUIRED', message: '请在文件页重新选择原文件后续传' });

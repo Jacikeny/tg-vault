@@ -64,6 +64,19 @@ test('channel status and scan phase map consistently across lifecycle states', (
     });
 });
 
+test('retryable terminal transfer tasks remain cancellable so users can release their storage target', () => {
+    const accounts = new Map([['account-a', '主存储']]);
+    const transfer: TransferTaskRecord = {
+        sourceType: 'telegram_bot', id: 'bot-failed', kind: 'single', title: 'report.pdf', status: 'interrupted',
+        stage: 'retry_required', progress: 25, ownerUserId: 7, chatId: '-100123', source: 'Telegram',
+        targetProvider: 'webdav', targetAccountId: 'account-a', targetFolder: '文档', totalItems: 1,
+        completedItems: 0, failedItems: 1, totalBytes: 4096, transferredBytes: 1024,
+        payload: {}, error: '服务重启', retryable: true, cancelRequested: false,
+        startedAt: new Date(now - 30_000), finishedAt: new Date(now), createdAt: new Date(now - 60_000), updatedAt: new Date(now),
+    };
+    assert.equal(mapTransferTask(transfer, accounts).cancellable, true);
+});
+
 test('unified mappers preserve targets, counts, and task safety capabilities', () => {
     const accounts = new Map([['account-a', '主存储']]);
     const channel = mapTelegramChannelJob(channelRow({

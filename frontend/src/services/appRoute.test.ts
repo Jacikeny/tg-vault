@@ -31,7 +31,9 @@ test('file routes parse and serialize every category', () => {
 });
 
 test('tasks and every settings section have stable paths', () => {
-    assert.deepEqual(parseAppRoute({ pathname: '/tasks', search: '' }), { kind: 'tasks', needsReplace: false });
+    assert.deepEqual(parseAppRoute({ pathname: '/tasks', search: '' }), { kind: 'tasks', accountId: null, needsReplace: false });
+    assert.deepEqual(parseAppRoute({ pathname: '/tasks', search: '?accountId=account-a' }), { kind: 'tasks', accountId: 'account-a', needsReplace: false });
+    assert.equal(appRouteHref(parseAppRoute({ pathname: '/tasks', search: '?accountId=account-a' })), '/tasks?accountId=account-a');
     for (const section of ['general', 'security', 'telegram', 'storage', 'maintenance'] as const) {
         const pathname = `/settings/${section}`;
         assert.deepEqual(parseAppRoute({ pathname, search: '' }), { kind: 'settings', section, needsReplace: false });

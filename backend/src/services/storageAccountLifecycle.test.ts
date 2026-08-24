@@ -125,7 +125,6 @@ test('delete refuses an account referenced by an unfinished or retryable transfe
         { id: 'pending', status: 'pending', retryable: false },
         { id: 'running', status: 'running', retryable: false },
         { id: 'failed', status: 'failed', retryable: true },
-        { id: 'cancelled', status: 'cancelled', retryable: true },
     ]) {
         const client = new ScriptedClient([
             { rows: [{ id: 'account', name: 'A', type: 's3', is_active: false }] },

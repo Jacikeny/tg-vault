@@ -118,6 +118,7 @@ function App() {
 
   const { t } = useTranslation();
   const [currentCategory, setCurrentCategory] = useState(() => initialRoute.kind === 'files' ? initialRoute.category : initialRoute.kind);
+  const [taskAccountId, setTaskAccountId] = useState<string | null>(() => initialRoute.kind === 'tasks' ? initialRoute.accountId : null);
   const [viewMode, setViewMode] = useState<"grid" | "list">("grid");
   const [selectedFile, setSelectedFile] = useState<FileData | null>(null);
   const [deletingFile, setDeletingFile] = useState<FileData | null>(null);
@@ -164,11 +165,13 @@ function App() {
       setCurrentCategory(route.category);
       setCurrentFolder(route.folder);
       setSearchQuery(route.query);
+      setTaskAccountId(null);
       return;
     }
     setCurrentCategory(route.kind);
     setCurrentFolder(null);
     setSearchQuery('');
+    setTaskAccountId(route.kind === 'tasks' ? route.accountId : null);
     if (route.kind === 'settings') setSettingsSection(route.section);
   }, []);
 
@@ -1196,13 +1199,14 @@ function App() {
               <SettingsPage
                 storageStats={storageStats}
                 onSignedOut={() => setIsAuthenticated(false)}
+                onOpenTasksForAccount={(accountId) => navigateRoute({ kind: 'tasks', accountId, needsReplace: false })}
                 activeSection={settingsSection}
                 onSectionChange={handleSettingsSectionChange}
               />
             </Suspense>
           ) : currentCategory === "tasks" ? (
             <Suspense fallback={<LazyFallback />}>
-              <TasksPage onUnauthorized={() => setIsAuthenticated(false)} onOpenUploads={() => setIsQueueModalOpen(true)} />
+              <TasksPage onUnauthorized={() => setIsAuthenticated(false)} onOpenUploads={() => setIsQueueModalOpen(true)} initialAccountId={taskAccountId} />
             </Suspense>
           ) : (
             <>

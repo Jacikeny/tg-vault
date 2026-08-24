@@ -14,12 +14,14 @@ test('share UI is driven by backend capabilities and hides unsupported fields', 
     assert.match(toolbar, /shareCapabilities\?\.sharePassword/);
 });
 
-test('storage account deletion previews impact before execution', () => {
+test('storage account deletion previews every server-side task reference and opens the filtered task center when blocked', () => {
     assert.match(api, /previewAccountDeletion/);
     assert.match(settings, /impact\.fileCount/);
     assert.match(settings, /impact\.folderCount/);
     assert.match(settings, /activeLeaseCount/);
     assert.match(settings, /不会删除云端原文件/);
+    assert.match(settings, /onOpenTasksForAccount\?\.\(accountId\)/);
+    assert.match(settings, /请到任务中心取消对应任务/);
 });
 
 test('cloud storage account creation cannot leave the settings form saving forever', () => {

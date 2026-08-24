@@ -16,6 +16,7 @@ import { IndeterminateSpinner } from "../ui/IndeterminateSpinner";
 interface SettingsPageProps {
     storageStats?: StorageStats | null;
     onSignedOut?: () => void;
+    onOpenTasksForAccount?: (accountId: string) => void;
     activeSection: SettingsSectionId;
     onSectionChange: (section: SettingsSectionId) => void;
 }
@@ -132,7 +133,7 @@ const ActionDialog = ({ state, input, onInput, onCancel, onConfirm }: {
     );
 };
 
-export const SettingsPage = ({ storageStats, onSignedOut, activeSection, onSectionChange }: SettingsPageProps) => {
+export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount, activeSection, onSectionChange }: SettingsPageProps) => {
     const { t } = useTranslation();
     const { theme, setTheme } = useTheme();
 
@@ -457,6 +458,15 @@ export const SettingsPage = ({ storageStats, onSignedOut, activeSection, onSecti
                 '不会删除云端原文件；执行时服务端会重新检查活动租约和任务。',
                 ...(busyCount > 0 ? ['', '当前存在活动引用，执行将被服务端阻止。请先结束相关任务。'] : []),
             ].join('\n');
+            if (busyCount > 0) {
+                await showNotice([
+                    impactText,
+                    '',
+                    '请到任务中心取消对应任务；频道订阅等固定目标会在任务中心展示其账户引用。',
+                ].join('\n'), '账户仍被引用');
+                onOpenTasksForAccount?.(accountId);
+                return;
+            }
             if (!(await requestConfirmation(impactText, '删除存储账户'))) return;
             const result = await fileApi.deleteAccount(accountId, preview.confirmationToken);
             await showNotice(result.message);

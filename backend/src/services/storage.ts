@@ -452,6 +452,15 @@ export class S3StorageProvider implements IStorageProvider {
     }
 }
 
+function webDavDeleteError(error: unknown): Error {
+    const original = error as any;
+    const wrapped = new Error(`WebDAV delete failed: ${original?.message || String(error)}`, { cause: error });
+    for (const key of ['status', 'statusCode', 'code', 'response'] as const) {
+        if (original?.[key] !== undefined) (wrapped as any)[key] = original[key];
+    }
+    return wrapped;
+}
+
 // WebDAV 存储实现
 export class WebDAVStorageProvider implements IStorageProvider {
     name = 'webdav';
@@ -574,7 +583,7 @@ export class WebDAVStorageProvider implements IStorageProvider {
             console.log('[WebDAV] Delete successful:', storedPath);
         } catch (error: any) {
             console.error('[WebDAV] Delete failed:', error.message);
-            throw new Error(`WebDAV delete failed: ${error.message}`);
+            throw webDavDeleteError(error);
         }
     }
 

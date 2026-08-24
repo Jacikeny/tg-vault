@@ -110,7 +110,7 @@ export interface ChunkUploadSession {
 
 export type ChunkUploadCancelStatus = 'cancelled' | 'busy' | 'terminal' | 'not_found';
 
-export type UnifiedTaskSource = 'telegram_bot' | 'telegram_channel' | 'ytdlp' | 'web_upload' | 'subscription';
+export type UnifiedTaskSource = 'telegram_bot' | 'telegram_channel' | 'ytdlp' | 'web_upload' | 'subscription' | 'telegram_target';
 
 export interface UnifiedTask {
     id: string;

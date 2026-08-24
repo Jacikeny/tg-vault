@@ -4,7 +4,7 @@ export type FileCategory = 'all' | 'media' | 'image' | 'video' | 'audio' | 'docu
 
 export type AppRoute =
     | { kind: 'files'; category: FileCategory; folder: string | null; query: string; needsReplace: boolean }
-    | { kind: 'tasks'; needsReplace: boolean }
+    | { kind: 'tasks'; accountId: string | null; needsReplace: boolean }
     | { kind: 'settings'; section: SettingsSectionId; needsReplace: boolean };
 
 const CATEGORY_PATHS: Record<FileCategory, string> = {
@@ -32,7 +32,10 @@ export function parseAppRoute(location: Pick<Location, 'pathname' | 'search'>): 
         const params = new URLSearchParams(location.search);
         return filesRoute(category, params.get('folder'), params.get('q') || '');
     }
-    if (pathname === '/tasks') return { kind: 'tasks', needsReplace: false };
+    if (pathname === '/tasks') {
+        const params = new URLSearchParams(location.search);
+        return { kind: 'tasks', accountId: params.get('accountId'), needsReplace: false };
+    }
     if (pathname.startsWith('/settings/')) {
         const section = pathname.slice('/settings/'.length) as SettingsSectionId;
         if (SETTINGS_SECTIONS.has(section)) return { kind: 'settings', section, needsReplace: false };
@@ -41,7 +44,12 @@ export function parseAppRoute(location: Pick<Location, 'pathname' | 'search'>): 
 }
 
 export function appRouteHref(route: AppRoute): string {
-    if (route.kind === 'tasks') return '/tasks';
+    if (route.kind === 'tasks') {
+        const params = new URLSearchParams();
+        if (route.accountId) params.set('accountId', route.accountId);
+        const search = params.toString();
+        return `/tasks${search ? `?${search}` : ''}`;
+    }
     if (route.kind === 'settings') return `/settings/${route.section}`;
     const params = new URLSearchParams();
     if (route.folder) params.set('folder', route.folder);
@@ -51,7 +59,7 @@ export function appRouteHref(route: AppRoute): string {
 }
 
 export function routeForCategory(category: string, options: { folder?: string | null; query?: string } = {}): AppRoute {
-    if (category === 'tasks') return { kind: 'tasks', needsReplace: false };
+    if (category === 'tasks') return { kind: 'tasks', accountId: null, needsReplace: false };
     if (category === 'settings') return routeForSettings('general');
     const safeCategory = Object.hasOwn(CATEGORY_PATHS, category) ? category as FileCategory : 'all';
     return filesRoute(safeCategory, options.folder ?? null, options.query ?? '');

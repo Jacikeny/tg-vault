@@ -1,6 +1,6 @@
 import type { TransferTaskRecord } from './transferTasks.js';
 
-export type UnifiedTaskSourceType = 'telegram_bot' | 'telegram_channel' | 'ytdlp' | 'web_upload' | 'subscription';
+export type UnifiedTaskSourceType = 'telegram_bot' | 'telegram_channel' | 'ytdlp' | 'web_upload' | 'subscription' | 'telegram_target';
 
 export interface UnifiedTask {
     id: string;
@@ -136,7 +136,7 @@ export function mapTransferTask(task: TransferTaskRecord, accountNames: Readonly
         detail: task.payload,
         error: task.error,
         retryable: task.retryable,
-        cancellable: ['pending', 'running', 'paused'].includes(task.status),
+        cancellable: ['pending', 'running', 'paused'].includes(task.status) || task.retryable,
         createdAt: task.createdAt,
         updatedAt: task.updatedAt,
         finishedAt: task.finishedAt,

@@ -481,7 +481,7 @@ export async function initializeYtDlpQueue(): Promise<void> {
 
 export async function cancelYtDlpTask(id: string): Promise<TransferTaskRecord | null> {
     const task = await getTransferTask('ytdlp', id);
-    if (!task || ['completed', 'cancelled'].includes(task.status)) return task;
+    if (!task || task.status === 'completed' || (task.status === 'cancelled' && !task.retryable)) return task;
     const cancelled = await cancelYtDlpExecution(pool, id);
     if (!cancelled) return null;
     activeControllers.get(id)?.abort('user_cancelled');

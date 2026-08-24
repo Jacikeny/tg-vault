@@ -112,9 +112,9 @@ export async function settleYtDlpExecution(db: Queryable, input: {
 export async function cancelYtDlpExecution(db: Queryable, id: string): Promise<boolean> {
     const result = await db.query(
         `UPDATE transfer_tasks
-         SET status = 'cancelled', stage = 'cancelled', cancel_requested = true, retryable = true,
+         SET status = 'cancelled', stage = 'cancelled', cancel_requested = true, retryable = false,
              error = '用户取消任务', finished_at = NOW(), lease_token = NULL, lease_expires_at = NULL, updated_at = NOW()
-         WHERE source_type = 'ytdlp' AND id = $1 AND status IN ('pending','running','paused','failed','interrupted','retry_required')
+         WHERE source_type = 'ytdlp' AND id = $1 AND status IN ('pending','running','paused','failed','interrupted','retry_required','cancelled')
          RETURNING id`, [id],
     );
     return result.rowCount === 1;
