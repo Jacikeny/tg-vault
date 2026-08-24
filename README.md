@@ -119,81 +119,52 @@ docker compose up -d
 
 ## 🛠️ 环境变量配置
 
-### 必填项
+> 下面仅列出部署时最常用的变量。点击各分组展开详情；完整模板以 [`.env.example`](.env.example) 为准。
 
-- **`DB_PASSWORD`**
-  - 用途：PostgreSQL 数据库密码
-  - 示例：`change_me_to_a_strong_password`
-- **`VITE_API_URL`**
-  - 用途：前端访问后端的公网 API 地址，必须包含协议
-  - 示例：`https://api.yourdomain.com`
-- **`CORS_ORIGIN`**
-  - 用途：允许跨域的前端来源
-  - 示例：`https://cloud.yourdomain.com`
-- **`DOMAIN`**
-  - 用途：应用主域名，不带协议
-  - 示例：`cloud.yourdomain.com`
+<details open>
+<summary><strong>必填项（4 项）</strong></summary>
 
-### Telegram 相关
+- **`DB_PASSWORD`** — PostgreSQL 密码；示例：`change_me_to_a_strong_password`
+- **`VITE_API_URL`** — 前端访问后端的公网地址；示例：`https://api.yourdomain.com`
+- **`CORS_ORIGIN`** — 允许跨域的前端来源；示例：`https://cloud.yourdomain.com`
+- **`DOMAIN`** — 应用主域名，不带协议；示例：`cloud.yourdomain.com`
 
-- **`TELEGRAM_BOT_TOKEN`** · 启用 Bot 基础能力时需要
-  从 [@BotFather](https://t.me/BotFather) 获取。
-- **`TELEGRAM_API_ID`** · 启用 Bot 或账号级下载器时需要
-  从 [my.telegram.org](https://my.telegram.org) 获取；Bot 与账号级下载器共用。
-- **`TELEGRAM_API_HASH`** · 启用 Bot 或账号级下载器时需要
-  与 `TELEGRAM_API_ID` 同页获取；Bot 与账号级下载器共用这一组 API 配置。
-- **`TELEGRAM_ALLOWED_USER_IDS`** · 建议配置
-  限制谁可以通过 Bot PIN 登录。填写 Telegram 数字 user id，多个用英文逗号分隔；可让用户私聊 `@userinfobot` 查看 Id。
-- **`TELEGRAM_USER_SESSION_FILE`** · 启用账号级下载器时可选
-  默认 `/data/telegram_user_session.txt`；运行登录脚本生成。
-- **`TELEGRAM_DOWNLOAD_WORKERS`** · 可选
-  控制单文件分片并发。默认 `4`，建议 `4` 或 `8`；`12/16` 更激进，可能触发限流。
-- **`TELEGRAM_FILE_DOWNLOAD_CONCURRENCY`** · 可选
-  控制同时下载的文件数。默认 `2`，可在 Bot 里用 `/file_concurrency` 设置 `1/2/3/4`；选择 `4` 需要二次确认。
+</details>
 
-### 常用可选项
+<details>
+<summary><strong>Telegram 相关（7 项）</strong></summary>
 
-- **`PORT`** · 默认 `51947`
-  后端监听端口。
-- **`UPLOAD_DIR`** · 默认 `/data/uploads`
-  文件保存根目录（容器内路径）。
-- **`THUMBNAIL_DIR`** · 默认 `/data/thumbnails`
-  缩略图目录。
-- **`CHUNK_DIR`** · 默认 `/data/chunks`
-  分片上传缓存目录。
-- **`DUPLICATE_FILE_MODE`** · 默认 `copy`
-  重复文件策略：`copy` 生成副本；`skip` 跳过同名、同目录且同大小的文件。
-- **`AUTO_CLEANUP_ORPHANS`** · 默认 `true`
-  是否自动清理本地 uploads 中未登记到数据库的孤儿文件。
-- **`YTDLP_BIN`** · 默认 `yt-dlp`
-  yt-dlp 可执行文件路径。
-- **`YTDLP_WORK_DIR`** · 默认 `/data/uploads/ytdlp`
-  yt-dlp 下载临时目录（Compose 部署）。
-- **`YTDLP_MAX_CONCURRENT`** · 默认 `1`
-  yt-dlp 并发任务数。
+- **`TELEGRAM_BOT_TOKEN`** — Bot 基础能力必填；从 [@BotFather](https://t.me/BotFather) 获取
+- **`TELEGRAM_API_ID` / `TELEGRAM_API_HASH`** — Bot 或账号级下载器必填；从 [my.telegram.org](https://my.telegram.org) 获取
+- **`TELEGRAM_ALLOWED_USER_IDS`** — 建议填写；允许通过 Bot PIN 登录的 Telegram user id，多个用逗号分隔
+- **`TELEGRAM_USER_SESSION_FILE`** — 账号级下载器可选；默认 `/data/telegram_user_session.txt`
+- **`TELEGRAM_DOWNLOAD_WORKERS`** — 单文件分片并发；默认 `4`，建议 `4` 或 `8`
+- **`TELEGRAM_FILE_DOWNLOAD_CONCURRENCY`** — 同时下载的文件数；默认 `2`，可选 `1/2/3/4`
 
-### 限流与安全项
+</details>
 
-- **`TELEGRAM_RATE_WINDOW_MS` / `TELEGRAM_RATE_MAX`** · 默认 `60000` / `30`
-  Bot 普通消息限流：默认每分钟 30 次。
-- **`TELEGRAM_HEAVY_RATE_WINDOW_MS` / `TELEGRAM_HEAVY_RATE_MAX`** · 默认 `600000` / `5`
-  Bot 重型命令限流：默认每 10 分钟 5 次。
-- **`TRUST_PROXY`** · 默认 `loopback`
-  Express 反代信任范围；本机 Nginx/Caddy 反代推荐保持默认。
-- **`COOKIE_SECURE`** · 默认 `true`
-  登录 Cookie 仅通过 HTTPS 发送；本地 HTTP 调试可临时设为 `false`。
-- **`JSON_BODY_LIMIT`** · 默认 `2mb`
-  普通 JSON API 请求体大小限制，不是文件大小限制。
-- **`MAX_UPLOAD_CHUNK_MB`** · 默认 `32`
-  Web 分片上传单片最大 MiB。
-- **`MAX_CHUNK_UPLOAD_GB` / `CHUNK_GLOBAL_BUDGET_GB`** · 默认 `20` / `40`
-  单任务上限与所有未完成分片会话的总预算。
-- **`CHUNK_DISK_RESERVE_GB`** · 默认 `8`
-  分片写入后必须保留的最小可用磁盘空间。
-- **`MAX_TOTAL_CHUNKS`** · 默认 `50000`
-  单个上传任务允许的最大分片数。
-- **`ORPHAN_CLEANUP_MIN_AGE_MS`** · 默认 `600000`
-  本地孤儿文件清理保护期，默认 10 分钟内不清理。
+<details>
+<summary><strong>常用可选项（9 项）</strong></summary>
+
+- **`PORT`** `51947` — 后端监听端口
+- **`UPLOAD_DIR`** `/data/uploads` · **`THUMBNAIL_DIR`** `/data/thumbnails` · **`CHUNK_DIR`** `/data/chunks`
+- **`DUPLICATE_FILE_MODE`** `copy` — `copy` 生成副本；`skip` 跳过同名、同目录且同大小的文件
+- **`AUTO_CLEANUP_ORPHANS`** `true` — 自动清理未登记到数据库的本地孤儿文件
+- **`YTDLP_BIN`** `yt-dlp` · **`YTDLP_WORK_DIR`** `/data/uploads/ytdlp` · **`YTDLP_MAX_CONCURRENT`** `1`
+
+</details>
+
+<details>
+<summary><strong>限流与安全项（10 项）</strong></summary>
+
+- **普通消息限流** — `TELEGRAM_RATE_WINDOW_MS=60000`，`TELEGRAM_RATE_MAX=30`
+- **重型命令限流** — `TELEGRAM_HEAVY_RATE_WINDOW_MS=600000`，`TELEGRAM_HEAVY_RATE_MAX=5`
+- **`TRUST_PROXY`** `loopback` · **`COOKIE_SECURE`** `true` · **`JSON_BODY_LIMIT`** `2mb`
+- **分片限制** — `MAX_UPLOAD_CHUNK_MB=32`，`MAX_CHUNK_UPLOAD_GB=20`，`CHUNK_GLOBAL_BUDGET_GB=40`
+- **磁盘与数量保护** — `CHUNK_DISK_RESERVE_GB=8`，`MAX_TOTAL_CHUNKS=50000`
+- **`ORPHAN_CLEANUP_MIN_AGE_MS`** `600000` — 10 分钟内不清理本地孤儿文件
+
+</details>
 
 ---
 
@@ -249,88 +220,66 @@ TELEGRAM_ALLOWED_USER_IDS=123456789,987654321
 
 ### Telegram 文件与分片并发调参
 
-TG Vault 有两层 Telegram 下载并发：
+<details>
+<summary><strong>展开并发参数与推荐组合</strong></summary>
 
-- **文件级并发**
-  - Bot 命令：`/file_concurrency`
-  - 环境变量：`TELEGRAM_FILE_DOWNLOAD_CONCURRENCY`
-  - 控制：一次同时下载几个文件
-  - 可选值：`1` / `2` / `3` / `4`；选择 `4` 需要二次确认
-- **单文件分片并发**
-  - Bot 命令：`/download_workers`
-  - 环境变量：`TELEGRAM_DOWNLOAD_WORKERS`
-  - 控制：单个文件内部同时拉几个 512KB 分片
-  - 可选值：`4` / `8` / `12` / `16`；选择 `12/16` 需要二次确认
+- **文件级并发** — `/file_concurrency` / `TELEGRAM_FILE_DOWNLOAD_CONCURRENCY`；可选 `1/2/3/4`
+- **单文件分片并发** — `/download_workers` / `TELEGRAM_DOWNLOAD_WORKERS`；可选 `4/8/12/16`
 
-建议组合：
+推荐：稳定 `1 × 4` · 默认 `2 × 4` · 速度 `3 × 4/8`。文件级 `4` 或分片 `12/16` 属于激进模式，需要二次确认，且可能触发限流。
 
-- 稳定优先：文件级 `1`，分片 `4`
-- 默认推荐：文件级 `2`，分片 `4`
-- 速度优先：文件级 `3`，分片 `4` 或 `8`
-- 激进模式：文件级 `4` 或分片 `12/16`，可能触发 Telegram 限流、断流或云盘上传限速
+> Telegram 单次 `upload.getFile` 请求最大约 512KB。前一个数字是同时下载的文件数，后一个数字是单文件内部的分片 worker 数。
 
-> Telegram 单次 `upload.getFile` 请求最大约 512KB。分片 worker 调的是单个文件内部请求数；文件级并发调的是队列中同时跑几个文件。
+</details>
 
 ---
 
 ## 🧭 Telegram Bot 命令
 
-### 基础命令
+<details open>
+<summary><strong>常用命令</strong></summary>
 
-以下命令只需启用 Bot，**不依赖账号级下载器**：
+- `/start` 认证 · `/help` 帮助 · `/list [数量] [页码]` 最近文件
+- `/storage` 存储状态 · `/tasks` 任务队列 · `/ytdlp <url>` 下载视频链接
+- `/delete <至少 8 位 ID 前缀>` 删除文件 · `/setup_2fa` 配置 TOTP
 
-- **认证与帮助**
-  - `/start` — 身份认证 / 开始使用
-  - `/help` — 查看 Bot 内置帮助
-  - `/setup_2fa` — 配置双重验证（TOTP）
-- **文件与存储**
-  - `/list [数量] [页码]` — 查看最近文件和可复制的文件 ID
-  - `/storage` — 查看存储状态；可在二次确认后删除本地实体文件
-  - `/delete <至少 8 位 ID 前缀>` — 删除指定文件；ID 可从 `/list` 或 Web 预览复制
-  - `/ytdlp <url>` — 解析并下载视频链接到当前存储源
-- **任务管理**
-  - `/tasks` — 查看实时传输任务队列
-  - `/task_pause [任务ID]` — 暂停当前聊天的普通下载，或暂停指定任务的新下载
-  - `/task_resume [任务ID]` — 继续当前聊天的普通下载，或继续指定任务
-  - `/task_cancel <任务ID或all>` — 取消指定任务，或经确认取消当前聊天全部任务
-  - `/stop_tasks` — 经确认取消当前聊天全部任务；别名 `/stop`、`/cancel_tasks`
-- **下载与清理设置**
-  - `/download_workers` — 设置单文件分片并发；别名 `/workers`
-  - `/file_concurrency` — 设置同时下载的文件数；别名 `/file_workers`、`/download_files`
-  - `/duplicate_mode` — 设置重复文件处理；别名 `/duplicate`、`/dup`
-  - `/cleanup_settings` — 管理未索引临时文件的自动清理；别名 `/cleanup`
+</details>
 
-> “清理”相关操作按对象区分：Web 设置中的“删除任务历史”只删 Telegram 下载审计明细；`/cleanup_settings` 只管理未索引临时文件的自动清理；`/storage` 中的危险操作会删除本地实体文件，必须单独确认。
+<details>
+<summary><strong>任务、下载与清理设置</strong></summary>
 
-### 保存位置命令
+- **任务控制** — `/task_pause [任务ID]` · `/task_resume [任务ID]` · `/task_cancel <任务ID或all>` · `/stop_tasks`
+- **并发设置** — `/download_workers`（别名 `/workers`）· `/file_concurrency`（别名 `/file_workers`、`/download_files`）
+- **文件策略** — `/duplicate_mode`（别名 `/duplicate`、`/dup`）· `/cleanup_settings`（别名 `/cleanup`）
 
-- `/path_rules` — 打开保存位置 / 自定义目录面板；别名 `/path`、`/save_rules`
-- `/p <目录>` — 仅下一次下载保存到指定目录
-- `/ps <目录>` — 当前会话持续保存到指定目录
+> Web 设置中的“删除任务历史”、`/cleanup_settings` 管理的临时文件清理，以及 `/storage` 中删除本地实体文件，是三类不同操作；危险操作均需单独确认。
+
+</details>
+
+<details>
+<summary><strong>保存位置命令</strong></summary>
+
+- `/path_rules` — 打开保存位置面板；别名 `/path`、`/save_rules`
+- `/p <目录>` — 仅下一次下载使用该目录
+- `/ps <目录>` — 当前会话持续使用该目录
 - `/pc` — 清除下一次 / 本会话自定义目录
 
-默认未设置自定义目录时，文件会自动按来源/频道和文件类型归档；设置自定义目录后，文件直接保存到指定目录，不再追加频道名或类型目录。
+未设置时按来源、频道和文件类型自动归档；设置后直接保存到指定目录。
 
-### 频道/群组转存与订阅命令
+</details>
 
-这些命令需要账号级 Telegram 下载器：
+<details>
+<summary><strong>频道/群组转存与订阅（需要账号级下载器）</strong></summary>
 
-- **批量转存**
-  - `/tg_download` — 打开按日期 / 标签下载向导；别名 `/tg_dl`
-  - `/tg_download date <频道> <开始日期> <结束日期>` — 按日期范围抓取媒体
-    示例：`/tg_download date @channel 2026-01-01 2026-01-31`
-  - `/tg_download tag <频道> <#标签>` — 按标签抓取媒体
-    示例：`/tg_download tag @channel #壁纸`
-  - `/tg_retry [数量] [任务ID]` — 重试最近失败的 Telegram 下载任务
-- **频道订阅**
-  - `/tg_sub` — 打开订阅管理向导；别名 `/tg_subscribe`
-  - `/tg_sub <频道>` — 添加频道/群组订阅
-  - `/tg_subs` — 查看订阅列表；别名 `/tg_subscriptions`
-  - `/tg_unsub <频道或订阅ID前缀>` — 取消订阅；别名 `/tg_unsubscribe`
+- `/tg_download` — 打开按日期 / 标签下载向导；别名 `/tg_dl`
+- `/tg_download date <频道> <开始日期> <结束日期>` — 按日期范围抓取
+- `/tg_download tag <频道> <#标签>` — 按标签抓取
+- `/tg_retry [数量] [任务ID]` — 重试失败任务
+- `/tg_sub <频道>` · `/tg_subs` · `/tg_unsub <频道或订阅ID前缀>` — 添加、查看和取消订阅
 
-兼容旧命令：`/tg_date` 和 `/tg_tag` 仍可用，但 README 推荐统一使用 `/tg_download date` / `/tg_download tag`。
+兼容旧命令 `/tg_date`、`/tg_tag`。多文件达到 9 个及以上时自动静默排队，可用 `/tasks` 查看进度。
 
-> 多文件上传数量达到 9 个及以上时，Bot 会自动进入静默排队模式，避免刷屏；可随时用 `/tasks` 查看进度。
+</details>
 
 ---
 
