@@ -1,20 +1,41 @@
-<p align="center">
+<div align="center">
   <img src="backend/logo.png" alt="TG Vault Logo" width="150" />
-</p>
 
-<h1 align="center">TG Vault</h1>
+  <h1>TG Vault</h1>
 
-<p align="center">
-  <img src="https://img.shields.io/github/license/hicocos/tg-vault?style=flat-square&color=blue" alt="License" />
-  <img src="https://img.shields.io/github/stars/hicocos/tg-vault?style=flat-square&color=gold" alt="Stars" />
-  <img src="https://img.shields.io/github/forks/hicocos/tg-vault?style=flat-square&color=lightgrey" alt="Forks" />
-  <img src="https://img.shields.io/github/issues/hicocos/tg-vault?style=flat-square&color=red" alt="Issues" />
-  <img src="https://img.shields.io/badge/Docker-Compose-blue?style=flat-square" alt="Docker Compose" />
-</p>
+  <p>
+    <strong>把 Telegram 变成你的自动化私有云入口</strong>
+  </p>
+  <p>
+    面向个人与小团队的 Telegram 转存、媒体归档和多存储源文件管理系统。
+  </p>
 
-<p align="center">
-  <strong>TG Vault</strong> 是面向个人和小团队的 Telegram 转存与私有云存储系统。它提供 Web 文件管理、Telegram Bot 上传、yt-dlp 链接下载、频道/群组媒体转存、订阅同步、自动归档和多存储源接入。
-</p>
+  <p>
+    <a href="#-快速部署-docker-compose"><strong>快速部署</strong></a>
+    ·
+    <a href="#-功能概览"><strong>功能概览</strong></a>
+    ·
+    <a href="#-telegram-bot-命令"><strong>Bot 命令</strong></a>
+    ·
+    <a href="deploy/DEPLOY.md"><strong>生产部署</strong></a>
+  </p>
+
+  <p>
+    <a href="https://github.com/hicocos/tg-vault/releases"><img src="https://img.shields.io/github/v/release/hicocos/tg-vault?style=for-the-badge&logo=github&color=2f81f7" alt="Latest Release" /></a>
+    <a href="https://github.com/hicocos/tg-vault/blob/main/LICENSE"><img src="https://img.shields.io/github/license/hicocos/tg-vault?style=for-the-badge&color=00b894" alt="License" /></a>
+    <a href="https://github.com/hicocos/tg-vault/stargazers"><img src="https://img.shields.io/github/stars/hicocos/tg-vault?style=for-the-badge&logo=github&color=f1c40f" alt="Stars" /></a>
+    <a href="https://github.com/hicocos/tg-vault/network/members"><img src="https://img.shields.io/github/forks/hicocos/tg-vault?style=for-the-badge&logo=github&color=8e44ad" alt="Forks" /></a>
+  </p>
+  <p>
+    <img src="https://img.shields.io/badge/Telegram-Bot-26A5E4?style=flat-square&logo=telegram&logoColor=white" alt="Telegram Bot" />
+    <img src="https://img.shields.io/badge/Docker-Compose-2496ED?style=flat-square&logo=docker&logoColor=white" alt="Docker Compose" />
+    <img src="https://img.shields.io/badge/React-TypeScript-3178C6?style=flat-square&logo=react&logoColor=white" alt="React TypeScript" />
+    <img src="https://img.shields.io/badge/PostgreSQL-pgvector-4169E1?style=flat-square&logo=postgresql&logoColor=white" alt="PostgreSQL pgvector" />
+  </p>
+</div>
+
+> [!TIP]
+> **一条链路完成收集、转存、归档与管理：** 从 Telegram 私聊、频道/群组或视频链接接收内容，自动写入本地磁盘、OneDrive、Google Drive、OSS、S3 或 WebDAV，再通过 Web 控制台统一管理。
 
 ---
 
@@ -390,4 +411,32 @@ TG Vault/
 
 ---
 
-[![Star History Chart](https://api.star-history.com/svg?repos=hicocos/tg-vault&type=date&legend=top-left)](https://www.star-history.com/#hicocos/tg-vault&type=date&legend=top-left)
+## 📊 项目数据
+
+<div align="center">
+  <a href="https://github.com/hicocos">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="https://github-stats-extended.vercel.app/api?username=hicocos&amp;show_icons=true&amp;include_all_commits=true&amp;rank_icon=github&amp;locale=cn&amp;theme=github_dark&amp;hide_border=true&amp;cache_seconds=21600" />
+      <img height="195" alt="hicocos 的 GitHub 统计" src="https://github-stats-extended.vercel.app/api?username=hicocos&amp;show_icons=true&amp;include_all_commits=true&amp;rank_icon=github&amp;locale=cn&amp;theme=default&amp;hide_border=true&amp;cache_seconds=21600" />
+    </picture>
+  </a>
+  <a href="https://github.com/hicocos/tg-vault">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="https://github-stats-extended.vercel.app/api/top-langs/?username=hicocos&amp;layout=compact&amp;langs_count=8&amp;theme=github_dark&amp;hide_border=true&amp;cache_seconds=21600" />
+      <img height="195" alt="hicocos 的常用语言" src="https://github-stats-extended.vercel.app/api/top-langs/?username=hicocos&amp;layout=compact&amp;langs_count=8&amp;theme=default&amp;hide_border=true&amp;cache_seconds=21600" />
+    </picture>
+  </a>
+</div>
+
+<p align="center">
+  <sub>统计卡片由 <a href="https://github.com/stats-organization/github-stats-extended">GitHub Stats Extended</a> 动态生成，并随 GitHub 明暗主题自动切换。</sub>
+</p>
+
+<div align="center">
+  <a href="https://www.star-history.com/#hicocos/tg-vault&amp;type=date&amp;legend=top-left">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=hicocos/tg-vault&amp;type=date&amp;legend=top-left&amp;theme=dark" />
+      <img alt="TG Vault Star History Chart" src="https://api.star-history.com/svg?repos=hicocos/tg-vault&amp;type=date&amp;legend=top-left" />
+    </picture>
+  </a>
+</div>
