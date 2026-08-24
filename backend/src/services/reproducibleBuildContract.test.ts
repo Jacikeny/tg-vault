@@ -24,7 +24,7 @@ test('release images use locked dependencies, pinned bases, verified yt-dlp and 
     assert.match(backend, /node@sha256:/);
     assert.match(frontend, /node@sha256:/);
     assert.match(frontend, /nginx@sha256:/);
-    assert.match(compose, /postgres@sha256:/);
+    assert.match(compose, /(?:postgres|pgvector\/pgvector)@sha256:/);
     assert.equal((compose.match(/\$\{IMAGE_VERSION:\?IMAGE_VERSION is required\}/g) || []).length, 2);
     assert.doesNotMatch(compose, /IMAGE_VERSION:-latest/);
     assert.match(compose, /OAUTH_CALLBACK_BASE_URL/);
