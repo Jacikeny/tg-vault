@@ -142,7 +142,7 @@ services:
 
   # 数据库
   postgres:
-    image: postgres@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
+    image: pgvector/pgvector@sha256:1e4956185a7fd9306a41ee759a7b4329c4faf9a2bb91a1d01437310c97002433
     container_name: tg-vault-postgres
     environment:
       - POSTGRES_DB=tgvault
