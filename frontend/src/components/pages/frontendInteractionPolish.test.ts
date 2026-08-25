@@ -7,7 +7,10 @@ const settings = fs.readFileSync(new URL('./SettingsPage.tsx', import.meta.url),
 const layout = fs.readFileSync(new URL('../layout/AppLayout.tsx', import.meta.url), 'utf8');
 
 test('task success feedback auto-dismisses while retaining a manual close control', () => {
+    assert.match(tasks, /interface TaskNotice \{ message: string; sequence: number; \}/);
+    assert.match(tasks, /const showNotice = \(message: string\) => setNotice\(previous => \(\{ message, sequence: \(previous\?\.sequence \?\? 0\) \+ 1 \}\)\);/);
     assert.match(tasks, /useEffect\(\(\) => \{\s*if \(!notice\) return;[\s\S]*setTimeout\(\(\) => setNotice\(null\), 4_000\)/);
+    assert.match(tasks, /\}, \[notice\?\.sequence\]\);/);
     assert.match(tasks, /aria-live="polite"/);
     assert.match(tasks, /aria-label="关闭提示"/);
 });

@@ -12,6 +12,7 @@ import { useTranslation } from 'react-i18next';
 import { useRuntimeUiLocalization } from './useRuntimeUiLocalization';
 
 interface TasksPageProps { onUnauthorized?: () => void; onOpenUploads?: () => void; initialAccountId?: string | null; }
+interface TaskNotice { message: string; sequence: number; }
 
 const SOURCE_OPTIONS: Array<{ value: '' | UnifiedTaskSource; label: string }> = [
     { value: '', label: '全部来源' }, { value: 'web_upload', label: 'Web 上传' },
@@ -73,7 +74,8 @@ export const TasksPage = ({ onUnauthorized, onOpenUploads, initialAccountId = nu
     const [loading, setLoading] = useState(true);
     const [refreshing, setRefreshing] = useState(false);
     const [error, setError] = useState<string | null>(null);
-    const [notice, setNotice] = useState<string | null>(null);
+    const [notice, setNotice] = useState<TaskNotice | null>(null);
+    const showNotice = (message: string) => setNotice(previous => ({ message, sequence: (previous?.sequence ?? 0) + 1 }));
     const [pendingAction, setPendingAction] = useState<{ task: UnifiedTask; action: 'cancel' | 'retry' } | null>(null);
     const [dismissalPreview, setDismissalPreview] = useState<TaskDismissalPreview | null>(null);
     const [selectionMode, setSelectionMode] = useState(false);
@@ -112,7 +114,7 @@ export const TasksPage = ({ onUnauthorized, onOpenUploads, initialAccountId = nu
         if (!notice) return;
         const timer = window.setTimeout(() => setNotice(null), 4_000);
         return () => window.clearTimeout(timer);
-    }, [notice]);
+    }, [notice?.sequence]);
 
     const summary = useMemo(() => ({
         active: tasks.filter(t => ['pending', 'running', 'paused', 'waiting'].includes(t.status)).length,
@@ -141,7 +143,7 @@ export const TasksPage = ({ onUnauthorized, onOpenUploads, initialAccountId = nu
                 : pendingAction.task.sourceType === 'telegram_target'
                     ? 'Telegram 会话目标已清除'
                     : '任务已取消';
-            setNotice(pendingAction.action === 'cancel' ? cancelledNotice : '任务已重新提交');
+            showNotice(pendingAction.action === 'cancel' ? cancelledNotice : '任务已重新提交');
             setPendingAction(null); await loadTasks(true);
         } catch (actionError: any) {
             if (actionError?.message === 'UNAUTHORIZED') { authService.clearToken(); onUnauthorized?.(); }
@@ -166,7 +168,7 @@ export const TasksPage = ({ onUnauthorized, onOpenUploads, initialAccountId = nu
         setActing(true);
         try {
             const result = await fileApi.confirmTaskDismissal(dismissalPreview);
-            setNotice(result.failed.length ? `已删除 ${result.dismissed.length} 条，${result.failed.length} 条因状态变化未删除` : `已从任务中心删除 ${result.dismissed.length} 条记录`);
+            showNotice(result.failed.length ? `已删除 ${result.dismissed.length} 条，${result.failed.length} 条因状态变化未删除` : `已从任务中心删除 ${result.dismissed.length} 条记录`);
             setDismissalPreview(null); setSelected([]); setSelectionMode(false); await loadTasks(true);
         } catch (dismissError: any) {
             if (dismissError?.message === 'UNAUTHORIZED') { authService.clearToken(); onUnauthorized?.(); }
@@ -209,7 +211,7 @@ export const TasksPage = ({ onUnauthorized, onOpenUploads, initialAccountId = nu
                 {selectionMode && <div className="mt-3 flex flex-wrap items-center gap-2 rounded-lg bg-muted/50 p-3 text-sm"><span>已选择 {selected.length} 条</span><Button size="sm" variant="outline" onClick={() => setSelected(dismissibleTasks.map(taskKey))}>全选可删除</Button><Button size="sm" variant="ghost" onClick={() => setSelected([])}>清空</Button><Button size="sm" variant="destructive" disabled={!selected.length || acting} onClick={() => void prepareDismissal({ tasks: selectedTasks })}>删除所选</Button></div>}
             </div>
 
-            {notice && <div className="flex items-center justify-between gap-3 rounded-md border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800" role="status" aria-live="polite"><span>{notice}</span><button type="button" className="rounded p-1 hover:bg-emerald-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600" onClick={() => setNotice(null)} aria-label="关闭提示" title="关闭提示"><X className="h-4 w-4" /></button></div>}
+            {notice && <div className="flex items-center justify-between gap-3 rounded-md border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800" role="status" aria-live="polite"><span>{notice.message}</span><button type="button" className="rounded p-1 hover:bg-emerald-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600" onClick={() => setNotice(null)} aria-label="关闭提示" title="关闭提示"><X className="h-4 w-4" /></button></div>}
             {error && <div className="flex items-start justify-between gap-3 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800"><span>{error}</span><Button size="sm" variant="outline" onClick={() => void loadTasks(false)}>重试</Button></div>}
 
             {loading ? <div className="flex min-h-48 items-center justify-center"><IndeterminateSpinner label="正在加载任务" size="md" /></div> : tasks.length === 0 ? <div className="flex min-h-48 flex-col items-center justify-center border-y text-center"><Clock3 className="mb-3 h-7 w-7 text-muted-foreground" /><p className="font-medium">没有符合条件的任务</p><p className="mt-1 text-sm text-muted-foreground">调整来源或状态筛选后再查看。</p></div> : (
