@@ -25,6 +25,16 @@ test('the global header owns the theme switch on every page', () => {
     assert.doesNotMatch(settings, /label=\{t\("settings\.general\.theme"\)\}/);
 });
 
+test('storage connection test feedback stays beside the account that triggered it', () => {
+    assert.match(settings, /interface ProbeFeedbackState \{ accountId: string; tone: 'success' \| 'error'; message: string; sequence: number; \}/);
+    assert.match(settings, /probeFeedback\?\.accountId === account\.id \? probeFeedback : null/);
+    assert.match(settings, /role="status" aria-live="polite"/);
+    assert.match(settings, /setProbeFeedback\(previous => \(\{ accountId: account\.id, tone: 'success', message: '连接测试成功', sequence: \(previous\?\.sequence \?\? 0\) \+ 1 \}\)\)/);
+    assert.match(settings, /tone: 'error'/);
+    assert.doesNotMatch(settings, /showNotice\(`“\$\{account\.name\}”连接测试成功`\)/);
+    assert.doesNotMatch(settings, /showNotice\(error\?\.message \|\| '存储账户连接测试失败', '连接测试失败'\)/);
+});
+
 test('settings uses non-modal transient feedback for notices but keeps confirmations and prompts modal', () => {
     assert.match(settings, /interface ActionNoticeState/);
     assert.match(settings, /role="status"/);
@@ -33,7 +43,7 @@ test('settings uses non-modal transient feedback for notices but keeps confirmat
     assert.match(settings, /setActionNotice\(\{ title, message, tone:[^\n]*\}\);/);
     assert.match(settings, /return Promise\.resolve\(\);/);
     assert.doesNotMatch(settings, /window\.location\.reload\(\)/);
-    assert.doesNotMatch(settings, /interface ActionNoticeState[\s\S]*resolve\?:/);
+    assert.doesNotMatch(settings, /interface ActionNoticeState\s*\{[^}]*resolve\?:/);
     assert.doesNotMatch(settings, /mode:\s*'notice'\s*\|\s*'confirm'\s*\|\s*'prompt'/);
     assert.doesNotMatch(settings, /state\.mode === 'notice' \? '知道了'/);
 });

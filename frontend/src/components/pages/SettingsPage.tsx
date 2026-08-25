@@ -68,7 +68,21 @@ const SettingsRow = ({ icon: Icon, label, value, action, onClick, description }:
     </div>
 );
 
-const StorageProbeStatus = ({ account, busy, onProbe }: { account: StorageAccount; busy: boolean; onProbe: () => void }) => {
+interface ActionNoticeState {
+    title: string;
+    message: string;
+    tone: 'success' | 'error' | 'info';
+}
+interface ActionDialogState {
+    mode: 'confirm' | 'prompt';
+    title: string;
+    message: string;
+    inputType?: 'text' | 'password';
+    resolve?: (value: boolean | string | null) => void;
+}
+interface ProbeFeedbackState { accountId: string; tone: 'success' | 'error'; message: string; sequence: number; }
+
+const StorageProbeStatus = ({ account, busy, feedback, onProbe }: { account: StorageAccount; busy: boolean; feedback: ProbeFeedbackState | null; onProbe: () => void }) => {
     const status = account.last_probe_status;
     const Icon = status === 'available' ? CheckCircle : status === 'failed' ? XCircle : CircleHelp;
     const label = status === 'available' ? '连接可用' : status === 'failed' ? '连接失败' : '尚未测试';
@@ -88,24 +102,11 @@ const StorageProbeStatus = ({ account, busy, onProbe }: { account: StorageAccoun
                 {busy ? <IndeterminateSpinner label="正在测试存储连接" size="sm" /> : <RefreshCw className="h-3.5 w-3.5" />}
                 测试连接
             </Button>
-            {status === 'failed' && account.last_probe_error && <p className="min-w-0 basis-full [overflow-wrap:anywhere] text-red-700">{account.last_probe_error}</p>}
+            {feedback && <span className={cn("min-w-0 basis-full rounded-md px-2 py-1.5 font-medium [overflow-wrap:anywhere]", feedback.tone === 'success' ? "bg-emerald-50 text-emerald-700" : "bg-red-50 text-red-700")} role="status" aria-live="polite">{feedback.tone === 'success' ? <CheckCircle className="mr-1 inline h-3.5 w-3.5" /> : <XCircle className="mr-1 inline h-3.5 w-3.5" />}{feedback.message}</span>}
+            {!feedback && status === 'failed' && account.last_probe_error && <p className="min-w-0 basis-full [overflow-wrap:anywhere] text-red-700">{account.last_probe_error}</p>}
         </div>
     );
 };
-
-interface ActionDialogState {
-    mode: 'confirm' | 'prompt';
-    title: string;
-    message: string;
-    inputType?: 'text' | 'password';
-    resolve?: (value: boolean | string | null) => void;
-}
-
-interface ActionNoticeState {
-    title: string;
-    message: string;
-    tone: 'success' | 'error' | 'info';
-}
 
 const ActionNotice = ({ state, onClose }: { state: ActionNoticeState; onClose: () => void }) => (
     <motion.div
@@ -206,6 +207,7 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
     const [config, setConfig] = useState<StorageConfig | null>(null);
     const [isSaving, setIsSaving] = useState(false);
     const [probingAccountId, setProbingAccountId] = useState<string | null>(null);
+    const [probeFeedback, setProbeFeedback] = useState<ProbeFeedbackState | null>(null);
     const [showOneDriveForm, setShowOneDriveForm] = useState(false);
 
     // OneDrive Form State (for adding new account)
@@ -322,16 +324,23 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
         return data;
     };
 
+    useEffect(() => {
+        if (!probeFeedback) return;
+        const timer = window.setTimeout(() => setProbeFeedback(null), 4_000);
+        return () => window.clearTimeout(timer);
+    }, [probeFeedback?.sequence]);
+
     const handleProbeAccount = async (account: StorageAccount) => {
         if (probingAccountId) return;
         setProbingAccountId(account.id);
+        setProbeFeedback(null);
         try {
             await fileApi.probeStorageAccount(account.id);
             await reloadStorageConfig();
-            await showNotice(`“${account.name}”连接测试成功`);
+            setProbeFeedback(previous => ({ accountId: account.id, tone: 'success', message: '连接测试成功', sequence: (previous?.sequence ?? 0) + 1 }));
         } catch (error: any) {
             await reloadStorageConfig().catch(() => undefined);
-            await showNotice(error?.message || '存储账户连接测试失败', '连接测试失败');
+            setProbeFeedback(previous => ({ accountId: account.id, tone: 'error', message: error?.message || '连接测试失败，请稍后重试', sequence: (previous?.sequence ?? 0) + 1 }));
         } finally {
             setProbingAccountId(null);
         }
@@ -1234,7 +1243,7 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
                                     <div className="min-w-0 flex-1">
                                         <p className="text-sm font-medium">{account.name || "未命名账户"}</p>
                                         <p className="break-all text-[10px] text-muted-foreground font-mono opacity-60">{account.id}</p>
-                                        <StorageProbeStatus account={account} busy={probingAccountId === account.id} onProbe={() => void handleProbeAccount(account)} />
+                                        <StorageProbeStatus account={account} busy={probingAccountId === account.id} feedback={probeFeedback?.accountId === account.id ? probeFeedback : null} onProbe={() => void handleProbeAccount(account)} />
                                     </div>
                                 </div>
                                 <div className="flex flex-wrap items-center justify-end gap-2 self-stretch sm:self-auto">
@@ -1415,7 +1424,7 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
                                     <div className="min-w-0 flex-1">
                                         <p className="text-sm font-medium">{account.name || "未命名账户"}</p>
                                         <p className="break-all text-[10px] text-muted-foreground font-mono opacity-60">{account.id}</p>
-                                        <StorageProbeStatus account={account} busy={probingAccountId === account.id} onProbe={() => void handleProbeAccount(account)} />
+                                        <StorageProbeStatus account={account} busy={probingAccountId === account.id} feedback={probeFeedback?.accountId === account.id ? probeFeedback : null} onProbe={() => void handleProbeAccount(account)} />
                                     </div>
                                 </div>
                                 <div className="flex flex-wrap items-center justify-end gap-2 self-stretch sm:self-auto">
@@ -1600,7 +1609,7 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
                                     <div className="min-w-0 flex-1">
                                         <p className="text-sm font-medium">{account.name || "未命名账户"}</p>
                                         <p className="break-all text-[10px] text-muted-foreground font-mono opacity-60">{account.id}</p>
-                                        <StorageProbeStatus account={account} busy={probingAccountId === account.id} onProbe={() => void handleProbeAccount(account)} />
+                                        <StorageProbeStatus account={account} busy={probingAccountId === account.id} feedback={probeFeedback?.accountId === account.id ? probeFeedback : null} onProbe={() => void handleProbeAccount(account)} />
                                     </div>
                                 </div>
                                 <div className="flex flex-wrap items-center justify-end gap-2 self-stretch sm:self-auto">
@@ -1786,7 +1795,7 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
                                     <div className="min-w-0 flex-1">
                                         <p className="text-sm font-medium">{account.name || "未命名账户"}</p>
                                         <p className="break-all text-[10px] text-muted-foreground font-mono opacity-60">{account.id}</p>
-                                        <StorageProbeStatus account={account} busy={probingAccountId === account.id} onProbe={() => void handleProbeAccount(account)} />
+                                        <StorageProbeStatus account={account} busy={probingAccountId === account.id} feedback={probeFeedback?.accountId === account.id ? probeFeedback : null} onProbe={() => void handleProbeAccount(account)} />
                                     </div>
                                 </div>
                                 <div className="flex flex-wrap items-center justify-end gap-2 self-stretch sm:self-auto">
@@ -1994,7 +2003,7 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
                                     <div className="min-w-0 flex-1">
                                         <p className="text-sm font-medium">{account.name || "未命名账户"}</p>
                                         <p className="break-all text-[10px] text-muted-foreground font-mono opacity-60">{account.id}</p>
-                                        <StorageProbeStatus account={account} busy={probingAccountId === account.id} onProbe={() => void handleProbeAccount(account)} />
+                                        <StorageProbeStatus account={account} busy={probingAccountId === account.id} feedback={probeFeedback?.accountId === account.id ? probeFeedback : null} onProbe={() => void handleProbeAccount(account)} />
                                     </div>
                                 </div>
                                 <div className="flex flex-wrap items-center justify-end gap-2 self-stretch sm:self-auto">
