@@ -2,6 +2,17 @@
   "app": {
     "title": "TG Vault",
     "subtitle": "管理和组织您的数字资产。",
+    "filesSubtitle": "浏览和管理全部文件与文件夹。",
+    "allFiles": "全部文件",
+    "fileTypes": {
+      "filter": "文件类型",
+      "all": "全部类型",
+      "allShort": "全部",
+      "images": "图片",
+      "videos": "视频",
+      "audio": "音频",
+      "other": "其他"
+    },
     "searchPlaceholder": "搜索文件...",
     "mobileSearch": "搜索文件",
     "refresh": "刷新文件",
@@ -27,6 +38,7 @@
     "loading": "加载中…"
   },
   "sidebar": {
+    "uploadCenter": "上传中心",
     "files": "我的文件",
     "dashboard": "仪表盘",
     "settings": "设置",

@@ -2,6 +2,17 @@
   "app": {
     "title": "TG Vault",
     "subtitle": "Manage and organize your digital assets.",
+    "filesSubtitle": "Browse and manage all files and folders.",
+    "allFiles": "All files",
+    "fileTypes": {
+      "filter": "File type",
+      "all": "All types",
+      "allShort": "All",
+      "images": "Images",
+      "videos": "Videos",
+      "audio": "Audio",
+      "other": "Other"
+    },
     "searchPlaceholder": "Search files...",
     "mobileSearch": "Search files",
     "refresh": "Refresh files",
@@ -27,6 +38,7 @@
     "loading": "Loading…"
   },
   "sidebar": {
+    "uploadCenter": "Upload center",
     "files": "My files",
     "dashboard": "Dashboard",
     "settings": "Settings",

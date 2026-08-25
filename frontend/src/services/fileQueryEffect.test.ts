@@ -16,6 +16,14 @@ test('search input is debounced for 250ms before query options change', () => {
     assert.match(app, /q: debouncedSearchQuery/);
 });
 
+test('file query restores a query-specific cache before background revalidation', () => {
+    const effect = app.slice(app.indexOf('// 认证和查询条件由单一 effect'), app.indexOf("if (currentCategory === 'ytdlp')"));
+    assert.match(effect, /fileQueryCacheRef\.current\.get\(queryKey\)/);
+    assert.match(effect, /applyFileQuerySnapshot\(cached\)/);
+    assert.match(effect, /setLoading\(!cached\)/);
+    assert.match(effect, /fileQueryCacheRef\.current\.set\(queryKey, snapshot\)/);
+});
+
 test('refresh keeps existing list while latest generation is pending', () => {
     const loader = app.slice(app.indexOf('const loadFiles = useCallback'), app.indexOf('const loadMoreFiles'));
     assert.doesNotMatch(loader, /setFiles\(\[\]\)/);

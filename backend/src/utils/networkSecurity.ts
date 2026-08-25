@@ -80,10 +80,35 @@ export async function assertPublicHttpsUrl(rawUrl: string): Promise<URL> {
     return parsed;
 }
 
-export async function assertPublicStorageEndpoint(rawUrl: string): Promise<URL> {
-    const parsed = await assertPublicHttpUrl(rawUrl);
-    if (parsed.protocol !== 'https:' && process.env.ALLOW_INSECURE_STORAGE_ENDPOINTS !== 'true') {
+export interface StorageEndpointPolicy {
+    allowPrivateAddresses?: boolean;
+    allowInsecureHttp?: boolean;
+}
+
+export async function assertStorageEndpoint(rawUrl: string, policy: StorageEndpointPolicy = {}): Promise<URL> {
+    if (!policy.allowPrivateAddresses) {
+        const parsed = await assertPublicHttpUrl(rawUrl);
+        if (parsed.protocol !== 'https:' && !policy.allowInsecureHttp && process.env.ALLOW_INSECURE_STORAGE_ENDPOINTS !== 'true') {
+            throw new Error('存储端点仅允许 https；如确需 http，请显式设置 ALLOW_INSECURE_STORAGE_ENDPOINTS=true');
+        }
+        return parsed;
+    }
+
+    let parsed: URL;
+    try {
+        parsed = new URL(rawUrl);
+    } catch {
+        throw new Error('链接格式无效');
+    }
+    if (!['http:', 'https:'].includes(parsed.protocol)) {
+        throw new Error('仅允许 http/https 链接');
+    }
+    if (parsed.protocol !== 'https:' && !policy.allowInsecureHttp && process.env.ALLOW_INSECURE_STORAGE_ENDPOINTS !== 'true') {
         throw new Error('存储端点仅允许 https；如确需 http，请显式设置 ALLOW_INSECURE_STORAGE_ENDPOINTS=true');
     }
     return parsed;
+}
+
+export async function assertPublicStorageEndpoint(rawUrl: string): Promise<URL> {
+    return assertStorageEndpoint(rawUrl);
 }

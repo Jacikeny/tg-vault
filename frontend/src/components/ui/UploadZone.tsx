@@ -11,6 +11,7 @@ interface UploadZoneProps {
     uploading?: boolean;
     uploadProgress?: number;
     capabilities?: UploadCapabilities | null;
+    destinationLabel?: string;
 }
 
 function formatGiB(bytes: number): string {
@@ -18,7 +19,7 @@ function formatGiB(bytes: number): string {
     return `${Number.isInteger(value) ? value : value.toFixed(1)} GiB`;
 }
 
-export const UploadZone = ({ onDrop, uploading = false, uploadProgress = 0, capabilities }: UploadZoneProps) => {
+export const UploadZone = ({ onDrop, uploading = false, uploadProgress = 0, capabilities, destinationLabel }: UploadZoneProps) => {
     const [isDragActive, setIsDragActive] = useState(false);
     const fileInputRef = useRef<HTMLInputElement>(null);
     const { t } = useTranslation();
@@ -132,6 +133,9 @@ export const UploadZone = ({ onDrop, uploading = false, uploadProgress = 0, capa
                             : `${t("upload.anyFile")} · 上传限制加载中…`
                     }
                 </p>
+                {destinationLabel && !uploading && (
+                    <p className="mt-2 text-xs font-medium text-foreground/70">目标目录：{destinationLabel}</p>
+                )}
             </div>
 
             <AnimatePresence>

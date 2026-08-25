@@ -3,6 +3,7 @@ import type { SettingsSectionId } from '../components/pages/settingsSections';
 export type FileCategory = 'all' | 'media' | 'image' | 'video' | 'audio' | 'document' | 'ytdlp' | 'favorites';
 
 export type AppRoute =
+    | { kind: 'upload'; needsReplace: boolean }
     | { kind: 'files'; category: FileCategory; folder: string | null; query: string; needsReplace: boolean }
     | { kind: 'tasks'; accountId: string | null; needsReplace: boolean }
     | { kind: 'settings'; section: SettingsSectionId; needsReplace: boolean };
@@ -27,6 +28,8 @@ function filesRoute(category: FileCategory = 'all', folder: string | null = null
 
 export function parseAppRoute(location: Pick<Location, 'pathname' | 'search'>): AppRoute {
     const pathname = location.pathname.replace(/\/+$/, '') || '/';
+    if (pathname === '/') return { kind: 'upload', needsReplace: false };
+    if (pathname === '/upload') return { kind: 'upload', needsReplace: true };
     const category = PATH_CATEGORIES.get(pathname);
     if (category) {
         const params = new URLSearchParams(location.search);
@@ -40,10 +43,11 @@ export function parseAppRoute(location: Pick<Location, 'pathname' | 'search'>): 
         const section = pathname.slice('/settings/'.length) as SettingsSectionId;
         if (SETTINGS_SECTIONS.has(section)) return { kind: 'settings', section, needsReplace: false };
     }
-    return filesRoute('all', null, '', true);
+    return { kind: 'upload', needsReplace: true };
 }
 
 export function appRouteHref(route: AppRoute): string {
+    if (route.kind === 'upload') return '/';
     if (route.kind === 'tasks') {
         const params = new URLSearchParams();
         if (route.accountId) params.set('accountId', route.accountId);
@@ -59,6 +63,7 @@ export function appRouteHref(route: AppRoute): string {
 }
 
 export function routeForCategory(category: string, options: { folder?: string | null; query?: string } = {}): AppRoute {
+    if (category === 'upload') return { kind: 'upload', needsReplace: false };
     if (category === 'tasks') return { kind: 'tasks', accountId: null, needsReplace: false };
     if (category === 'settings') return routeForSettings('general');
     const safeCategory = Object.hasOwn(CATEGORY_PATHS, category) ? category as FileCategory : 'all';

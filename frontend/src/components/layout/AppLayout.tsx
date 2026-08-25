@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Folder, Settings, Menu, Image as ImageIcon, Video, Music, FileText, ChevronRight, X, Star, Download, LogOut, ListChecks, Monitor, Moon, Sun } from "lucide-react";
+import { Folder, Settings, Menu, X, Star, Download, LogOut, ListChecks, Monitor, Moon, Sun, UploadCloud } from "lucide-react";
 import { Button } from "../ui/Button";
 import { cn } from "../../lib/utils";
 import { useTranslation } from "react-i18next";
@@ -45,11 +45,9 @@ interface SidebarItemProps {
     isActive?: boolean;
     onClick?: () => void;
     collapsed?: boolean;
-    hasSubItems?: boolean;
-    isOpen?: boolean;
 }
 
-const SidebarItem = ({ icon: Icon, label, isActive, onClick, collapsed, hasSubItems, isOpen }: SidebarItemProps) => {
+const SidebarItem = ({ icon: Icon, label, isActive, onClick, collapsed }: SidebarItemProps) => {
     return (
         <button
             onClick={onClick}
@@ -62,14 +60,7 @@ const SidebarItem = ({ icon: Icon, label, isActive, onClick, collapsed, hasSubIt
             )}
         >
             <Icon className={cn("h-4 w-4 shrink-0 transition-transform duration-300", isActive && "scale-110")} />
-            {!collapsed && (
-                <>
-                    <span className="flex-1 text-left truncate">{label}</span>
-                    {hasSubItems && (
-                        <ChevronRight className={cn("h-3 w-3 transition-transform text-muted-foreground/70", isOpen && "rotate-90")} />
-                    )}
-                </>
-            )}
+            {!collapsed && <span className="flex-1 text-left truncate">{label}</span>}
         </button>
     );
 };
@@ -78,7 +69,6 @@ export const AppLayout = ({ children, activeCategory, onCategoryChange, storageS
     const [isSidebarOpen, setIsSidebarOpen] = useState(true);
     const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 
-    const [mediaOpen, setMediaOpen] = useState(true);
     const { t } = useTranslation();
 
     const handleTabClick = (id: string) => {
@@ -86,27 +76,9 @@ export const AppLayout = ({ children, activeCategory, onCategoryChange, storageS
         setIsMobileMenuOpen(false); // Close mobile menu on selection
     };
 
-    const toggleMedia = () => {
-        setMediaOpen(!mediaOpen);
-        handleTabClick("media");
-    };
-
     const categories = [
+        { id: "upload", icon: UploadCloud, label: t("sidebar.uploadCenter") },
         { id: "all", icon: Folder, label: t("sidebar.files") },
-        {
-            id: "media",
-            icon: ImageIcon,
-            label: t("sidebar.media"),
-            hasSubItems: true,
-            isOpen: mediaOpen,
-            onClick: toggleMedia,
-            subItems: [
-                { id: "image", icon: ImageIcon, label: t("sidebar.categories.images") },
-                { id: "video", icon: Video, label: t("sidebar.categories.videos") },
-                { id: "audio", icon: Music, label: t("sidebar.categories.audio") },
-            ]
-        },
-        { id: "document", icon: FileText, label: t("sidebar.categories.docs") },
         { id: "ytdlp", icon: Download, label: "YT-DLP" },
         { id: "favorites", icon: Star, label: t("sidebar.favorites") },
         { id: "tasks", icon: ListChecks, label: t("sidebar.tasks") },
@@ -119,51 +91,15 @@ export const AppLayout = ({ children, activeCategory, onCategoryChange, storageS
         return (
             <div className="flex flex-col flex-1 min-h-0 overflow-hidden">
                 <div className={cn("flex-1 space-y-1 overflow-y-auto scrollbar-hide", mobile ? "" : "px-4 py-6")}>
-                    {categories.map((cat) => (
-                        <React.Fragment key={cat.id}>
-                            {cat.hasSubItems ? (
-                                <>
-                                    <SidebarItem
-                                        icon={cat.icon}
-                                        label={cat.label}
-                                        isActive={activeCategory === cat.id}
-                                        onClick={cat.onClick}
-                                        collapsed={collapsed}
-                                        hasSubItems
-                                        isOpen={cat.isOpen}
-                                    />
-                                    <AnimatePresence>
-                                        {cat.isOpen && (mobile || isSidebarOpen) && (
-                                            <motion.div
-                                                initial={{ height: 0, opacity: 0 }}
-                                                animate={{ height: "auto", opacity: 1 }}
-                                                exit={{ height: 0, opacity: 0 }}
-                                                className="overflow-hidden ml-4 pl-3 border-l-2 border-border/50 space-y-1"
-                                            >
-                                                {cat.subItems?.map(sub => (
-                                                    <SidebarItem
-                                                        key={sub.id}
-                                                        icon={sub.icon}
-                                                        label={sub.label}
-                                                        isActive={activeCategory === sub.id}
-                                                        onClick={() => handleTabClick(sub.id)}
-                                                        collapsed={false}
-                                                    />
-                                                ))}
-                                            </motion.div>
-                                        )}
-                                    </AnimatePresence>
-                                </>
-                            ) : (
-                                <SidebarItem
-                                    icon={cat.icon}
-                                    label={cat.label}
-                                    isActive={activeCategory === cat.id}
-                                    onClick={() => handleTabClick(cat.id)}
-                                    collapsed={collapsed}
-                                />
-                            )}
-                        </React.Fragment>
+                    {categories.map(cat => (
+                        <SidebarItem
+                            key={cat.id}
+                            icon={cat.icon}
+                            label={cat.label}
+                            isActive={activeCategory === cat.id}
+                            onClick={() => handleTabClick(cat.id)}
+                            collapsed={collapsed}
+                        />
                     ))}
                 </div>
 

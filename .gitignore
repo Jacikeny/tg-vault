@@ -15,6 +15,9 @@ backend/dist/*
 frontend/dist/
 dist/
 
+# local agent workspace
+.hermes/
+
 # archives and local backups
 *.tar.gz
 backups/

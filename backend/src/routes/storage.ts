@@ -10,7 +10,7 @@ import crypto from 'crypto';
 import { getSetting, setSetting } from '../utils/settings.js';
 import { getConfiguredTelegramAllowedUsers, parseTelegramAllowedUserIds, setTelegramAllowedUsersAndReconcile } from '../utils/authSettings.js';
 import { getTelegramUserSessionFilePath, isTelegramUserClientReady } from '../services/telegramUserClient.js';
-import { assertPublicStorageEndpoint } from '../utils/networkSecurity.js';
+import { assertPublicStorageEndpoint, assertStorageEndpoint } from '../utils/networkSecurity.js';
 import { getCurrentStorageScope } from '../utils/fileScope.js';
 import { getAuthToken } from './auth.js';
 import { oauthFlowStore, OAuthFlowError, type OAuthProvider } from '../services/oauthFlowStore.js';
@@ -205,6 +205,7 @@ router.get('/config', requireAuth, async (req: Request, res: Response) => {
         const accounts = await storageManager.getAccounts();
         const activeAccount = accounts.find(account => String(account.id) === String(activeAccountId || ''));
         const telegramUserDownloadEnabled = await getSetting('telegram_user_download_enabled', 'false');
+        const allowUnsafeWebdavEndpoints = await getSetting('allow_unsafe_webdav_endpoints', 'false');
         const telegramAllowedUserIds = await getConfiguredTelegramAllowedUsers();
         const telegramAllowedUserIdsFromEnv = parseTelegramAllowedUserIds(process.env.TELEGRAM_ALLOWED_USER_IDS || '').length > 0;
         const telegramUserSessionFilePath = getTelegramUserSessionFilePath();
@@ -222,6 +223,7 @@ router.get('/config', requireAuth, async (req: Request, res: Response) => {
             redirectUri: oneDriveOAuth.redirectUri,
             googleDriveRedirectUri: googleDriveOAuth.redirectUri,
             telegramUserDownloadEnabled: telegramUserDownloadEnabled === 'true',
+            allowUnsafeWebdavEndpoints: allowUnsafeWebdavEndpoints === 'true',
             telegramUserSessionReady,
             telegramUserClientStatus: getTelegramUserClientStatus(),
             telegramBotStatus: getTelegramBotStatus(),
@@ -273,6 +275,24 @@ router.patch('/config/advanced-tasks', requireAuth, async (req: Request, res: Re
         return res.json({ success: true, ...patch });
     } catch (error) {
         res.status(400).json({ error: (error as Error).message });
+    }
+});
+
+router.patch('/config/webdav-security', requireAuth, async (req: Request, res: Response) => {
+    try {
+        const enabled = req.body?.enabled === true;
+        const { confirmed } = req.body || {};
+        if (enabled && confirmed !== true) {
+            return res.status(409).json({
+                error: '开启内网和不安全 WebDAV 地址需要二次确认',
+                code: 'CONFIRMATION_REQUIRED',
+            });
+        }
+        await setSetting('allow_unsafe_webdav_endpoints', enabled ? 'true' : 'false');
+        return res.json({ success: true, allowUnsafeWebdavEndpoints: enabled });
+    } catch (error) {
+        console.error('更新 WebDAV 安全设置失败:', error);
+        return res.status(500).json({ error: '更新 WebDAV 安全设置失败' });
     }
 });
 
@@ -609,7 +629,11 @@ router.post('/config/webdav', requireAuth, async (req: Request, res: Response) =
         }
 
         try {
-            await assertPublicStorageEndpoint(url);
+            const allowUnsafeWebdavEndpoints = await getSetting('allow_unsafe_webdav_endpoints', 'false') === 'true';
+            await assertStorageEndpoint(url, {
+                allowPrivateAddresses: allowUnsafeWebdavEndpoints,
+                allowInsecureHttp: allowUnsafeWebdavEndpoints,
+            });
         } catch (error) {
             return sendStorageEndpointValidationError(res, error);
         }

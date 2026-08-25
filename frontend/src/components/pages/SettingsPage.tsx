@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { motion, AnimatePresence } from "framer-motion";
+import { createPortal } from "react-dom";
 import { HardDrive, ChevronRight, Palette, Globe, Cloud, Server, Database, CheckCircle, Trash2, Network, Shield, ShieldAlert, ShieldCheck, ExternalLink, BookOpen, KeyRound, LogOut, UserX, CircleHelp, XCircle, RefreshCw, Gauge, Copy, X } from "lucide-react";
 import { Button } from "../ui/Button";
 import { LanguageToggle } from "../ui/LanguageToggle";
@@ -78,6 +79,8 @@ interface ActionDialogState {
     title: string;
     message: string;
     inputType?: 'text' | 'password';
+    tone?: 'default' | 'danger';
+    confirmLabel?: string;
     resolve?: (value: boolean | string | null) => void;
 }
 interface ProbeFeedbackState { accountId: string; tone: 'success' | 'error'; message: string; sequence: number; }
@@ -142,27 +145,47 @@ const ActionDialog = ({ state, input, onInput, onCancel, onConfirm }: {
     onCancel: () => void;
     onConfirm: () => void;
 }) => {
-    return (
-        <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/55 p-4" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) onCancel(); }}>
-            <div className="w-full max-w-md rounded-2xl border border-border bg-background p-6 shadow-2xl" role="dialog" aria-modal="true" aria-labelledby="settings-action-title">
-                <h3 id="settings-action-title" className="text-lg font-semibold">{state.title}</h3>
-                <p className="mt-3 whitespace-pre-line text-sm leading-6 text-muted-foreground">{state.message}</p>
-                {state.mode === 'prompt' && (
-                    <input
-                        autoFocus
-                        type={state.inputType || 'text'}
-                        value={input}
-                        onChange={event => onInput(event.target.value)}
-                        onKeyDown={event => { if (event.key === 'Enter') onConfirm(); if (event.key === 'Escape') onCancel(); }}
-                        className="mt-4 h-11 w-full rounded-lg border border-border bg-background px-3 outline-none focus:ring-2 focus:ring-primary/20"
-                    />
-                )}
-                <div className="mt-6 flex justify-end gap-2">
-                    <Button variant="outline" onClick={onCancel}>取消</Button>
-                    <Button onClick={onConfirm}>确认</Button>
+    const danger = state.tone === 'danger';
+    return createPortal(
+        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/65 p-4 backdrop-blur-[2px]" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) onCancel(); }}>
+            <motion.div
+                initial={{ opacity: 0, y: 12, scale: 0.97 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                className={cn("w-full max-w-lg overflow-hidden rounded-2xl border bg-background shadow-2xl", danger ? "border-destructive/40" : "border-border")}
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="settings-action-title"
+            >
+                <div className={cn("flex items-start gap-3 border-b px-5 py-4 sm:px-6", danger ? "border-destructive/20 bg-destructive/10" : "border-border bg-muted/30")}>
+                    <div className={cn("mt-0.5 rounded-full p-2", danger ? "bg-destructive/15 text-destructive" : "bg-primary/10 text-primary")}>
+                        {danger ? <ShieldAlert className="h-5 w-5" /> : <CircleHelp className="h-5 w-5" />}
+                    </div>
+                    <div className="min-w-0 flex-1">
+                        <h3 id="settings-action-title" className="text-base font-semibold sm:text-lg">{state.title}</h3>
+                        {danger && <p className="mt-1 text-xs font-medium text-destructive">此操作会降低默认网络安全保护</p>}
+                    </div>
+                    <button type="button" onClick={onCancel} className="rounded-lg p-1.5 text-muted-foreground transition-colors hover:bg-background/70 hover:text-foreground" aria-label="关闭确认弹窗"><X className="h-4 w-4" /></button>
                 </div>
-            </div>
-        </div>
+                <div className="max-h-[min(60vh,32rem)] overflow-y-auto px-5 py-5 sm:px-6">
+                    <p className="whitespace-pre-line text-sm leading-6 text-muted-foreground">{state.message}</p>
+                    {state.mode === 'prompt' && (
+                        <input
+                            autoFocus
+                            type={state.inputType || 'text'}
+                            value={input}
+                            onChange={event => onInput(event.target.value)}
+                            onKeyDown={event => { if (event.key === 'Enter') onConfirm(); if (event.key === 'Escape') onCancel(); }}
+                            className="mt-4 h-11 w-full rounded-lg border border-border bg-background px-3 outline-none focus:ring-2 focus:ring-primary/20"
+                        />
+                    )}
+                </div>
+                <div className="flex flex-col-reverse gap-2 border-t border-border bg-muted/20 px-5 py-4 sm:flex-row sm:justify-end sm:px-6">
+                    <Button variant="outline" onClick={onCancel}>保持关闭</Button>
+                    <Button variant={danger ? 'destructive' : 'default'} onClick={onConfirm}>{state.confirmLabel || '确认'}</Button>
+                </div>
+            </motion.div>
+        </div>,
+        document.body,
     );
 };
 
@@ -188,8 +211,8 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
         setActionNotice({ title, message, tone: errorTone ? 'error' : 'success' });
         return Promise.resolve();
     };
-    const requestConfirmation = (message: string, title = '请确认') => new Promise<boolean>(resolve => {
-        setActionDialog({ mode: 'confirm', title, message, resolve: value => resolve(value === true) });
+    const requestConfirmation = (message: string, title = '请确认', options?: { tone?: 'default' | 'danger'; confirmLabel?: string }) => new Promise<boolean>(resolve => {
+        setActionDialog({ mode: 'confirm', title, message, ...options, resolve: value => resolve(value === true) });
     });
     const requestInput = (message: string, title = '请输入', inputType: 'text' | 'password' = 'text') => new Promise<string | null>(resolve => {
         setActionDialogInput('');
@@ -206,6 +229,7 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
     // Storage Configuration State
     const [config, setConfig] = useState<StorageConfig | null>(null);
     const [isSaving, setIsSaving] = useState(false);
+    const [isSavingWebdavSecurity, setIsSavingWebdavSecurity] = useState(false);
     const [probingAccountId, setProbingAccountId] = useState<string | null>(null);
     const [probeFeedback, setProbeFeedback] = useState<ProbeFeedbackState | null>(null);
     const [showOneDriveForm, setShowOneDriveForm] = useState(false);
@@ -428,6 +452,34 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
             await showNotice(error.message, '操作失败');
         } finally {
             setIsSaving(false);
+        }
+    };
+
+    const handleUnsafeWebdavToggle = async () => {
+        if (!config || isSavingWebdavSecurity) return;
+        const enabled = !config.allowUnsafeWebdavEndpoints;
+        let confirmed = false;
+        if (enabled) {
+            confirmed = await requestConfirmation(
+                '开启后，WebDAV 可以访问内网、回环或保留地址，并允许使用明文 HTTP。\n\n风险：这会扩大服务端请求伪造（SSRF）攻击面；恶意或填错的地址可能探测、访问本机或局域网服务。HTTP 还会让 WebDAV 用户名、密码和文件内容在传输途中以明文暴露。\n\n仅在 TG Vault 为可信管理员专用、WebDAV 地址由你控制且网络隔离可靠时开启。是否确认承担风险并开启？',
+                '二次确认：开启高风险 WebDAV 访问',
+                { tone: 'danger', confirmLabel: '确认开启' },
+            );
+            if (!confirmed) return;
+        }
+        setIsSavingWebdavSecurity(true);
+        try {
+            const result = await fileApi.setUnsafeWebdavEndpointsAllowed(enabled, confirmed);
+            setConfig(previous => previous ? { ...previous, allowUnsafeWebdavEndpoints: result.allowUnsafeWebdavEndpoints } : previous);
+            await showNotice(enabled ? '已允许内网和不安全的 WebDAV 地址' : '已恢复 WebDAV 安全限制');
+        } catch (error: any) {
+            if (error?.code === 'CONFIRMATION_REQUIRED') {
+                await showNotice('服务端要求二次确认，请重新操作。', '未完成确认');
+            } else {
+                await showNotice(error?.message || '更新 WebDAV 安全设置失败', '操作失败');
+            }
+        } finally {
+            setIsSavingWebdavSecurity(false);
         }
     };
 
@@ -931,6 +983,41 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
                         </motion.div>
                     )}
                 </AnimatePresence>
+            </SettingsSection>
+            <SettingsSection title="网络与存储安全">
+                <div className={cn("p-4 sm:p-5", config?.allowUnsafeWebdavEndpoints && "bg-destructive/[0.035]")}>
+                    <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+                        <div className="flex min-w-0 items-start gap-3">
+                            <div className={cn("rounded-lg p-2", config?.allowUnsafeWebdavEndpoints ? "bg-destructive/10 text-destructive" : "bg-muted text-muted-foreground")}>
+                                <Network className="h-4 w-4" />
+                            </div>
+                            <div className="min-w-0">
+                                <div className="flex flex-wrap items-center gap-2">
+                                    <p className="text-sm font-medium">允许内网和不安全的 WebDAV 地址</p>
+                                    <span className={cn("rounded-full px-2 py-0.5 text-[11px] font-semibold", config?.allowUnsafeWebdavEndpoints ? "bg-destructive/10 text-destructive" : "bg-muted text-muted-foreground")}>
+                                        {config?.allowUnsafeWebdavEndpoints ? '高风险模式' : '推荐：关闭'}
+                                    </span>
+                                </div>
+                                <p className="mt-1 max-w-2xl text-xs leading-5 text-muted-foreground">用于飞牛等局域网 WebDAV。开启后允许内网、回环、保留地址和 HTTP，可能带来 SSRF、局域网服务暴露及明文传输风险。</p>
+                            </div>
+                        </div>
+                        <button
+                            type="button"
+                            role="switch"
+                            aria-checked={!!config?.allowUnsafeWebdavEndpoints}
+                            aria-label="允许内网和不安全的 WebDAV 地址"
+                            onClick={handleUnsafeWebdavToggle}
+                            disabled={!config || isSavingWebdavSecurity}
+                            className={cn(
+                                "relative h-7 w-12 shrink-0 rounded-full border transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 disabled:cursor-not-allowed disabled:opacity-50",
+                                config?.allowUnsafeWebdavEndpoints ? "border-destructive bg-destructive" : "border-border bg-muted",
+                            )}
+                        >
+                            <span className={cn("absolute left-0 top-0.5 h-[22px] w-[22px] rounded-full bg-white shadow-sm transition-transform", config?.allowUnsafeWebdavEndpoints ? "translate-x-6" : "translate-x-0.5")} />
+                            <span className="sr-only">{isSavingWebdavSecurity ? '保存中' : config?.allowUnsafeWebdavEndpoints ? '已开启' : '已关闭'}</span>
+                        </button>
+                    </div>
+                </div>
             </SettingsSection>
             </>}
 

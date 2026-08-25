@@ -195,6 +195,7 @@ export interface StorageConfig {
     telegramUserClientStatus?: { status: string; userId: string | null; username: string | null; checkedAt: string | null; lastError: string | null; action: string | null };
     telegramAllowedUserIds?: number[];
     telegramAllowedUserIdsFromEnv?: boolean;
+    allowUnsafeWebdavEndpoints: boolean;
 }
 
 export interface FolderMovePreview {
@@ -902,6 +903,23 @@ class FileAPI {
         if (response.status === 401) throw new Error('UNAUTHORIZED');
         if (!response.ok) throw new Error('获取存储配置失败');
         return response.json();
+    }
+
+    async setUnsafeWebdavEndpointsAllowed(enabled: boolean, confirmed = false): Promise<{ success: boolean; allowUnsafeWebdavEndpoints: boolean }> {
+        const response = await fetch(`${API_BASE}/api/storage/config/webdav-security`, {
+            credentials: 'include',
+            method: 'PATCH',
+            headers: getHeaders({ 'Content-Type': 'application/json' }),
+            body: JSON.stringify({ enabled, confirmed }),
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (response.status === 401) throw new Error('UNAUTHORIZED');
+        if (!response.ok) {
+            const error = new Error(payload.error || '更新 WebDAV 安全设置失败') as Error & { code?: string };
+            error.code = payload.code;
+            throw error;
+        }
+        return payload;
     }
 
     async setTelegramUserDownloadEnabled(enabled: boolean): Promise<{ success: boolean; enabled: boolean }> {

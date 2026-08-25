@@ -47,8 +47,14 @@ test('file routes preserve folder and search queries', () => {
     assert.equal(appRouteHref(route), '/files/images?folder=%E7%85%A7%E7%89%87%2F2026&q=%E6%97%85%E8%A1%8C');
 });
 
-test('root and unknown paths canonicalize safely to files', () => {
-    assert.deepEqual(parseAppRoute({ pathname: '/', search: '' }), { kind: 'files', category: 'all', folder: null, query: '', needsReplace: true });
-    assert.deepEqual(parseAppRoute({ pathname: '/missing', search: '?q=ignored' }), { kind: 'files', category: 'all', folder: null, query: '', needsReplace: true });
-    assert.equal(appRouteHref(parseAppRoute({ pathname: '/', search: '' })), '/files');
+test('upload center is the canonical home route', () => {
+    assert.deepEqual(parseAppRoute({ pathname: '/', search: '' }), { kind: 'upload', needsReplace: false });
+    assert.deepEqual(parseAppRoute({ pathname: '/upload', search: '' }), { kind: 'upload', needsReplace: true });
+    assert.deepEqual(routeForCategory('upload'), { kind: 'upload', needsReplace: false });
+    assert.equal(appRouteHref(routeForCategory('upload')), '/');
+});
+
+test('unknown paths canonicalize safely to the upload center', () => {
+    assert.deepEqual(parseAppRoute({ pathname: '/missing', search: '?q=ignored' }), { kind: 'upload', needsReplace: true });
+    assert.equal(appRouteHref(parseAppRoute({ pathname: '/missing', search: '' })), '/');
 });
