@@ -20,9 +20,9 @@ nano .env
 
 ```dotenv
 DB_PASSWORD=使用 openssl rand -hex 32 生成的随机值
-IMAGE_VERSION=v2.0.1
+IMAGE_VERSION=v2.0.5
 SOURCE_REVISION=当前部署提交的完整 SHA（运行 git rev-parse HEAD 获取）
-SOURCE_VERSION=v2.0.1
+SOURCE_VERSION=v2.0.5
 VITE_API_URL=https://api.example.com
 OAUTH_CALLBACK_BASE_URL=https://api.example.com
 OAUTH_FRONTEND_ORIGIN=https://cloud.example.com
