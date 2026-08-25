@@ -34,6 +34,7 @@ import {
     updateYtDlpExecutionProgress,
     type YtDlpExecutionClaim,
 } from './ytDlpExecution.js';
+import { assertPublicHttpUrl } from '../utils/networkSecurity.js';
 
 const YTDLP_BIN = process.env.YTDLP_BIN || 'yt-dlp';
 const YTDLP_WORK_DIR = process.env.YTDLP_WORK_DIR || './data/uploads/ytdlp';
@@ -320,7 +321,9 @@ async function executeYtDlpTask(id: string): Promise<void> {
     let lastProgressPersistedAt = 0;
 
     try {
-        await runYtDlpDownload(String(task.payload.url || task.source || ''), taskDir, controller.signal, progress => {
+        const sourceUrl = String(task.payload.url || task.source || '');
+        await assertPublicHttpUrl(sourceUrl);
+        await runYtDlpDownload(sourceUrl, taskDir, controller.signal, progress => {
             const now = Date.now();
             if (now - lastProgressPersistedAt < 1_000 && progress.percent < 100) return;
             lastProgressPersistedAt = now;
@@ -507,6 +510,7 @@ export async function handleYtDlpCommand(
     explicitTarget?: StorageTargetSnapshot,
     options: { format?: 'best' | 'audio'; folder?: string; metadata?: Record<string, unknown>; playlist?: YtDlpPlaylistSelectionInput } = {},
 ): Promise<void> {
+    await assertPublicHttpUrl(url);
     const id = `yd-${crypto.randomBytes(8).toString('hex')}`;
     const target = explicitTarget || storageManager.getActiveTarget();
     await assertStorageTargetWritable(target);

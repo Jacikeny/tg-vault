@@ -10,6 +10,7 @@ import { UAParser } from 'ua-parser-js';
 import axios from 'axios';
 import { sendSecurityNotification } from '../services/telegramBot.js';
 import { changeWebPasswordAndRevokeSessions, createInitialAdminCredentials, isInitialSetupRequired, validateTelegramPin, validateWebPassword, verifyWebPassword } from '../utils/authSettings.js';
+import { shouldUseSecureCookie } from '../utils/cookieSecurity.js';
 
 // 导入可能需要的辅助函数
 async function getIPLocation(ip: string) {
@@ -71,7 +72,7 @@ function setAuthCookie(res: Response, token: string, expiresAt: Date) {
     res.cookie('tg_vault_token', token, {
         httpOnly: true,
         sameSite: 'lax',
-        secure: process.env.COOKIE_SECURE === 'true' || process.env.NODE_ENV === 'production',
+        secure: shouldUseSecureCookie(),
         expires: expiresAt,
         path: '/',
     });

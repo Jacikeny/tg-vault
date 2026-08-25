@@ -20,6 +20,7 @@ import {
 import { normalizeFolderPath } from '../utils/folderPath.js';
 import { classifyMediaProxyError } from '../services/mediaProxyError.js';
 import { buildCloudMediaResponse } from '../services/cloudMediaResponse.js';
+import { pipeline } from 'node:stream/promises';
 
 const router = Router();
 
@@ -72,12 +73,16 @@ async function serveLocalPathWithRange(req: Request, res: Response, filePath: st
             'Content-Range': `bytes ${start}-${end}/${stat.size}`,
             'Content-Length': String(chunkSize),
         });
-        fs.createReadStream(filePath, { start, end }).pipe(res);
+        const stream = fs.createReadStream(filePath, { start, end });
+        req.once('aborted', () => stream.destroy());
+        await pipeline(stream, res);
         return;
     }
 
     res.set('Content-Length', String(stat.size));
-    fs.createReadStream(filePath).pipe(res);
+    const stream = fs.createReadStream(filePath);
+    req.once('aborted', () => stream.destroy());
+    await pipeline(stream, res);
 }
 
 async function serveCloudMediaStream(
@@ -703,16 +708,11 @@ router.get('/:id([0-9a-fA-F-]{36})/thumbnail', async (req: Request, res: Respons
             return res.status(404).json({ error: '缩略图文件不存在' });
         }
 
-        res.set({
-            'Content-Type': 'image/webp',
-            'Cache-Control': 'public, max-age=604800',
-        });
-
-        const stream = fs.createReadStream(thumbPath);
-        stream.pipe(res);
+        await serveLocalPathWithRange(req, res, thumbPath, 'image/webp', 'public, max-age=604800');
     } catch (error) {
         console.error('获取缩略图失败:', error);
-        res.status(500).json({ error: '获取缩略图失败' });
+        if (!res.headersSent) res.status(500).json({ error: '获取缩略图失败' });
+        else res.destroy(error instanceof Error ? error : undefined);
     }
 });
 

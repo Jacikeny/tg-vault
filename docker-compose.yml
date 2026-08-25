@@ -3,7 +3,7 @@ name: tg-vault
 services:
   # 前端（暴露到宿主机供 Nginx 反代）
   frontend:
-    image: tg-vault-frontend:${IMAGE_VERSION:?IMAGE_VERSION is required}
+    image: tg-vault-frontend:${IMAGE_VERSION:-source}
     build:
       context: ./frontend
       sbom: true
@@ -35,7 +35,7 @@ services:
 
   # 后端（暴露到宿主机供 Nginx 反代）
   backend:
-    image: tg-vault-backend:${IMAGE_VERSION:?IMAGE_VERSION is required}
+    image: tg-vault-backend:${IMAGE_VERSION:-source}
     build:
       context: ./backend
       sbom: true
@@ -55,6 +55,7 @@ services:
       - NODE_ENV=production
       - TRUST_PROXY=${TRUST_PROXY:-loopback}
       - COOKIE_SECURE=${COOKIE_SECURE:-true}
+      - COOKIE_SECURE_FORCE=${COOKIE_SECURE_FORCE:-}
       - JSON_BODY_LIMIT=${JSON_BODY_LIMIT:-2mb}
       - UPLOAD_DIR=${UPLOAD_DIR:-/data/uploads}
       - THUMBNAIL_DIR=${THUMBNAIL_DIR:-/data/thumbnails}

@@ -1,8 +1,10 @@
-import { useState, type FormEvent } from 'react';
+import { useRef, useState, type FormEvent } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Eye, EyeOff, LogIn, AlertCircle, ShieldCheck, ArrowLeft } from 'lucide-react';
 import { authService } from '../../services/auth';
 import { IndeterminateSpinner } from '../ui/IndeterminateSpinner';
+import { LanguageToggle } from '../ui/LanguageToggle';
+import { useRuntimeUiLocalization } from './useRuntimeUiLocalization';
 
 interface LoginPageProps {
     onLogin: (password: string) => Promise<{ success: boolean; error?: string; requiresTOTP?: boolean }>;
@@ -11,6 +13,8 @@ interface LoginPageProps {
 }
 
 export const LoginPage = ({ onLogin, setupRequired = false, onSetup }: LoginPageProps) => {
+    const rootRef = useRef<HTMLDivElement>(null);
+    useRuntimeUiLocalization(rootRef);
     const [password, setPassword] = useState('');
     const [confirmPassword, setConfirmPassword] = useState('');
     const [telegramPin, setTelegramPin] = useState('');
@@ -112,7 +116,10 @@ export const LoginPage = ({ onLogin, setupRequired = false, onSetup }: LoginPage
     };
 
     return (
-        <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-background via-background to-muted/30 p-4">
+        <div ref={rootRef} className="relative min-h-screen flex items-center justify-center bg-gradient-to-br from-background via-background to-muted/30 p-4">
+            <div className="absolute right-4 top-4">
+                <LanguageToggle />
+            </div>
             <motion.div
                 initial={{ opacity: 0, y: 20 }}
                 animate={{ opacity: 1, y: 0 }}
@@ -175,6 +182,7 @@ export const LoginPage = ({ onLogin, setupRequired = false, onSetup }: LoginPage
                                         placeholder={setupRequired ? '至少 8 位，建议使用强密码' : '请输入密码'}
                                         className="w-full h-12 px-4 pr-12 rounded-xl border border-border bg-background text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary transition-all"
                                         autoFocus
+                                        autoComplete={setupRequired ? 'new-password' : 'current-password'}
                                         disabled={loading}
                                     />
                                     <button
@@ -201,6 +209,7 @@ export const LoginPage = ({ onLogin, setupRequired = false, onSetup }: LoginPage
                                             value={confirmPassword}
                                             onChange={(e) => setConfirmPassword(e.target.value)}
                                             placeholder="再次输入网页管理员密码"
+                                            autoComplete="new-password"
                                             className="w-full h-12 px-4 rounded-xl border border-border bg-background text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary transition-all"
                                             disabled={loading}
                                         />
@@ -212,6 +221,7 @@ export const LoginPage = ({ onLogin, setupRequired = false, onSetup }: LoginPage
                                         <input
                                             id="telegram-pin"
                                             type="password"
+                                            autoComplete="new-password"
                                             inputMode="numeric"
                                             pattern="[0-9]*"
                                             maxLength={4}
@@ -285,6 +295,7 @@ export const LoginPage = ({ onLogin, setupRequired = false, onSetup }: LoginPage
                                     inputMode="numeric"
                                     pattern="[0-9]*"
                                     maxLength={6}
+                                    autoComplete="one-time-code"
                                     value={totpToken}
                                     onChange={(e) => setTotpToken(e.target.value.replace(/\D/g, ''))}
                                     placeholder="000000"

@@ -11582,6 +11582,83 @@ function buildYtDlpPlaylistArgs(url, input) {
 // src/services/ytDlpDownload.ts
 init_storageCooldown();
 init_storageAccountLifecycle();
+
+// src/utils/networkSecurity.ts
+import dns from "dns/promises";
+import net from "net";
+function ipv4ToInt(ip) {
+  return ip.split(".").reduce((acc, part) => (acc << 8) + Number(part) >>> 0, 0);
+}
+function isPrivateIPv4(ip) {
+  const n = ipv4ToInt(ip);
+  const ranges = [
+    ["0.0.0.0", "0.255.255.255"],
+    ["10.0.0.0", "10.255.255.255"],
+    ["127.0.0.0", "127.255.255.255"],
+    ["169.254.0.0", "169.254.255.255"],
+    ["172.16.0.0", "172.31.255.255"],
+    ["192.168.0.0", "192.168.255.255"],
+    ["224.0.0.0", "239.255.255.255"],
+    ["240.0.0.0", "255.255.255.255"]
+  ];
+  return ranges.some(([start, end]) => n >= ipv4ToInt(start) && n <= ipv4ToInt(end));
+}
+function embeddedIPv4FromIPv6(ip) {
+  const normalized = ip.toLowerCase().split("%", 1)[0];
+  const dotted = normalized.match(/(?:^|:)(\d{1,3}(?:\.\d{1,3}){3})$/)?.[1];
+  if (dotted && net.isIP(dotted) === 4) return dotted;
+  const segments = normalized.split(":").filter(Boolean);
+  if (segments.length < 2) return null;
+  const high = Number.parseInt(segments.at(-2) || "", 16);
+  const low = Number.parseInt(segments.at(-1) || "", 16);
+  if (!Number.isInteger(high) || !Number.isInteger(low) || high < 0 || high > 65535 || low < 0 || low > 65535) return null;
+  return `${high >>> 8}.${high & 255}.${low >>> 8}.${low & 255}`;
+}
+function isPrivateIPv6(ip) {
+  const normalized = ip.toLowerCase();
+  if (normalized === "::1" || normalized === "::" || normalized.startsWith("fc") || normalized.startsWith("fd") || normalized.startsWith("fe80:")) return true;
+  const isMapped = normalized.startsWith("::ffff:");
+  const isNat64 = normalized.startsWith("64:ff9b::");
+  if (!isMapped && !isNat64) return false;
+  const embedded = embeddedIPv4FromIPv6(normalized);
+  return !embedded || isPrivateIPv4(embedded);
+}
+function isPrivateAddress(ip) {
+  const version2 = net.isIP(ip);
+  if (version2 === 4) return isPrivateIPv4(ip);
+  if (version2 === 6) return isPrivateIPv6(ip);
+  return true;
+}
+async function assertPublicHttpUrl(rawUrl) {
+  let parsed;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    throw new Error("\u94FE\u63A5\u683C\u5F0F\u65E0\u6548");
+  }
+  if (!["http:", "https:"].includes(parsed.protocol)) {
+    throw new Error("\u4EC5\u5141\u8BB8 http/https \u94FE\u63A5");
+  }
+  const hostname = parsed.hostname;
+  if (!hostname || ["localhost", "localhost.localdomain"].includes(hostname.toLowerCase())) {
+    throw new Error("\u4E0D\u5141\u8BB8\u8BBF\u95EE\u672C\u673A\u5730\u5740");
+  }
+  const directIpVersion = net.isIP(hostname);
+  const addresses = directIpVersion ? [{ address: hostname }] : await dns.lookup(hostname, { all: true, verbatim: true });
+  if (addresses.length === 0 || addresses.some((item) => isPrivateAddress(item.address))) {
+    throw new Error("\u4E0D\u5141\u8BB8\u8BBF\u95EE\u5185\u7F51\u3001\u56DE\u73AF\u6216\u4FDD\u7559\u5730\u5740");
+  }
+  return parsed;
+}
+async function assertPublicStorageEndpoint(rawUrl) {
+  const parsed = await assertPublicHttpUrl(rawUrl);
+  if (parsed.protocol !== "https:" && process.env.ALLOW_INSECURE_STORAGE_ENDPOINTS !== "true") {
+    throw new Error("\u5B58\u50A8\u7AEF\u70B9\u4EC5\u5141\u8BB8 https\uFF1B\u5982\u786E\u9700 http\uFF0C\u8BF7\u663E\u5F0F\u8BBE\u7F6E ALLOW_INSECURE_STORAGE_ENDPOINTS=true");
+  }
+  return parsed;
+}
+
+// src/services/ytDlpDownload.ts
 var YTDLP_BIN = process.env.YTDLP_BIN || "yt-dlp";
 var YTDLP_WORK_DIR2 = process.env.YTDLP_WORK_DIR || "./data/uploads/ytdlp";
 var YTDLP_MAX_CONCURRENT = Math.max(1, parseInt(process.env.YTDLP_MAX_CONCURRENT || "1", 10) || 1);
@@ -11821,7 +11898,9 @@ async function executeYtDlpTask(id) {
   ensureDir(taskDir);
   let lastProgressPersistedAt = 0;
   try {
-    await runYtDlpDownload(String(task.payload.url || task.source || ""), taskDir, controller.signal, (progress) => {
+    const sourceUrl = String(task.payload.url || task.source || "");
+    await assertPublicHttpUrl(sourceUrl);
+    await runYtDlpDownload(sourceUrl, taskDir, controller.signal, (progress) => {
       const now = Date.now();
       if (now - lastProgressPersistedAt < 1e3 && progress.percent < 100) return;
       lastProgressPersistedAt = now;
@@ -12007,6 +12086,7 @@ async function retryYtDlpTask(id) {
   return getTransferTask("ytdlp", id);
 }
 async function handleYtDlpCommand(message, url, explicitTarget, options = {}) {
+  await assertPublicHttpUrl(url);
   const id = `yd-${crypto14.randomBytes(8).toString("hex")}`;
   const target = explicitTarget || storageManager.getActiveTarget();
   await assertStorageTargetWritable(target);
@@ -14455,83 +14535,6 @@ async function handleFileConcurrencyCallback(client2, update, data) {
 // src/services/ytDlpProbe.ts
 import os3 from "node:os";
 import { spawn as spawn2 } from "node:child_process";
-
-// src/utils/networkSecurity.ts
-import dns from "dns/promises";
-import net from "net";
-function ipv4ToInt(ip) {
-  return ip.split(".").reduce((acc, part) => (acc << 8) + Number(part) >>> 0, 0);
-}
-function isPrivateIPv4(ip) {
-  const n = ipv4ToInt(ip);
-  const ranges = [
-    ["0.0.0.0", "0.255.255.255"],
-    ["10.0.0.0", "10.255.255.255"],
-    ["127.0.0.0", "127.255.255.255"],
-    ["169.254.0.0", "169.254.255.255"],
-    ["172.16.0.0", "172.31.255.255"],
-    ["192.168.0.0", "192.168.255.255"],
-    ["224.0.0.0", "239.255.255.255"],
-    ["240.0.0.0", "255.255.255.255"]
-  ];
-  return ranges.some(([start, end]) => n >= ipv4ToInt(start) && n <= ipv4ToInt(end));
-}
-function embeddedIPv4FromIPv6(ip) {
-  const normalized = ip.toLowerCase().split("%", 1)[0];
-  const dotted = normalized.match(/(?:^|:)(\d{1,3}(?:\.\d{1,3}){3})$/)?.[1];
-  if (dotted && net.isIP(dotted) === 4) return dotted;
-  const segments = normalized.split(":").filter(Boolean);
-  if (segments.length < 2) return null;
-  const high = Number.parseInt(segments.at(-2) || "", 16);
-  const low = Number.parseInt(segments.at(-1) || "", 16);
-  if (!Number.isInteger(high) || !Number.isInteger(low) || high < 0 || high > 65535 || low < 0 || low > 65535) return null;
-  return `${high >>> 8}.${high & 255}.${low >>> 8}.${low & 255}`;
-}
-function isPrivateIPv6(ip) {
-  const normalized = ip.toLowerCase();
-  if (normalized === "::1" || normalized === "::" || normalized.startsWith("fc") || normalized.startsWith("fd") || normalized.startsWith("fe80:")) return true;
-  const isMapped = normalized.startsWith("::ffff:");
-  const isNat64 = normalized.startsWith("64:ff9b::");
-  if (!isMapped && !isNat64) return false;
-  const embedded = embeddedIPv4FromIPv6(normalized);
-  return !embedded || isPrivateIPv4(embedded);
-}
-function isPrivateAddress(ip) {
-  const version2 = net.isIP(ip);
-  if (version2 === 4) return isPrivateIPv4(ip);
-  if (version2 === 6) return isPrivateIPv6(ip);
-  return true;
-}
-async function assertPublicHttpUrl(rawUrl) {
-  let parsed;
-  try {
-    parsed = new URL(rawUrl);
-  } catch {
-    throw new Error("\u94FE\u63A5\u683C\u5F0F\u65E0\u6548");
-  }
-  if (!["http:", "https:"].includes(parsed.protocol)) {
-    throw new Error("\u4EC5\u5141\u8BB8 http/https \u94FE\u63A5");
-  }
-  const hostname = parsed.hostname;
-  if (!hostname || ["localhost", "localhost.localdomain"].includes(hostname.toLowerCase())) {
-    throw new Error("\u4E0D\u5141\u8BB8\u8BBF\u95EE\u672C\u673A\u5730\u5740");
-  }
-  const directIpVersion = net.isIP(hostname);
-  const addresses = directIpVersion ? [{ address: hostname }] : await dns.lookup(hostname, { all: true, verbatim: true });
-  if (addresses.length === 0 || addresses.some((item) => isPrivateAddress(item.address))) {
-    throw new Error("\u4E0D\u5141\u8BB8\u8BBF\u95EE\u5185\u7F51\u3001\u56DE\u73AF\u6216\u4FDD\u7559\u5730\u5740");
-  }
-  return parsed;
-}
-async function assertPublicStorageEndpoint(rawUrl) {
-  const parsed = await assertPublicHttpUrl(rawUrl);
-  if (parsed.protocol !== "https:" && process.env.ALLOW_INSECURE_STORAGE_ENDPOINTS !== "true") {
-    throw new Error("\u5B58\u50A8\u7AEF\u70B9\u4EC5\u5141\u8BB8 https\uFF1B\u5982\u786E\u9700 http\uFF0C\u8BF7\u663E\u5F0F\u8BBE\u7F6E ALLOW_INSECURE_STORAGE_ENDPOINTS=true");
-  }
-  return parsed;
-}
-
-// src/services/ytDlpProbe.ts
 var YTDLP_BIN2 = process.env.YTDLP_BIN || "yt-dlp";
 function buildYtDlpProbeArgs(url) {
   return ["--dump-single-json", "--skip-download", "--no-playlist", "--no-warnings", "--", url];
@@ -16864,6 +16867,23 @@ async function sendSecurityNotification(message) {
 
 // src/routes/auth.ts
 init_authSettings();
+
+// src/utils/cookieSecurity.ts
+function shouldUseSecureCookie(env = {
+  NODE_ENV: process.env.NODE_ENV,
+  COOKIE_SECURE: process.env.COOKIE_SECURE,
+  COOKIE_SECURE_FORCE: process.env.COOKIE_SECURE_FORCE
+}) {
+  const forced = env.COOKIE_SECURE_FORCE?.trim().toLowerCase();
+  if (forced === "true") return true;
+  if (forced === "false") return false;
+  const explicit = env.COOKIE_SECURE?.trim().toLowerCase();
+  if (explicit === "true") return true;
+  if (explicit === "false") return false;
+  return env.NODE_ENV === "production";
+}
+
+// src/routes/auth.ts
 async function getIPLocation(ip) {
   try {
     if (ip === "::1" || ip === "127.0.0.1") return "\u672C\u5730\u56DE\u73AF";
@@ -16917,7 +16937,7 @@ function setAuthCookie(res, token, expiresAt) {
   res.cookie("tg_vault_token", token, {
     httpOnly: true,
     sameSite: "lax",
-    secure: process.env.COOKIE_SECURE === "true" || process.env.NODE_ENV === "production",
+    secure: shouldUseSecureCookie(),
     expires: expiresAt,
     path: "/"
   });
@@ -17330,6 +17350,7 @@ function buildCloudMediaResponse(input) {
 }
 
 // src/routes/files.ts
+import { pipeline } from "node:stream/promises";
 var router2 = Router2();
 var UPLOAD_DIR5 = path17.resolve(process.env.UPLOAD_DIR || "./data/uploads");
 var THUMBNAIL_DIR5 = path17.resolve(process.env.THUMBNAIL_DIR || "./data/thumbnails");
@@ -17376,11 +17397,15 @@ async function serveLocalPathWithRange(req, res, filePath, mimeType, cacheContro
       "Content-Range": `bytes ${start}-${end}/${stat.size}`,
       "Content-Length": String(chunkSize)
     });
-    fs12.createReadStream(filePath, { start, end }).pipe(res);
+    const stream2 = fs12.createReadStream(filePath, { start, end });
+    req.once("aborted", () => stream2.destroy());
+    await pipeline(stream2, res);
     return;
   }
   res.set("Content-Length", String(stat.size));
-  fs12.createReadStream(filePath).pipe(res);
+  const stream = fs12.createReadStream(filePath);
+  req.once("aborted", () => stream.destroy());
+  await pipeline(stream, res);
 }
 async function serveCloudMediaStream(req, res, provider, storedPath, mimeType) {
   const range = req.headers.range;
@@ -17889,15 +17914,11 @@ router2.get("/:id([0-9a-fA-F-]{36})/thumbnail", async (req, res) => {
     if (!fs12.existsSync(thumbPath)) {
       return res.status(404).json({ error: "\u7F29\u7565\u56FE\u6587\u4EF6\u4E0D\u5B58\u5728" });
     }
-    res.set({
-      "Content-Type": "image/webp",
-      "Cache-Control": "public, max-age=604800"
-    });
-    const stream = fs12.createReadStream(thumbPath);
-    stream.pipe(res);
+    await serveLocalPathWithRange(req, res, thumbPath, "image/webp", "public, max-age=604800");
   } catch (error) {
     console.error("\u83B7\u53D6\u7F29\u7565\u56FE\u5931\u8D25:", error);
-    res.status(500).json({ error: "\u83B7\u53D6\u7F29\u7565\u56FE\u5931\u8D25" });
+    if (!res.headersSent) res.status(500).json({ error: "\u83B7\u53D6\u7F29\u7565\u56FE\u5931\u8D25" });
+    else res.destroy(error instanceof Error ? error : void 0);
   }
 });
 router2.post("/:id([0-9a-fA-F-]{36})/delete-confirmation", async (req, res) => {
@@ -19747,7 +19768,7 @@ import crypto26 from "node:crypto";
 import fs16 from "node:fs";
 import fsPromises2 from "node:fs/promises";
 import path21 from "node:path";
-import { pipeline as pipeline2 } from "node:stream/promises";
+import { pipeline as pipeline3 } from "node:stream/promises";
 import { rateLimit as rateLimit3 } from "express-rate-limit";
 import checkDiskSpaceModule3 from "check-disk-space";
 init_storage();
@@ -19947,7 +19968,7 @@ import crypto25 from "node:crypto";
 import fs15 from "node:fs";
 import fsPromises from "node:fs/promises";
 import path20 from "node:path";
-import { pipeline } from "node:stream/promises";
+import { pipeline as pipeline2 } from "node:stream/promises";
 var ChunkUploadProtocolError = class extends Error {
   constructor(name, message) {
     super(message);
@@ -19977,7 +19998,7 @@ async function writeChunkAtomically(input) {
     }
   });
   try {
-    await pipeline(input.stream, counter, fs15.createWriteStream(temporaryPath, { flags: "wx" }));
+    await pipeline2(input.stream, counter, fs15.createWriteStream(temporaryPath, { flags: "wx" }));
     if (size !== input.expectedSize) throw new ChunkUploadProtocolError("ChunkSizeMismatchError", "\u5206\u5757\u5927\u5C0F\u4E0D\u5339\u914D");
     const sha2562 = hash2.digest("hex");
     if (sha2562 !== input.expectedSha256.toLowerCase()) throw new ChunkUploadProtocolError("ChunkHashMismatchError", "\u5206\u5757\u54C8\u5E0C\u4E0D\u5339\u914D");
@@ -20000,7 +20021,7 @@ async function verifyChunkIntegrity(chunk, expectedDirectory, maxChunkBytes) {
     throw new ChunkUploadProtocolError("ChunkSizeMismatchError", `\u5206\u5757 ${chunk.index} \u5927\u5C0F\u65E0\u6548`);
   }
   const hash2 = crypto25.createHash("sha256");
-  await pipeline(fs15.createReadStream(chunkPath), new (await import("node:stream")).Writable({
+  await pipeline2(fs15.createReadStream(chunkPath), new (await import("node:stream")).Writable({
     write(buffer, _encoding, callback) {
       hash2.update(buffer);
       callback();
@@ -20713,7 +20734,7 @@ async function mergeChunks(uploadId, chunks, targetPath, expectedBytes) {
       const expectedDirectory = path21.dirname(path21.resolve(safeChunkPath(uploadId, index)));
       if (chunk.index !== index) throw new Error(`\u5206\u5757 ${index} \u5143\u6570\u636E\u65E0\u6548`);
       const verifiedPath = await verifyChunkIntegrity(chunk, expectedDirectory, MAX_CHUNK_BYTES);
-      await pipeline2(fs16.createReadStream(verifiedPath), output, { end: false });
+      await pipeline3(fs16.createReadStream(verifiedPath), output, { end: false });
     }
     await new Promise((resolve, reject) => {
       output.end(resolve);

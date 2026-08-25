@@ -26,6 +26,7 @@ OAUTH_FRONTEND_ORIGIN=https://cloud.example.com
 CORS_ORIGIN=https://cloud.example.com
 DOMAIN=cloud.example.com
 COOKIE_SECURE=true
+COOKIE_SECURE_FORCE=true
 EOF
   echo "已创建 .env。请先编辑其中的 Web/API 域名，再重新运行本脚本。"
   exit 2

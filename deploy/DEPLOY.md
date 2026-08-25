@@ -42,7 +42,7 @@ STORAGE_CREDENTIALS_SECRET=至少32字符；可用 openssl rand -hex 32
 
 ## 3. 构建并启动
 
-直接运行 Compose 时，缺失的 `SOURCE_REVISION` / `SOURCE_VERSION` 会回退为 `unknown` / `worktree`，因此旧 `.env` 和快速部署不会被构建标签阻断。正式发布仍应显式填写 `IMAGE_VERSION`、`SOURCE_REVISION` 和 `SOURCE_VERSION`；`deploy/install.sh` 会拒绝缺失这些值，避免生成不可审计的生产镜像。每次发布前更新：
+直接运行 Compose 时，缺失的 `IMAGE_VERSION` / `SOURCE_REVISION` / `SOURCE_VERSION` 会分别回退为 `source` / `unknown` / `worktree`，因此旧 `.env` 和快速部署不会被本地镜像标签或构建标签阻断。`DB_PASSWORD` 仍必须在 `.env` 中设置。正式发布仍应显式填写 `IMAGE_VERSION`、`SOURCE_REVISION` 和 `SOURCE_VERSION`；`deploy/install.sh` 会拒绝缺失这些值，避免生成不可审计的生产镜像。每次发布前更新：
 
 ```bash
 revision=$(git rev-parse HEAD)

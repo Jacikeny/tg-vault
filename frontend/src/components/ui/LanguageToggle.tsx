@@ -10,6 +10,8 @@ export const LanguageToggle = () => {
             <Button
                 variant="ghost"
                 size="sm"
+                aria-label="Switch language to English"
+                aria-pressed={i18n.language === "en"}
                 onClick={() => i18n.changeLanguage("en")}
                 className={cn(
                     "h-7 px-2 text-xs font-medium hover:bg-transparent",
@@ -21,6 +23,8 @@ export const LanguageToggle = () => {
             <Button
                 variant="ghost"
                 size="sm"
+                aria-label="切换语言为中文"
+                aria-pressed={i18n.language === "zh"}
                 onClick={() => i18n.changeLanguage("zh")}
                 className={cn(
                     "h-7 px-2 text-xs font-medium hover:bg-transparent",

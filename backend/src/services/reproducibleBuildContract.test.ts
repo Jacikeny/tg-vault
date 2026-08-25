@@ -25,8 +25,8 @@ test('release images use locked dependencies, pinned bases, verified yt-dlp and 
     assert.match(frontend, /node@sha256:/);
     assert.match(frontend, /nginx@sha256:/);
     assert.match(compose, /(?:postgres|pgvector\/pgvector)@sha256:/);
-    assert.equal((compose.match(/\$\{IMAGE_VERSION:\?IMAGE_VERSION is required\}/g) || []).length, 2);
-    assert.doesNotMatch(compose, /IMAGE_VERSION:-latest/);
+    assert.equal((compose.match(/\$\{IMAGE_VERSION:-source\}/g) || []).length, 2);
+    assert.doesNotMatch(compose, /IMAGE_VERSION:\?IMAGE_VERSION is required/);
     assert.match(compose, /OAUTH_CALLBACK_BASE_URL/);
     assert.match(compose, /OAUTH_FRONTEND_ORIGIN/);
     assert.match(backend, /YTDLP_VERSION=2026\.06\.09/);
@@ -45,8 +45,10 @@ test('release images use locked dependencies, pinned bases, verified yt-dlp and 
 });
 
 test('direct Compose builds use local source metadata fallbacks while production installs stay traceable', () => {
+    assert.equal((compose.match(/\$\{IMAGE_VERSION:-source\}/g) || []).length, 2);
     assert.equal((compose.match(/\$\{SOURCE_REVISION:-unknown\}/g) || []).length, 2);
     assert.equal((compose.match(/\$\{SOURCE_VERSION:-worktree\}/g) || []).length, 2);
+    assert.doesNotMatch(compose, /IMAGE_VERSION:\?IMAGE_VERSION is required/);
     assert.doesNotMatch(compose, /SOURCE_REVISION:\?SOURCE_REVISION is required/);
     assert.doesNotMatch(compose, /SOURCE_VERSION:\?SOURCE_VERSION is required/);
     assertRequiredBuildMetadata(installScript);
@@ -55,4 +57,5 @@ test('direct Compose builds use local source metadata fallbacks while production
     assert.match(installScript, /OAUTH_FRONTEND_ORIGIN=/);
     assert.match(deployGuide, /docker inspect/);
     assert.match(deployGuide, /assets\//);
+    assert.match(deployGuide, /IMAGE_VERSION.*source/);
 });
