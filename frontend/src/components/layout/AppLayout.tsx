@@ -1,12 +1,43 @@
 import React, { useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Folder, Settings, Menu, Image as ImageIcon, Video, Music, FileText, ChevronRight, X, Star, Download, LogOut, ListChecks } from "lucide-react";
+import { Folder, Settings, Menu, Image as ImageIcon, Video, Music, FileText, ChevronRight, X, Star, Download, LogOut, ListChecks, Monitor, Moon, Sun } from "lucide-react";
 import { Button } from "../ui/Button";
 import { cn } from "../../lib/utils";
 import { useTranslation } from "react-i18next";
 import { StorageWidget } from "../ui/StorageWidget";
 import { LanguageToggle } from "../ui/LanguageToggle";
 import type { StorageStats } from "../../services/api";
+import { useTheme } from "../../hooks/useTheme";
+
+const HeaderThemeSwitch = () => {
+    const { theme, setTheme } = useTheme();
+    const options = [
+        { value: "light" as const, label: "浅色主题", icon: Sun },
+        { value: "dark" as const, label: "深色主题", icon: Moon },
+        { value: "system" as const, label: "跟随系统主题", icon: Monitor },
+    ];
+    return (
+        <div data-testid="header-theme-switch" className="flex items-center gap-0.5 rounded-lg border border-border/60 bg-muted/50 p-1" role="group" aria-label="主题模式">
+            {options.map(option => {
+                const Icon = option.icon;
+                const selected = theme === option.value;
+                return (
+                    <button
+                        key={option.value}
+                        type="button"
+                        className={cn("flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-background hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40", selected && "bg-background text-foreground shadow-sm")}
+                        onClick={() => setTheme(option.value)}
+                        aria-label={option.label}
+                        title={option.label}
+                        aria-pressed={selected}
+                    >
+                        <Icon className="h-4 w-4" />
+                    </button>
+                );
+            })}
+        </div>
+    );
+};
 
 interface SidebarItemProps {
     icon: React.ElementType;
@@ -243,11 +274,13 @@ export const AppLayout = ({ children, activeCategory, onCategoryChange, storageS
                         </div>
                     </div>
 
-                    {/* Mobile Menu Toggle */}
-                    <div className="md:hidden">
-                        <Button size="icon" variant="ghost" onClick={() => setIsMobileMenuOpen(true)} aria-label="打开导航菜单" title="打开导航菜单">
-                            <Menu className="h-6 w-6" />
-                        </Button>
+                    <div className="ml-auto flex items-center gap-2">
+                        <HeaderThemeSwitch />
+                        <div className="md:hidden">
+                            <Button size="icon" variant="ghost" onClick={() => setIsMobileMenuOpen(true)} aria-label="打开导航菜单" title="打开导航菜单">
+                                <Menu className="h-6 w-6" />
+                            </Button>
+                        </div>
                     </div>
                 </header>
                 <div className="flex-1 overflow-auto p-4 sm:p-8 scroll-smooth will-change-transform">

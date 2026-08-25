@@ -108,6 +108,12 @@ export const TasksPage = ({ onUnauthorized, onOpenUploads, initialAccountId = nu
         return () => window.clearInterval(timer);
     }, [loadTasks]);
 
+    useEffect(() => {
+        if (!notice) return;
+        const timer = window.setTimeout(() => setNotice(null), 4_000);
+        return () => window.clearTimeout(timer);
+    }, [notice]);
+
     const summary = useMemo(() => ({
         active: tasks.filter(t => ['pending', 'running', 'paused', 'waiting'].includes(t.status)).length,
         failed: tasks.filter(t => ['failed', 'interrupted', 'retry_required'].includes(t.status)).length,
@@ -203,7 +209,7 @@ export const TasksPage = ({ onUnauthorized, onOpenUploads, initialAccountId = nu
                 {selectionMode && <div className="mt-3 flex flex-wrap items-center gap-2 rounded-lg bg-muted/50 p-3 text-sm"><span>已选择 {selected.length} 条</span><Button size="sm" variant="outline" onClick={() => setSelected(dismissibleTasks.map(taskKey))}>全选可删除</Button><Button size="sm" variant="ghost" onClick={() => setSelected([])}>清空</Button><Button size="sm" variant="destructive" disabled={!selected.length || acting} onClick={() => void prepareDismissal({ tasks: selectedTasks })}>删除所选</Button></div>}
             </div>
 
-            {notice && <div className="flex justify-between rounded-md border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800"><span>{notice}</span><button onClick={() => setNotice(null)}>关闭</button></div>}
+            {notice && <div className="flex items-center justify-between gap-3 rounded-md border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800" role="status" aria-live="polite"><span>{notice}</span><button type="button" className="rounded p-1 hover:bg-emerald-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600" onClick={() => setNotice(null)} aria-label="关闭提示" title="关闭提示"><X className="h-4 w-4" /></button></div>}
             {error && <div className="flex items-start justify-between gap-3 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800"><span>{error}</span><Button size="sm" variant="outline" onClick={() => void loadTasks(false)}>重试</Button></div>}
 
             {loading ? <div className="flex min-h-48 items-center justify-center"><IndeterminateSpinner label="正在加载任务" size="md" /></div> : tasks.length === 0 ? <div className="flex min-h-48 flex-col items-center justify-center border-y text-center"><Clock3 className="mb-3 h-7 w-7 text-muted-foreground" /><p className="font-medium">没有符合条件的任务</p><p className="mt-1 text-sm text-muted-foreground">调整来源或状态筛选后再查看。</p></div> : (

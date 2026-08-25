@@ -1,10 +1,9 @@
-import React, { useState, useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { motion, AnimatePresence } from "framer-motion";
-import { HardDrive, ChevronRight, Moon, Sun, Monitor, Palette, Globe, Cloud, Server, Database, CheckCircle, Trash2, Network, Shield, ShieldAlert, ShieldCheck, ExternalLink, BookOpen, KeyRound, LogOut, UserX, CircleHelp, XCircle, RefreshCw, Gauge, Copy } from "lucide-react";
+import { HardDrive, ChevronRight, Palette, Globe, Cloud, Server, Database, CheckCircle, Trash2, Network, Shield, ShieldAlert, ShieldCheck, ExternalLink, BookOpen, KeyRound, LogOut, UserX, CircleHelp, XCircle, RefreshCw, Gauge, Copy, X } from "lucide-react";
 import { Button } from "../ui/Button";
 import { LanguageToggle } from "../ui/LanguageToggle";
-import { useTheme } from "../../hooks/useTheme";
 import { cn } from "../../lib/utils";
 import { fileApi, type AdvancedTaskSettings, type StorageAccount, type StorageConfig, type StorageStats } from "../../services/api";
 import { isTrustedOAuthPopupMessage } from "../../services/oauthPopupMessage";
@@ -95,12 +94,45 @@ const StorageProbeStatus = ({ account, busy, onProbe }: { account: StorageAccoun
 };
 
 interface ActionDialogState {
-    mode: 'notice' | 'confirm' | 'prompt';
+    mode: 'confirm' | 'prompt';
     title: string;
     message: string;
     inputType?: 'text' | 'password';
     resolve?: (value: boolean | string | null) => void;
 }
+
+interface ActionNoticeState {
+    title: string;
+    message: string;
+    tone: 'success' | 'error' | 'info';
+}
+
+const ActionNotice = ({ state, onClose }: { state: ActionNoticeState; onClose: () => void }) => (
+    <motion.div
+        initial={{ opacity: 0, y: -12, scale: 0.98 }}
+        animate={{ opacity: 1, y: 0, scale: 1 }}
+        exit={{ opacity: 0, y: -12, scale: 0.98 }}
+        className="pointer-events-none fixed inset-x-0 top-20 z-[120] flex justify-center px-4"
+    >
+        <div
+            className={cn(
+                "pointer-events-auto flex w-full max-w-md items-start gap-3 rounded-xl border bg-background/95 px-4 py-3 shadow-xl backdrop-blur",
+                state.tone === 'success' && "border-emerald-200",
+                state.tone === 'error' && "border-red-200",
+                state.tone === 'info' && "border-border",
+            )}
+            role="status"
+            aria-live="polite"
+        >
+            {state.tone === 'success' ? <CheckCircle className="mt-0.5 h-5 w-5 shrink-0 text-emerald-600" /> : state.tone === 'error' ? <XCircle className="mt-0.5 h-5 w-5 shrink-0 text-red-600" /> : <CircleHelp className="mt-0.5 h-5 w-5 shrink-0 text-muted-foreground" />}
+            <div className="min-w-0 flex-1">
+                <p className="text-sm font-semibold">{state.title}</p>
+                <p className="mt-0.5 whitespace-pre-line break-words text-sm text-muted-foreground">{state.message}</p>
+            </div>
+            <button type="button" className="rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40" onClick={onClose} aria-label="关闭提示" title="关闭提示"><X className="h-4 w-4" /></button>
+        </div>
+    </motion.div>
+);
 
 const ActionDialog = ({ state, input, onInput, onCancel, onConfirm }: {
     state: ActionDialogState;
@@ -125,8 +157,8 @@ const ActionDialog = ({ state, input, onInput, onCancel, onConfirm }: {
                     />
                 )}
                 <div className="mt-6 flex justify-end gap-2">
-                    {state.mode !== 'notice' && <Button variant="outline" onClick={onCancel}>取消</Button>}
-                    <Button onClick={onConfirm}>{state.mode === 'notice' ? '知道了' : '确认'}</Button>
+                    <Button variant="outline" onClick={onCancel}>取消</Button>
+                    <Button onClick={onConfirm}>确认</Button>
                 </div>
             </div>
         </div>
@@ -135,16 +167,26 @@ const ActionDialog = ({ state, input, onInput, onCancel, onConfirm }: {
 
 export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount, activeSection, onSectionChange }: SettingsPageProps) => {
     const { t } = useTranslation();
-    const { theme, setTheme } = useTheme();
 
     const pageRef = useRef<HTMLDivElement>(null);
     useRuntimeUiLocalization(pageRef);
     const [actionDialog, setActionDialog] = useState<ActionDialogState | null>(null);
+    const [actionNotice, setActionNotice] = useState<ActionNoticeState | null>(null);
     const [actionDialogInput, setActionDialogInput] = useState('');
 
-    const showNotice = (message: string, title = '操作结果') => new Promise<void>(resolve => {
-        setActionDialog({ mode: 'notice', title, message, resolve: () => resolve() });
-    });
+    const closeActionNotice = useCallback(() => {
+        setActionNotice(null);
+    }, []);
+    useEffect(() => {
+        if (!actionNotice) return;
+        const timer = window.setTimeout(() => closeActionNotice(), 4_000);
+        return () => window.clearTimeout(timer);
+    }, [actionNotice, closeActionNotice]);
+    const showNotice = (message: string, title = '操作结果') => {
+        const errorTone = /失败|错误|不完整|被引用|阻止/.test(title);
+        setActionNotice({ title, message, tone: errorTone ? 'error' : 'success' });
+        return Promise.resolve();
+    };
     const requestConfirmation = (message: string, title = '请确认') => new Promise<boolean>(resolve => {
         setActionDialog({ mode: 'confirm', title, message, resolve: value => resolve(value === true) });
     });
@@ -372,7 +414,6 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
             const data = await fileApi.getStorageConfig();
             setConfig(data);
             await showNotice(`已成功切换到 ${providerName}`);
-            window.location.reload();
         } catch (error: any) {
             await reloadStorageConfig().catch(() => undefined);
             await showNotice(error.message, '操作失败');
@@ -691,6 +732,9 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
             animate={{ opacity: 1, y: 0 }}
             className="mx-auto mt-6 w-full min-w-0 max-w-5xl space-y-8 pb-10"
         >
+            <AnimatePresence>
+                {actionNotice && <ActionNotice state={actionNotice} onClose={closeActionNotice} />}
+            </AnimatePresence>
             {actionDialog && (
                 <ActionDialog
                     state={actionDialog}
@@ -737,41 +781,7 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
                     label={t("settings.general.language")}
                     action={<LanguageToggle />}
                 />
-                <SettingsRow
-                    icon={Sun}
-                    label={t("settings.general.theme")}
-                    action={
-                        <div className="flex items-center gap-1 bg-muted/60 p-1 rounded-lg border border-border/30">
-                            <Button
-                                size="icon"
-                                variant="ghost"
-                                className={cn("h-7 w-7 transition-all", theme === "light" && "bg-background shadow-sm text-primary")}
-                                onClick={() => setTheme("light")}
-                                title={t("settings.general.themeLight")}
-                            >
-                                <Sun className="h-3.5 w-3.5" />
-                            </Button>
-                            <Button
-                                size="icon"
-                                variant="ghost"
-                                className={cn("h-7 w-7 transition-all", theme === "dark" && "bg-background shadow-sm text-primary")}
-                                onClick={() => setTheme("dark")}
-                                title={t("settings.general.themeDark")}
-                            >
-                                <Moon className="h-3.5 w-3.5" />
-                            </Button>
-                            <Button
-                                size="icon"
-                                variant="ghost"
-                                className={cn("h-7 w-7 transition-all", theme === "system" && "bg-background shadow-sm text-primary")}
-                                onClick={() => setTheme("system")}
-                                title={t("settings.general.themeSystem")}
-                            >
-                                <Monitor className="h-3.5 w-3.5" />
-                            </Button>
-                        </div>
-                    }
-                />
+            {/* Theme controls live in the global header so appearance is reachable from every page. */}
             </SettingsSection>
             </>}
 
