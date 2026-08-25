@@ -44,11 +44,11 @@ test('release images use locked dependencies, pinned bases, verified yt-dlp and 
     assert.match(workflow, /actions\/upload-artifact@[0-9a-f]{40}/);
 });
 
-test('local release builds fail closed without traceable source metadata', () => {
-    assert.equal((compose.match(/\$\{SOURCE_REVISION:\?SOURCE_REVISION is required\}/g) || []).length, 2);
-    assert.equal((compose.match(/\$\{SOURCE_VERSION:\?SOURCE_VERSION is required\}/g) || []).length, 2);
-    assert.doesNotMatch(compose, /SOURCE_REVISION:-unknown/);
-    assert.doesNotMatch(compose, /SOURCE_VERSION:-worktree/);
+test('direct Compose builds use local source metadata fallbacks while production installs stay traceable', () => {
+    assert.equal((compose.match(/\$\{SOURCE_REVISION:-unknown\}/g) || []).length, 2);
+    assert.equal((compose.match(/\$\{SOURCE_VERSION:-worktree\}/g) || []).length, 2);
+    assert.doesNotMatch(compose, /SOURCE_REVISION:\?SOURCE_REVISION is required/);
+    assert.doesNotMatch(compose, /SOURCE_VERSION:\?SOURCE_VERSION is required/);
     assertRequiredBuildMetadata(installScript);
     assert.match(installScript, /IMAGE_VERSION=/);
     assert.match(installScript, /OAUTH_CALLBACK_BASE_URL=/);

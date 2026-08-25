@@ -10,8 +10,8 @@ services:
       provenance: mode=max
       args:
         - VITE_API_URL=${VITE_API_URL:-https://api.example.com}
-        - SOURCE_REVISION=${SOURCE_REVISION:?SOURCE_REVISION is required}
-        - SOURCE_VERSION=${SOURCE_VERSION:?SOURCE_VERSION is required}
+        - SOURCE_REVISION=${SOURCE_REVISION:-unknown}
+        - SOURCE_VERSION=${SOURCE_VERSION:-worktree}
     container_name: tg-vault-frontend
     ports:
       - "127.0.0.1:47832:80"
@@ -41,8 +41,8 @@ services:
       sbom: true
       provenance: mode=max
       args:
-        - SOURCE_REVISION=${SOURCE_REVISION:?SOURCE_REVISION is required}
-        - SOURCE_VERSION=${SOURCE_VERSION:?SOURCE_VERSION is required}
+        - SOURCE_REVISION=${SOURCE_REVISION:-unknown}
+        - SOURCE_VERSION=${SOURCE_VERSION:-worktree}
     container_name: tg-vault-backend
     ports:
       - "127.0.0.1:${PORT:-51947}:${PORT:-51947}"
