@@ -1171,7 +1171,7 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
                     <p className="text-xs text-muted-foreground">
                         首次配置？请参阅{" "}
                         <a
-                            href="https://github.com/hicocos/tg-vault#%EF%B8%8F-%E7%8E%AF%E5%A2%83%E5%8F%98%E9%87%8F%E9%85%8D%E7%BD%AE"
+                            href="https://hicocos.github.io/tg-vault/storage.html"
                             target="_blank"
                             rel="noopener noreferrer"
                             className="inline-flex items-center gap-1 text-blue-500 hover:text-blue-600 font-medium hover:underline"
