@@ -225,6 +225,7 @@ export async function listTransferTasks(options: {
     sourceType?: TransferTaskSource;
     ownerUserId?: number;
     chatId?: string;
+    targetAccountId?: string;
     limit?: number;
 } = {}): Promise<TransferTaskRecord[]> {
     const conditions: string[] = [];
@@ -240,6 +241,10 @@ export async function listTransferTasks(options: {
     if (options.chatId !== undefined) {
         params.push(options.chatId);
         conditions.push(`chat_id = $${params.length}`);
+    }
+    if (options.targetAccountId !== undefined) {
+        params.push(options.targetAccountId);
+        conditions.push(`target_account_id = $${params.length}::uuid`);
     }
     params.push(Math.max(1, Math.min(500, options.limit || 200)));
     const result = await query(

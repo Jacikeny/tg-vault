@@ -21,7 +21,7 @@ make_fixture() {
   mkdir -p "$FIXTURE/deploy" "$FIXTURE/backend" "$FIXTURE/fake-bin"
   cp "$ROOT/deploy/install.sh" "$FIXTURE/deploy/install.sh"
   printf 'services: {}\n' > "$FIXTURE/docker-compose.yml"
-  printf '{"version":"2.1.0"}\n' > "$FIXTURE/backend/package.json"
+  printf '{"version":"2.1.1"}\n' > "$FIXTURE/backend/package.json"
 
   cat > "$FIXTURE/fake-bin/docker" <<'SH'
 #!/usr/bin/env bash

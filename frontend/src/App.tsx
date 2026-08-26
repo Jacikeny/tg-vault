@@ -16,7 +16,7 @@ import { DeleteAlert } from "./components/ui/DeleteAlert";
 import { RenameModal } from "./components/ui/RenameModal";
 import { MoveModal } from "./components/ui/MoveModal";
 import { Notification, type NotificationType } from "./components/ui/Notification";
-import { fileApi, type BatchDeletePreview, type BatchDeleteResult, type ChunkUploadSession, type FileData, type FolderAggregation, type FileQueryOptions, type StorageConfig, type StorageStats as StorageStatsType, type UploadCapabilities, type UploadTargetSnapshot } from "./services/api";
+import { fileApi, type BatchDeletePreview, type BatchDeleteResult, type ChunkUploadSession, type FileData, type FolderAggregation, type FileQueryOptions, type StorageConfig, type StorageStats as StorageStatsType, type UploadCapabilities } from "./services/api";
 import { authService } from "./services/auth";
 import type { QueueItem } from "./components/ui/UploadQueueModal";
 import { LatestRequest } from "./services/latestRequest";
@@ -27,6 +27,7 @@ import { createUploadTelemetry, updateUploadTelemetry } from "./services/uploadT
 import { describeFileViewState } from "./services/fileViewState";
 import { buildFolderBreadcrumbs, parentFolder } from "./services/folderNavigation";
 import { attachUploadSession, createUploadQueueInput, type UploadQueueInput } from "./services/uploadQueueInput";
+import { createUploadTargetSnapshot } from "./services/uploadTargetSnapshot";
 import { ConfirmDialog } from "./components/ui/ConfirmDialog";
 import { appRouteHref, parseAppRoute, routeForCategory, routeForSettings, type AppRoute } from "./services/appRoute";
 import type { SettingsSectionId } from "./components/pages/settingsSections";
@@ -599,12 +600,7 @@ function App() {
   };
 
   const startUpload = async (newFiles: File[], folder?: string) => {
-    const targetSnapshot: UploadTargetSnapshot = {
-      provider: activeStorageDisplay?.provider || storageConfig?.provider || 'local',
-      accountId: storageConfig?.activeAccountId || null,
-      accountName: activeStorageDisplay?.account || storageConfig?.activeAccountName || null,
-      folder: folder || null,
-    };
+    const targetSnapshot = createUploadTargetSnapshot(storageConfig, activeStorageDisplay?.provider || null, folder);
     // 1. 创建队列项
     const newItems: QueueItem[] = newFiles.map(file => ({
       id: `${file.name}-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
@@ -616,7 +612,7 @@ function App() {
       bytesPerSecond: 0,
       etaSeconds: null,
       telemetry: createUploadTelemetry(file.size),
-      targetLabel: `${activeStorageDisplay?.provider || storageConfig?.provider || '当前存储'} / ${activeStorageDisplay?.account || '当前账户'} / ${folder || '根目录'}`,
+      targetLabel: targetSnapshot.label,
     }));
 
     // 2. 添加到队列

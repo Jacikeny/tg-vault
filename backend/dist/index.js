@@ -6553,6 +6553,10 @@ async function listTransferTasks(options = {}) {
     params.push(options.chatId);
     conditions.push(`chat_id = $${params.length}`);
   }
+  if (options.targetAccountId !== void 0) {
+    params.push(options.targetAccountId);
+    conditions.push(`target_account_id = $${params.length}::uuid`);
+  }
   params.push(Math.max(1, Math.min(500, options.limit || 200)));
   const result = await query(
     `SELECT * FROM transfer_tasks
@@ -19658,6 +19662,54 @@ function renderOAuthSuccessPage(input) {
 
 // src/routes/storage.ts
 init_storageAccountLifecycle();
+
+// src/services/storageDeletePreview.ts
+function buildStorageDeletePreviewQueries(accountId) {
+  return {
+    impact: {
+      text: `SELECT COUNT(*)::int AS file_count,
+                          COALESCE(SUM(size), 0)::bigint AS total_size,
+                          COUNT(DISTINCT folder) FILTER (WHERE folder IS NOT NULL AND folder <> '')::int AS folder_count,
+                          encode(digest(COALESCE(string_agg(id::text, ',' ORDER BY id), ''), 'sha256'), 'hex') AS file_fingerprint
+                   FROM files WHERE storage_account_id = $1::uuid`,
+      values: [accountId]
+    },
+    leases: {
+      text: `SELECT COUNT(*)::int AS count FROM storage_account_leases
+                   WHERE storage_account_id = $1::uuid AND released_at IS NULL AND expires_at > NOW()`,
+      values: [accountId]
+    },
+    tasks: {
+      text: `SELECT COUNT(*)::int AS count FROM (
+                       SELECT 'transfer:' || source_type || ':' || id AS ref
+                       FROM transfer_tasks
+                       WHERE target_account_id = $1::uuid
+                         AND (status IN ('pending', 'running', 'paused', 'interrupted', 'retry_required') OR retryable = true)
+                       UNION ALL
+                       SELECT 'telegram-job:' || id::text AS ref
+                       FROM telegram_background_jobs
+                       WHERE finished_at IS NULL AND cancelled_at IS NULL
+                         AND params->>'storageAccountId' = $1::text
+                       UNION ALL
+                       SELECT 'telegram-target:' || chat_id::text AS ref
+                       FROM telegram_target_states
+                       WHERE account_id = $1::uuid AND expires_at > NOW()
+                       UNION ALL
+                       SELECT 'subscription:' || id::text AS ref
+                       FROM telegram_channel_subscriptions
+                       WHERE target_mode = 'fixed' AND target_account_id = $1::uuid
+                   ) active_references`,
+      values: [accountId]
+    },
+    uploads: {
+      text: `SELECT COUNT(*)::int AS count FROM chunk_upload_sessions
+                   WHERE target_account_id = $1::uuid AND status IN ('open', 'completing', 'failed')`,
+      values: [accountId]
+    }
+  };
+}
+
+// src/routes/storage.ts
 init_storage();
 
 // src/utils/maintenanceActions.ts
@@ -20531,57 +20583,39 @@ router5.post("/accounts/:id/probe", requireAuth, async (req, res) => {
   }
 });
 router5.post("/accounts/:id/delete-confirmation", requireAuth, async (req, res) => {
-  const account = await query("SELECT id, name, type, is_active FROM storage_accounts WHERE id = $1", [req.params.id]);
-  if (!account.rows[0]) return res.status(404).json({ error: "\u5B58\u50A8\u8D26\u6237\u4E0D\u5B58\u5728" });
-  if (account.rows[0].is_active) return res.status(409).json({ error: "\u4E0D\u80FD\u5220\u9664\u5F53\u524D\u6B63\u5728\u4F7F\u7528\u7684\u5B58\u50A8\u8D26\u6237" });
-  const authToken = getAuthToken(req);
-  if (!authToken) return res.status(401).json({ error: "\u672A\u8BA4\u8BC1" });
-  const [impact, leases, tasks, uploads] = await Promise.all([
-    query(`SELECT COUNT(*)::int AS file_count,
-                      COALESCE(SUM(size), 0)::bigint AS total_size,
-                      COUNT(DISTINCT folder) FILTER (WHERE folder IS NOT NULL AND folder <> '')::int AS folder_count,
-                      encode(digest(COALESCE(string_agg(id::text, ',' ORDER BY id), ''), 'sha256'), 'hex') AS file_fingerprint
-               FROM files WHERE storage_account_id = $1`, [req.params.id]),
-    query(`SELECT COUNT(*)::int AS count FROM storage_account_leases
-               WHERE storage_account_id = $1 AND released_at IS NULL AND expires_at > NOW()`, [req.params.id]),
-    query(`SELECT COUNT(*)::int AS count FROM (
-                   SELECT 'transfer:' || source_type || ':' || id AS ref
-                   FROM transfer_tasks
-                   WHERE target_account_id = $1
-                     AND (status IN ('pending', 'running', 'paused', 'interrupted', 'retry_required') OR retryable = true)
-                   UNION ALL
-                   SELECT 'telegram-job:' || id::text AS ref
-                   FROM telegram_background_jobs
-                   WHERE finished_at IS NULL AND cancelled_at IS NULL
-                     AND params->>'storageAccountId' = $1
-                   UNION ALL
-                   SELECT 'telegram-target:' || chat_id::text AS ref
-                   FROM telegram_target_states
-                   WHERE account_id = $1 AND expires_at > NOW()
-                   UNION ALL
-                   SELECT 'subscription:' || id::text AS ref
-                   FROM telegram_channel_subscriptions
-                   WHERE target_mode = 'fixed' AND target_account_id = $1
-               ) active_references`, [req.params.id]),
-    query(`SELECT COUNT(*)::int AS count FROM chunk_upload_sessions
-               WHERE target_account_id = $1 AND status IN ('open', 'completing', 'failed')`, [req.params.id])
-  ]);
-  const snapshot = impact.rows[0] || {};
-  res.json({
-    ...webDestructiveConfirmationStore.issue({ authToken, action: "delete_storage_account", objectId: req.params.id, context: String(snapshot.file_fingerprint) }),
-    impact: {
-      accountId: req.params.id,
-      accountName: String(account.rows[0].name),
-      provider: String(account.rows[0].type),
-      fileCount: Number(snapshot.file_count || 0),
-      totalSizeBytes: Number(snapshot.total_size || 0),
-      folderCount: Number(snapshot.folder_count || 0),
-      activeLeaseCount: Number(leases.rows[0]?.count || 0),
-      activeTaskCount: Number(tasks.rows[0]?.count || 0),
-      activeUploadCount: Number(uploads.rows[0]?.count || 0),
-      remoteObjectsDeleted: false
-    }
-  });
+  try {
+    const account = await query("SELECT id, name, type, is_active FROM storage_accounts WHERE id = $1", [req.params.id]);
+    if (!account.rows[0]) return res.status(404).json({ error: "\u5B58\u50A8\u8D26\u6237\u4E0D\u5B58\u5728" });
+    if (account.rows[0].is_active) return res.status(409).json({ error: "\u4E0D\u80FD\u5220\u9664\u5F53\u524D\u6B63\u5728\u4F7F\u7528\u7684\u5B58\u50A8\u8D26\u6237" });
+    const authToken = getAuthToken(req);
+    if (!authToken) return res.status(401).json({ error: "\u672A\u8BA4\u8BC1" });
+    const previewQueries = buildStorageDeletePreviewQueries(req.params.id);
+    const [impact, leases, tasks, uploads] = await Promise.all([
+      query(previewQueries.impact.text, previewQueries.impact.values),
+      query(previewQueries.leases.text, previewQueries.leases.values),
+      query(previewQueries.tasks.text, previewQueries.tasks.values),
+      query(previewQueries.uploads.text, previewQueries.uploads.values)
+    ]);
+    const snapshot = impact.rows[0] || {};
+    res.json({
+      ...webDestructiveConfirmationStore.issue({ authToken, action: "delete_storage_account", objectId: req.params.id, context: String(snapshot.file_fingerprint) }),
+      impact: {
+        accountId: req.params.id,
+        accountName: String(account.rows[0].name),
+        provider: String(account.rows[0].type),
+        fileCount: Number(snapshot.file_count || 0),
+        totalSizeBytes: Number(snapshot.total_size || 0),
+        folderCount: Number(snapshot.folder_count || 0),
+        activeLeaseCount: Number(leases.rows[0]?.count || 0),
+        activeTaskCount: Number(tasks.rows[0]?.count || 0),
+        activeUploadCount: Number(uploads.rows[0]?.count || 0),
+        remoteObjectsDeleted: false
+      }
+    });
+  } catch (error) {
+    console.error("\u521B\u5EFA\u5B58\u50A8\u8D26\u6237\u5220\u9664\u786E\u8BA4\u5931\u8D25:", error);
+    res.status(500).json({ error: "\u65E0\u6CD5\u521B\u5EFA\u5220\u9664\u786E\u8BA4" });
+  }
 });
 router5.delete("/accounts/:id", requireAuth, async (req, res) => {
   const { id } = req.params;
@@ -21952,9 +21986,10 @@ async function saveTaskCenterDismissals(items) {
 import crypto28 from "node:crypto";
 var router7 = Router7();
 var CHUNK_DIR2 = process.env.CHUNK_DIR || "./data/chunks";
-async function collectUnifiedTasks(limit) {
+async function collectUnifiedTasks(limit, accountId) {
+  const accountLimit = accountId ? 500 : limit;
   const [transfers, channels, chunks, subscriptions, targets, accounts] = await Promise.all([
-    listTransferTasks({ limit }),
+    listTransferTasks({ limit: accountLimit, targetAccountId: accountId }),
     query(
       `SELECT j.*,
                         COUNT(i.id)::int AS item_count,
@@ -21965,27 +22000,31 @@ async function collectUnifiedTasks(limit) {
                         COALESCE(SUM(i.total_size), 0)::text AS total_bytes
                  FROM telegram_background_jobs j
                  LEFT JOIN telegram_download_items i ON i.job_id = j.id
+                 WHERE ($2::uuid IS NULL OR (j.params->>'storageAccountId') = $2::text)
                  GROUP BY j.id
                  ORDER BY j.updated_at DESC LIMIT $1`,
-      [limit]
+      [accountLimit, accountId || null]
     ),
     query(
       `SELECT * FROM chunk_upload_sessions
                  WHERE status IN ('open','completing','failed') AND expires_at > NOW()
+                   AND ($2::uuid IS NULL OR target_account_id = $2::uuid)
                  ORDER BY updated_at DESC LIMIT $1`,
-      [limit]
+      [accountLimit, accountId || null]
     ),
     query(
       `SELECT * FROM telegram_channel_subscriptions
+                 WHERE ($2::uuid IS NULL OR (target_mode = 'fixed' AND target_account_id = $2::uuid))
                  ORDER BY updated_at DESC LIMIT $1`,
-      [limit]
+      [accountLimit, accountId || null]
     ),
     query(
       `SELECT chat_id, mode, account_id, provider, expires_at, updated_at
                  FROM telegram_target_states
                  WHERE account_id IS NOT NULL AND expires_at > NOW()
+                   AND ($2::uuid IS NULL OR account_id = $2::uuid)
                  ORDER BY updated_at DESC LIMIT $1`,
-      [limit]
+      [accountLimit, accountId || null]
     ),
     query("SELECT id, name FROM storage_accounts")
   ]);
@@ -22024,7 +22063,7 @@ async function collectUnifiedTasks(limit) {
     });
   }
   for (const row of subscriptions.rows) {
-    const accountId = row.target_mode === "fixed" && row.target_account_id != null ? String(row.target_account_id) : null;
+    const accountId2 = row.target_mode === "fixed" && row.target_account_id != null ? String(row.target_account_id) : null;
     const provider = row.target_mode === "fixed" && row.target_provider != null ? String(row.target_provider) : null;
     tasks.push({
       id: String(row.id),
@@ -22039,8 +22078,8 @@ async function collectUnifiedTasks(limit) {
       source: row.source,
       target: {
         provider,
-        accountId,
-        accountName: accountId ? accountNames.get(accountId) || null : null,
+        accountId: accountId2,
+        accountName: accountId2 ? accountNames.get(accountId2) || null : null,
         folder: row.folder_override || null
       },
       counts: { total: 0, completed: 0, failed: 0 },
@@ -22048,14 +22087,14 @@ async function collectUnifiedTasks(limit) {
       detail: { lastMessageId: Number(row.last_message_id || 0), targetMode: row.target_mode },
       error: row.disabled_reason,
       retryable: false,
-      cancellable: Boolean(accountId),
+      cancellable: Boolean(accountId2),
       createdAt: row.created_at,
       updatedAt: row.updated_at,
       finishedAt: null
     });
   }
   for (const row of targets.rows) {
-    const accountId = String(row.account_id);
+    const accountId2 = String(row.account_id);
     tasks.push({
       id: `${String(row.chat_id)}:${String(row.mode)}`,
       sourceType: "telegram_target",
@@ -22069,8 +22108,8 @@ async function collectUnifiedTasks(limit) {
       source: "Telegram \u4F1A\u8BDD\u76EE\u6807",
       target: {
         provider: row.provider == null ? null : String(row.provider),
-        accountId,
-        accountName: accountNames.get(accountId) || null,
+        accountId: accountId2,
+        accountName: accountNames.get(accountId2) || null,
         folder: null
       },
       counts: { total: 0, completed: 0, failed: 0 },
@@ -22089,7 +22128,11 @@ async function collectUnifiedTasks(limit) {
 router7.get("/", requireAuth, async (req, res) => {
   try {
     const limit = Math.max(1, Math.min(500, Number(req.query.limit || 200)));
-    const tasks = filterDismissedTasks(await collectUnifiedTasks(limit), await loadTaskCenterDismissals()).map((task) => ({ ...task, dismissible: isTaskDismissible(task) }));
+    const accountId = String(req.query.accountId || "").trim();
+    if (accountId && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(accountId)) {
+      return res.status(400).json({ error: "\u65E0\u6548\u7684\u5B58\u50A8\u8D26\u6237 ID" });
+    }
+    const tasks = filterDismissedTasks(await collectUnifiedTasks(limit, accountId || void 0), await loadTaskCenterDismissals()).map((task) => ({ ...task, dismissible: isTaskDismissible(task) }));
     const source = String(req.query.source || "").trim();
     const status = String(req.query.status || "").trim();
     const filtered = tasks.filter((task) => !source || task.sourceType === source).filter((task) => !status || task.status === status).sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());

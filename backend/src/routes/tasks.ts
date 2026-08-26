@@ -15,9 +15,10 @@ import crypto from 'node:crypto';
 const router = Router();
 const CHUNK_DIR = process.env.CHUNK_DIR || './data/chunks';
 
-async function collectUnifiedTasks(limit: number): Promise<any[]> {
+async function collectUnifiedTasks(limit: number, accountId?: string): Promise<any[]> {
+        const accountLimit = accountId ? 500 : limit;
         const [transfers, channels, chunks, subscriptions, targets, accounts] = await Promise.all([
-            listTransferTasks({ limit }),
+            listTransferTasks({ limit: accountLimit, targetAccountId: accountId }),
             query(
                 `SELECT j.*,
                         COUNT(i.id)::int AS item_count,
@@ -28,27 +29,31 @@ async function collectUnifiedTasks(limit: number): Promise<any[]> {
                         COALESCE(SUM(i.total_size), 0)::text AS total_bytes
                  FROM telegram_background_jobs j
                  LEFT JOIN telegram_download_items i ON i.job_id = j.id
+                 WHERE ($2::uuid IS NULL OR (j.params->>'storageAccountId') = $2::text)
                  GROUP BY j.id
                  ORDER BY j.updated_at DESC LIMIT $1`,
-                [limit],
+                [accountLimit, accountId || null],
             ),
             query(
                 `SELECT * FROM chunk_upload_sessions
                  WHERE status IN ('open','completing','failed') AND expires_at > NOW()
+                   AND ($2::uuid IS NULL OR target_account_id = $2::uuid)
                  ORDER BY updated_at DESC LIMIT $1`,
-                [limit],
+                [accountLimit, accountId || null],
             ),
             query(
                 `SELECT * FROM telegram_channel_subscriptions
+                 WHERE ($2::uuid IS NULL OR (target_mode = 'fixed' AND target_account_id = $2::uuid))
                  ORDER BY updated_at DESC LIMIT $1`,
-                [limit],
+                [accountLimit, accountId || null],
             ),
             query(
                 `SELECT chat_id, mode, account_id, provider, expires_at, updated_at
                  FROM telegram_target_states
                  WHERE account_id IS NOT NULL AND expires_at > NOW()
+                   AND ($2::uuid IS NULL OR account_id = $2::uuid)
                  ORDER BY updated_at DESC LIMIT $1`,
-                [limit],
+                [accountLimit, accountId || null],
             ),
             query('SELECT id, name FROM storage_accounts'),
         ]);
@@ -154,7 +159,11 @@ async function collectUnifiedTasks(limit: number): Promise<any[]> {
 router.get('/', requireAuth, async (req: Request, res: Response) => {
     try {
         const limit = Math.max(1, Math.min(500, Number(req.query.limit || 200)));
-        const tasks = filterDismissedTasks(await collectUnifiedTasks(limit), await loadTaskCenterDismissals())
+        const accountId = String(req.query.accountId || '').trim();
+        if (accountId && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(accountId)) {
+            return res.status(400).json({ error: '无效的存储账户 ID' });
+        }
+        const tasks = filterDismissedTasks(await collectUnifiedTasks(limit, accountId || undefined), await loadTaskCenterDismissals())
             .map(task => ({ ...task, dismissible: isTaskDismissible(task) }));
         const source = String(req.query.source || '').trim();
         const status = String(req.query.status || '').trim();

@@ -88,7 +88,7 @@ export const TasksPage = ({ onUnauthorized, onOpenUploads, initialAccountId = nu
         if (quiet) setRefreshing(true);
         else setLoading(true);
         try {
-            const result = await fileApi.getTasks({ source, status, limit: 300 });
+            const result = await fileApi.getTasks({ source, status, accountId: initialAccountId || undefined, limit: 300 });
             if (generation !== requestGeneration.current) return;
             const relevantTasks = initialAccountId
                 ? result.tasks.filter(task => task.target.accountId === initialAccountId)

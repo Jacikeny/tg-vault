@@ -19,6 +19,7 @@ import { getOAuthRouteConfig, renderOAuthSuccessPage } from '../services/oauthRo
 import { deleteStorageAccountWithClient, StorageAccountConflictError, StorageAccountNotFoundError } from '../services/storageAccountLifecycle.js';
 import { logOperationalEvent } from '../services/operationalEvents.js';
 import { webDestructiveConfirmationStore } from '../services/webDestructiveConfirmation.js';
+import { buildStorageDeletePreviewQueries } from '../services/storageDeletePreview.js';
 import { StorageProbeError } from '../services/storage.js';
 import { getTelegramUserClientStatus } from '../services/telegramUserClientStatus.js';
 import { getTelegramBotStatus } from '../services/telegramBotStatus.js';
@@ -907,57 +908,39 @@ router.post('/accounts/:id/probe', requireAuth, async (req: Request, res: Respon
 
 // 为账户及其索引删除签发一次性确认令牌，同时返回当前影响快照。
 router.post('/accounts/:id/delete-confirmation', requireAuth, async (req: Request, res: Response) => {
-    const account = await query('SELECT id, name, type, is_active FROM storage_accounts WHERE id = $1', [req.params.id]);
-    if (!account.rows[0]) return res.status(404).json({ error: '存储账户不存在' });
-    if (account.rows[0].is_active) return res.status(409).json({ error: '不能删除当前正在使用的存储账户' });
-    const authToken = getAuthToken(req);
-    if (!authToken) return res.status(401).json({ error: '未认证' });
-    const [impact, leases, tasks, uploads] = await Promise.all([
-        query(`SELECT COUNT(*)::int AS file_count,
-                      COALESCE(SUM(size), 0)::bigint AS total_size,
-                      COUNT(DISTINCT folder) FILTER (WHERE folder IS NOT NULL AND folder <> '')::int AS folder_count,
-                      encode(digest(COALESCE(string_agg(id::text, ',' ORDER BY id), ''), 'sha256'), 'hex') AS file_fingerprint
-               FROM files WHERE storage_account_id = $1`, [req.params.id]),
-        query(`SELECT COUNT(*)::int AS count FROM storage_account_leases
-               WHERE storage_account_id = $1 AND released_at IS NULL AND expires_at > NOW()`, [req.params.id]),
-        query(`SELECT COUNT(*)::int AS count FROM (
-                   SELECT 'transfer:' || source_type || ':' || id AS ref
-                   FROM transfer_tasks
-                   WHERE target_account_id = $1
-                     AND (status IN ('pending', 'running', 'paused', 'interrupted', 'retry_required') OR retryable = true)
-                   UNION ALL
-                   SELECT 'telegram-job:' || id::text AS ref
-                   FROM telegram_background_jobs
-                   WHERE finished_at IS NULL AND cancelled_at IS NULL
-                     AND params->>'storageAccountId' = $1
-                   UNION ALL
-                   SELECT 'telegram-target:' || chat_id::text AS ref
-                   FROM telegram_target_states
-                   WHERE account_id = $1 AND expires_at > NOW()
-                   UNION ALL
-                   SELECT 'subscription:' || id::text AS ref
-                   FROM telegram_channel_subscriptions
-                   WHERE target_mode = 'fixed' AND target_account_id = $1
-               ) active_references`, [req.params.id]),
-        query(`SELECT COUNT(*)::int AS count FROM chunk_upload_sessions
-               WHERE target_account_id = $1 AND status IN ('open', 'completing', 'failed')`, [req.params.id]),
-    ]);
-    const snapshot = impact.rows[0] || {};
-    res.json({
-        ...webDestructiveConfirmationStore.issue({ authToken, action: 'delete_storage_account', objectId: req.params.id, context: String(snapshot.file_fingerprint) }),
-        impact: {
-            accountId: req.params.id,
-            accountName: String(account.rows[0].name),
-            provider: String(account.rows[0].type),
-            fileCount: Number(snapshot.file_count || 0),
-            totalSizeBytes: Number(snapshot.total_size || 0),
-            folderCount: Number(snapshot.folder_count || 0),
-            activeLeaseCount: Number(leases.rows[0]?.count || 0),
-            activeTaskCount: Number(tasks.rows[0]?.count || 0),
-            activeUploadCount: Number(uploads.rows[0]?.count || 0),
-            remoteObjectsDeleted: false,
-        },
-    });
+    try {
+        const account = await query('SELECT id, name, type, is_active FROM storage_accounts WHERE id = $1', [req.params.id]);
+        if (!account.rows[0]) return res.status(404).json({ error: '存储账户不存在' });
+        if (account.rows[0].is_active) return res.status(409).json({ error: '不能删除当前正在使用的存储账户' });
+        const authToken = getAuthToken(req);
+        if (!authToken) return res.status(401).json({ error: '未认证' });
+        const previewQueries = buildStorageDeletePreviewQueries(req.params.id);
+        const [impact, leases, tasks, uploads] = await Promise.all([
+            query(previewQueries.impact.text, previewQueries.impact.values),
+            query(previewQueries.leases.text, previewQueries.leases.values),
+            query(previewQueries.tasks.text, previewQueries.tasks.values),
+            query(previewQueries.uploads.text, previewQueries.uploads.values),
+        ]);
+        const snapshot = impact.rows[0] || {};
+        res.json({
+            ...webDestructiveConfirmationStore.issue({ authToken, action: 'delete_storage_account', objectId: req.params.id, context: String(snapshot.file_fingerprint) }),
+            impact: {
+                accountId: req.params.id,
+                accountName: String(account.rows[0].name),
+                provider: String(account.rows[0].type),
+                fileCount: Number(snapshot.file_count || 0),
+                totalSizeBytes: Number(snapshot.total_size || 0),
+                folderCount: Number(snapshot.folder_count || 0),
+                activeLeaseCount: Number(leases.rows[0]?.count || 0),
+                activeTaskCount: Number(tasks.rows[0]?.count || 0),
+                activeUploadCount: Number(uploads.rows[0]?.count || 0),
+                remoteObjectsDeleted: false,
+            },
+        });
+    } catch (error) {
+        console.error('创建存储账户删除确认失败:', error);
+        res.status(500).json({ error: '无法创建删除确认' });
+    }
 });
 
 // 删除账户

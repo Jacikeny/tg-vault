@@ -16,6 +16,8 @@ test('share UI is driven by backend capabilities and hides unsupported fields', 
 
 test('storage account deletion previews every server-side task reference and opens the filtered task center when blocked', () => {
     assert.match(api, /previewAccountDeletion/);
+    assert.match(api, /expiresAt: number/);
+    assert.match(api, /confirmationResponse\.status === 401 \|\| confirmationResponse\.status === 428/);
     assert.match(settings, /impact\.fileCount/);
     assert.match(settings, /impact\.folderCount/);
     assert.match(settings, /activeLeaseCount/);
