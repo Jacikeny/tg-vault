@@ -1,26 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if ! command -v docker >/dev/null 2>&1; then
-  echo "未找到 Docker。请先按 https://docs.docker.com/engine/install/ 安装 Docker Engine 与 Compose 插件。" >&2
-  exit 1
-fi
-
-if ! command -v openssl >/dev/null 2>&1; then
-  echo "未找到 openssl；无法安全生成数据库和应用密钥。" >&2
-  exit 1
-fi
-
-if ! command -v python3 >/dev/null 2>&1; then
-  echo "未找到 python3；安装向导无法校验 URL 或安全更新 .env。" >&2
-  exit 1
-fi
-
-if [[ ! -f docker-compose.yml ]]; then
-  echo "请从包含 docker-compose.yml 的项目目录运行 deploy/install.sh。" >&2
-  exit 1
-fi
-
 NON_INTERACTIVE=false
 case "${1:-}" in
   "") ;;
@@ -29,8 +9,8 @@ case "${1:-}" in
     cat <<'EOF'
 用法：./deploy/install.sh [--non-interactive]
 
-默认在终端中交互询问 Web 前端 URL 和后端 API URL。
---non-interactive  从现有 .env 或同名环境变量读取配置，不等待输入。
+默认先检测服务器环境；缺少组件时由用户选择自动补全、查看提示或退出，随后交互询问 Web 前端 URL 和后端 API URL。
+--non-interactive  只检测环境，不自动安装；从现有 .env 或同名环境变量读取配置，不等待输入。
 EOF
     exit 0
     ;;
@@ -44,6 +24,136 @@ if [[ "$NON_INTERACTIVE" == false && ! -t 0 ]]; then
   echo "当前没有交互式终端；请在终端中运行，或使用 --non-interactive。" >&2
   exit 2
 fi
+
+detect_package_manager() {
+  if command -v apt-get >/dev/null 2>&1; then
+    printf 'apt'
+  elif command -v dnf >/dev/null 2>&1; then
+    printf 'dnf'
+  elif command -v yum >/dev/null 2>&1; then
+    printf 'yum'
+  else
+    printf 'unsupported'
+  fi
+}
+
+run_privileged() {
+  if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+    "$@"
+  elif command -v sudo >/dev/null 2>&1; then
+    sudo "$@"
+  else
+    echo "需要管理员权限，但当前不是 root 且未找到 sudo。" >&2
+    return 1
+  fi
+}
+
+install_missing_packages() {
+  local manager="$1"
+  shift
+  case "$manager" in
+    apt)
+      run_privileged apt-get update
+      run_privileged apt-get install -y "$@"
+      ;;
+    dnf) run_privileged dnf install -y "$@" ;;
+    yum) run_privileged yum install -y "$@" ;;
+    *) return 1 ;;
+  esac
+}
+
+check_environment() {
+  local missing=()
+  command -v docker >/dev/null 2>&1 || missing+=(docker)
+  if command -v docker >/dev/null 2>&1 && ! docker compose version >/dev/null 2>&1; then
+    missing+=(compose)
+  fi
+  command -v python3 >/dev/null 2>&1 || missing+=(python3)
+  command -v git >/dev/null 2>&1 || missing+=(git)
+
+  echo "服务器环境检测"
+  printf '  %-24s %s\n' "Docker Engine" "$([[ ! " ${missing[*]} " =~ " docker " ]] && echo '✓ 已安装' || echo '✗ 缺失')"
+  printf '  %-24s %s\n' "Docker Compose 插件" "$([[ ! " ${missing[*]} " =~ " compose " ]] && echo '✓ 已安装' || echo '✗ 缺失')"
+  printf '  %-24s %s\n' "Python 3" "$([[ ! " ${missing[*]} " =~ " python3 " ]] && echo '✓ 已安装' || echo '✗ 缺失')"
+  printf '  %-24s %s\n' "Git" "$([[ ! " ${missing[*]} " =~ " git " ]] && echo '✓ 已安装' || echo '✗ 缺失')"
+
+  if [[ ${#missing[@]} -eq 0 ]]; then
+    echo "环境检测通过。"
+    return 0
+  fi
+
+  echo
+  echo "缺少必需环境：${missing[*]}"
+  if [[ "$NON_INTERACTIVE" == true ]]; then
+    echo "非交互模式不会自动修改服务器环境；请先安装缺失项后重试。" >&2
+    exit 1
+  fi
+
+  local manager choice
+  manager="$(detect_package_manager)"
+  if [[ "$manager" == unsupported ]]; then
+    echo "未识别受支持的包管理器（apt/dnf/yum），请手动安装缺失项后重试。" >&2
+    exit 1
+  fi
+
+  echo "请选择处理方式："
+  echo "  1) 自动安装缺失环境（推荐）"
+  echo "  2) 显示手动处理提示并退出"
+  echo "  q) 退出"
+  while true; do
+    printf '> '
+    IFS= read -r choice
+    case "${choice,,}" in
+      1|"") break ;;
+      2)
+        echo "请安装 Docker Engine、Docker Compose 插件、Python 3 和 Git 中的缺失项后重新运行。"
+        exit 0
+        ;;
+      q) echo "已退出，未修改服务器环境。"; exit 0 ;;
+      *) echo "请输入 1、2 或 q。" >&2 ;;
+    esac
+  done
+
+  local packages=()
+  for item in "${missing[@]}"; do
+    case "$manager:$item" in
+      apt:docker) packages+=(docker.io) ;;
+      apt:compose) packages+=(docker-compose-plugin) ;;
+      apt:python3) packages+=(python3) ;;
+      apt:git) packages+=(git) ;;
+      dnf:docker|yum:docker) packages+=(docker) ;;
+      dnf:compose|yum:compose) packages+=(docker-compose-plugin) ;;
+      dnf:python3|yum:python3) packages+=(python3) ;;
+      dnf:git|yum:git) packages+=(git) ;;
+    esac
+  done
+  install_missing_packages "$manager" "${packages[@]}"
+
+  if [[ "${INSTALL_TEST_SKIP_ENV_RECHECK:-false}" == true ]]; then
+    echo "测试模式：已记录缺失环境安装命令。"
+    exit 1
+  fi
+
+  local still_missing=()
+  command -v docker >/dev/null 2>&1 || still_missing+=(docker)
+  if command -v docker >/dev/null 2>&1 && ! docker compose version >/dev/null 2>&1; then
+    still_missing+=(compose)
+  fi
+  command -v python3 >/dev/null 2>&1 || still_missing+=(python3)
+  command -v git >/dev/null 2>&1 || still_missing+=(git)
+  if [[ ${#still_missing[@]} -gt 0 ]]; then
+    echo "自动安装后仍缺少：${still_missing[*]}。请按系统提示完成 Docker 官方安装后重试。" >&2
+    exit 1
+  fi
+  echo "缺失环境已补全。"
+}
+
+if [[ ! -f docker-compose.yml ]]; then
+  echo "请从包含 docker-compose.yml 的项目目录运行 deploy/install.sh。" >&2
+  exit 1
+fi
+
+check_environment
 
 normalize_origin() {
   python3 - "$1" <<'PY'
@@ -146,7 +256,11 @@ PY
 ensure_generated_secret() {
   local key="$1"
   if [[ -z "$(read_env "$key")" ]]; then
-    upsert_env "$key" "$(openssl rand -hex 32)"
+    upsert_env "$key" "$(python3 - <<'PY'
+import secrets
+print(secrets.token_hex(32))
+PY
+)"
   fi
 }
 

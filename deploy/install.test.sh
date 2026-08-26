@@ -25,13 +25,12 @@ make_fixture() {
 
   cat > "$FIXTURE/fake-bin/docker" <<'SH'
 #!/usr/bin/env bash
+if [[ "${1:-}" == "compose" && "${2:-}" == "version" ]]; then
+  exit 0
+fi
 printf '%s\n' "$*" >> "$INSTALL_TEST_DOCKER_LOG"
 SH
-  cat > "$FIXTURE/fake-bin/openssl" <<'SH'
-#!/usr/bin/env bash
-printf '%064d\n' 0
-SH
-  chmod +x "$FIXTURE/fake-bin/docker" "$FIXTURE/fake-bin/openssl" "$FIXTURE/deploy/install.sh"
+  chmod +x "$FIXTURE/fake-bin/docker" "$FIXTURE/deploy/install.sh"
 }
 
 run_in_tty() {
@@ -109,16 +108,71 @@ EOF
   assert_contains "$FIXTURE/output.log" '直接按 Enter 保留当前值'
 }
 
+test_environment_check_offers_to_install_missing_tools() {
+  make_fixture
+  cat > "$FIXTURE/fake-bin/docker" <<'SH'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "compose" && "${2:-}" == "version" ]]; then
+  exit 1
+fi
+printf '%s\n' "$*" >> "$INSTALL_TEST_DOCKER_LOG"
+SH
+  cat > "$FIXTURE/fake-bin/apt-get" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$INSTALL_TEST_PACKAGE_LOG"
+SH
+  chmod +x "$FIXTURE/fake-bin/docker" "$FIXTURE/fake-bin/apt-get"
+  set +e
+  printf '1\n' | script -qec \
+    "cd '$FIXTURE' && env PATH='$FIXTURE/fake-bin:$PATH' INSTALL_TEST_SKIP_ENV_RECHECK=true INSTALL_TEST_DOCKER_LOG='$FIXTURE/docker.log' INSTALL_TEST_PACKAGE_LOG='$FIXTURE/packages.log' bash deploy/install.sh" \
+    /dev/null > "$FIXTURE/output.log" 2>&1
+  status=$?
+  set -e
+  [[ $status -ne 0 ]] || fail "模拟缺失 Compose 时应在安装后重新检测并失败"
+  assert_contains "$FIXTURE/output.log" '服务器环境检测'
+  assert_contains "$FIXTURE/output.log" 'Docker Compose 插件'
+  assert_contains "$FIXTURE/output.log" '请选择处理方式'
+  assert_contains "$FIXTURE/packages.log" 'update'
+  assert_contains "$FIXTURE/packages.log" 'install -y docker-compose-plugin'
+}
+
+test_secret_generation_does_not_require_openssl() {
+  make_fixture
+  hidden="$FIXTURE/hidden-bin"
+  mkdir -p "$hidden"
+  for cmd in python3 git node mktemp chmod mv bash dirname id touch; do
+    target="$(command -v "$cmd")"
+    ln -s "$target" "$hidden/$cmd"
+  done
+  ln -s "$FIXTURE/fake-bin/docker" "$hidden/docker"
+  (
+    cd "$FIXTURE"
+    env PATH="$hidden" \
+      INSTALL_TEST_DOCKER_LOG="$FIXTURE/docker.log" \
+      CORS_ORIGIN='https://cloud.example.net' \
+      VITE_API_URL='https://api.example.net' \
+      bash deploy/install.sh --non-interactive > "$FIXTURE/output.log" 2>&1
+  )
+  assert_contains "$FIXTURE/.env" 'DB_PASSWORD='
+  if grep -Fq '未找到 openssl' "$FIXTURE/output.log"; then
+    fail "安装脚本不应再要求 openssl"
+  fi
+}
+
 case "$SCENARIO" in
   interactive-new) test_interactive_new_install_collects_urls_and_starts_compose ;;
   quit) test_quit_does_not_create_or_start ;;
   non-interactive) test_non_interactive_uses_environment_without_waiting ;;
   existing) test_existing_install_keeps_urls_on_enter ;;
+  environment) test_environment_check_offers_to_install_missing_tools ;;
+  no-openssl) test_secret_generation_does_not_require_openssl ;;
   all)
     test_interactive_new_install_collects_urls_and_starts_compose
     test_quit_does_not_create_or_start
     test_non_interactive_uses_environment_without_waiting
     test_existing_install_keeps_urls_on_enter
+    test_environment_check_offers_to_install_missing_tools
+    test_secret_generation_does_not_require_openssl
     ;;
   *) fail "未知测试场景：$SCENARIO" ;;
 esac
