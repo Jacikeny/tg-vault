@@ -5,7 +5,7 @@ import { query } from '../db/index.js';
 import { requireAuth, getAuthToken } from './auth.js';
 import { webDestructiveConfirmationStore } from '../services/webDestructiveConfirmation.js';
 import { listTransferTasks, getTransferTask, updateTransferTask } from '../services/transferTasks.js';
-import { cancelYtDlpTask, retryYtDlpTask } from '../services/ytDlpDownload.js';
+import { cancelYtDlpTask, createYtDlpTask, retryYtDlpTask } from '../services/ytDlpDownload.js';
 import { cancelDownloadTaskGroup, retryFailedDownloadTasks, cancelChannelExecutionGroup } from '../services/telegramUpload.js';
 import { cancelTelegramBackgroundJob, retryTelegramBackgroundJob } from '../services/telegramChannelJobs.js';
 import { filterDismissedTasks, isTaskDismissible, loadTaskCenterDismissals, saveTaskCenterDismissals } from '../services/taskCenterDismissals.js';
@@ -23,6 +23,7 @@ async function collectUnifiedTasks(limit: number): Promise<any[]> {
                         COUNT(i.id)::int AS item_count,
                         COUNT(i.id) FILTER (WHERE i.status = 'success')::int AS completed_items,
                         COUNT(i.id) FILTER (WHERE i.status = 'failed')::int AS failed_items,
+                        COUNT(i.id) FILTER (WHERE i.status = 'skipped')::int AS skipped_count_items,
                         COUNT(i.id) FILTER (WHERE i.status IN ('pending','downloading'))::int AS active_items,
                         COALESCE(SUM(i.total_size), 0)::text AS total_bytes
                  FROM telegram_background_jobs j
@@ -167,6 +168,24 @@ router.get('/', requireAuth, async (req: Request, res: Response) => {
     } catch (error) {
         console.error('获取统一任务列表失败:', error);
         res.status(500).json({ error: '获取任务列表失败' });
+    }
+});
+
+router.post('/ytdlp', requireAuth, async (req: Request, res: Response) => {
+    try {
+        const url = typeof req.body?.url === 'string' ? req.body.url.trim() : '';
+        if (!url) return res.status(400).json({ error: '请输入要下载的媒体链接' });
+        if (url.length > 2_000) return res.status(400).json({ error: '链接长度超过限制' });
+        const format = req.body?.format === 'audio' ? 'audio' : 'best';
+        const task = await createYtDlpTask({ url, format, folder: 'ytdlp' });
+        return res.status(202).json({
+            success: true,
+            task: mapTransferTask(task, new Map()),
+        });
+    } catch (error) {
+        const message = error instanceof Error ? error.message : '创建 yt-dlp 任务失败';
+        const status = /链接|URL|地址|协议|公网|内网|本机|保留|播放列表|请输入/.test(message) ? 400 : /冷却|不可写|配额/.test(message) ? 409 : 500;
+        return res.status(status).json({ error: message });
     }
 });
 

@@ -13,7 +13,7 @@ test('Bot startup errors are observable and required mode blocks readiness', () 
     assert.match(bot, /markTelegramBotReady\(\)/);
     assert.match(bot, /markTelegramBotError\(status/);
     assert.match(bot, /throw error/);
-    assert.match(app, /TELEGRAM_REQUIRED/);
+    assert.match(app, /telegramConfig\.required/);
     assert.match(app, /telegramBotBlocksReadiness\(bot\)/);
     assert.match(app, /components: \{ telegramBot: bot \}/);
 });
@@ -24,7 +24,8 @@ test('optional Bot failure remains visible as degraded in Web settings and readi
     assert.match(storage, /telegramBotStatus: getTelegramBotStatus\(\)/);
 });
 
-test('deployment contract exposes TELEGRAM_REQUIRED with safe compose default and production recommendation', () => {
+test('deployment contract exposes TELEGRAM_REQUIRED with safe defaults and Web override guidance', () => {
     assert.match(compose, /TELEGRAM_REQUIRED=\$\{TELEGRAM_REQUIRED:-false\}/);
-    assert.match(envExample, /TELEGRAM_REQUIRED=true/);
+    assert.match(envExample, /TELEGRAM_REQUIRED=false/);
+    assert.match(envExample, /网页管理的 Bot 配置会保存对应 required 状态/);
 });

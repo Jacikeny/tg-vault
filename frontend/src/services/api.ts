@@ -148,6 +148,11 @@ export interface UnifiedTaskList {
     generatedAt: string;
 }
 
+export interface CreateYtDlpTaskResult {
+    success: true;
+    task: UnifiedTask;
+}
+
 export interface TaskDismissalPreview {
     confirmationToken: string;
     snapshotId: string;
@@ -181,6 +186,28 @@ export interface StorageAccount {
     last_probe_error: string | null;
     last_probed_at: string | null;
 }
+
+export interface TelegramBotPublicConfig {
+    configured: boolean;
+    enabled: boolean;
+    required: boolean;
+    pinConfigured: boolean;
+    source: 'web' | 'environment' | 'none';
+    status: string;
+    bot: { username: string | null; displayName: string | null } | null;
+    lastConnectedAt: string | null;
+    lastError: string | null;
+    action: string | null;
+}
+
+export interface TelegramUserAccountStatus {
+    configured: boolean;
+    enabled: boolean;
+    connected: boolean;
+    account: { userId: string; username: string | null; displayName: string | null } | null;
+}
+
+export interface TelegramUserLoginComplete { step: 'complete'; account: NonNullable<TelegramUserAccountStatus['account']> }
 
 export interface StorageConfig {
     provider: string;
@@ -254,6 +281,7 @@ export interface AdvancedTaskSettings {
     telegramFileConcurrency: number;
     duplicateMode: 'copy' | 'skip';
     autoCleanupOrphans: boolean;
+    telegramDownloadHistoryPolicy: 'errors_only' | 'all';
     highRisk: { telegramDownloadWorkers: boolean; telegramFileConcurrency: boolean };
 }
 
@@ -460,6 +488,19 @@ class FileAPI {
             throw new Error(payload.error || '取消上传失败');
         }
         return ['cancelled', 'terminal'].includes(payload.status) ? payload.status : 'terminal';
+    }
+
+    async createYtDlpTask(input: { url: string; format: 'best' | 'audio' }): Promise<CreateYtDlpTaskResult> {
+        const response = await fetch(`${API_BASE}/api/tasks/ytdlp`, {
+            credentials: 'include',
+            method: 'POST',
+            headers: getHeaders({ 'Content-Type': 'application/json' }),
+            body: JSON.stringify(input),
+        });
+        if (response.status === 401 || response.status === 428) throw new Error('UNAUTHORIZED');
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(payload.error || '创建 yt-dlp 任务失败');
+        return payload;
     }
 
     async getTasks(filters: { source?: string; status?: string; limit?: number } = {}): Promise<UnifiedTaskList> {
@@ -870,7 +911,7 @@ class FileAPI {
         return response.json();
     }
 
-    async updateAdvancedTaskSetting(patch: Partial<Pick<AdvancedTaskSettings, 'telegramDownloadWorkers' | 'telegramFileConcurrency' | 'duplicateMode' | 'autoCleanupOrphans'>>, confirmed = false): Promise<void> {
+    async updateAdvancedTaskSetting(patch: Partial<Pick<AdvancedTaskSettings, 'telegramDownloadWorkers' | 'telegramFileConcurrency' | 'duplicateMode' | 'autoCleanupOrphans' | 'telegramDownloadHistoryPolicy'>>, confirmed = false): Promise<{ success: boolean; deletedCount?: number }> {
         const response = await fetch(`${API_BASE}/api/storage/config/advanced-tasks`, {
             credentials: 'include', method: 'PATCH',
             headers: getHeaders({ 'Content-Type': 'application/json' }),
@@ -882,6 +923,7 @@ class FileAPI {
             error.code = payload.code;
             throw error;
         }
+        return payload;
     }
 
     async getStorageStats(): Promise<StorageStats> {
@@ -919,6 +961,81 @@ class FileAPI {
             error.code = payload.code;
             throw error;
         }
+        return payload;
+    }
+
+    async getTelegramBotConfig(): Promise<TelegramBotPublicConfig> {
+        const response = await fetch(`${API_BASE}/api/storage/config/telegram-bot`, { credentials: 'include', headers: getHeaders() });
+        if (response.status === 401) throw new Error('UNAUTHORIZED');
+        if (!response.ok) throw new Error('获取 Telegram Bot 配置失败');
+        return response.json();
+    }
+
+    async testTelegramBotConfig(input: { botToken: string; apiId: string; apiHash: string }): Promise<{ success: boolean; bot: { username: string | null; displayName: string | null } }> {
+        return this.telegramBotConfigRequest('/api/storage/config/telegram-bot/test', 'POST', input);
+    }
+
+    async saveTelegramBotConfig(input: { botToken: string; apiId: string; apiHash: string; enabled: boolean; required: boolean; telegramPin?: string }): Promise<{ success: boolean; config: TelegramBotPublicConfig }> {
+        return this.telegramBotConfigRequest('/api/storage/config/telegram-bot', 'PUT', input);
+    }
+
+    async migrateTelegramBotConfig(input: { telegramPin?: string } = {}): Promise<{ success: boolean; config: TelegramBotPublicConfig }> {
+        return this.telegramBotConfigRequest('/api/storage/config/telegram-bot/migrate', 'POST', input);
+    }
+
+    async changeTelegramBotPin(input: { verificationMethod: 'current_pin' | 'web_password'; verificationSecret: string; newPin: string }): Promise<{ success: boolean; message: string }> {
+        return this.telegramBotConfigRequest('/api/storage/config/telegram-bot/pin', 'PUT', input);
+    }
+
+    async disableTelegramBot(): Promise<{ success: boolean; config: TelegramBotPublicConfig }> {
+        return this.telegramBotConfigRequest('/api/storage/config/telegram-bot/disable', 'POST', {});
+    }
+
+    async deleteTelegramBotConfig(): Promise<{ success: boolean; config: TelegramBotPublicConfig }> {
+        return this.telegramBotConfigRequest('/api/storage/config/telegram-bot', 'DELETE', { confirmed: true });
+    }
+
+    private async telegramBotConfigRequest(path: string, method: string, body: unknown): Promise<any> {
+        const response = await fetch(`${API_BASE}${path}`, {
+            credentials: 'include', method,
+            headers: getHeaders({ 'Content-Type': 'application/json' }),
+            body: JSON.stringify(body),
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (response.status === 401) throw new Error('UNAUTHORIZED');
+        if (!response.ok) throw new Error(payload.error || 'Telegram Bot 配置操作失败');
+        return payload;
+    }
+
+    async getTelegramUserAccount(): Promise<TelegramUserAccountStatus> {
+        return this.telegramUserRequest('/api/storage/config/telegram-user', 'GET');
+    }
+
+    async startTelegramUserLogin(phone: string): Promise<{ flowId: string; delivery: 'app' | 'sms'; expiresAt: string }> {
+        return this.telegramUserRequest('/api/storage/config/telegram-user/login/phone', 'POST', { phone });
+    }
+
+    async submitTelegramUserCode(flowId: string, code: string): Promise<{ step: 'password_required' } | TelegramUserLoginComplete> {
+        return this.telegramUserRequest('/api/storage/config/telegram-user/login/code', 'POST', { flowId, code });
+    }
+
+    async submitTelegramUserPassword(flowId: string, password: string): Promise<TelegramUserLoginComplete> {
+        return this.telegramUserRequest('/api/storage/config/telegram-user/login/password', 'POST', { flowId, password });
+    }
+
+    async disableTelegramUserAccount(): Promise<{ success: boolean; enabled: false }> {
+        return this.telegramUserRequest('/api/storage/config/telegram-user/disable', 'POST');
+    }
+
+    async unlinkTelegramUserAccount(): Promise<{ success: boolean }> {
+        return this.telegramUserRequest('/api/storage/config/telegram-user', 'DELETE');
+    }
+
+    private async telegramUserRequest(path: string, method: string, body?: unknown): Promise<any> {
+        const response = await fetch(`${API_BASE}${path}`, { credentials: 'include', method, headers: getHeaders({ 'Content-Type': 'application/json' }), body: body === undefined ? undefined : JSON.stringify(body) });
+        const payload = await response.json().catch(() => ({}));
+        if (response.status === 401) throw new Error('UNAUTHORIZED');
+        if (!response.ok) throw new Error(payload.error || 'Telegram 用户账号操作失败');
         return payload;
     }
 

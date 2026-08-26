@@ -22,6 +22,7 @@ import {
     type TelegramJobProgressSummary,
     startTelegramJobRecoveryWorker,
     startTelegramSubscriptionWorker,
+    stopTelegramBackgroundWorkers,
     subscribeTelegramChannel,
     unsubscribeTelegramChannel,
     updateTelegramSubscriptionFolder,
@@ -54,6 +55,7 @@ import {
     markTelegramBotStarting,
     resetTelegramBotStatus,
 } from './telegramBotStatus.js';
+import { getEffectiveTelegramBotConfig, setTelegramBotIdentity, type TelegramBotCredentials } from './telegramBotConfig.js';
 
 function buildBotStartKeyboard(): Api.ReplyInlineMarkup {
     return new Api.ReplyInlineMarkup({
@@ -144,6 +146,8 @@ const SESSION_FILE = process.env.TELEGRAM_SESSION_FILE || './data/telegram_sessi
 
 // GramJS Client
 let client: TelegramClient | null = null;
+let digestTimer: NodeJS.Timeout | null = null;
+let botLifecycle: Promise<void> = Promise.resolve();
 
 type TelegramWizardKind = 'tg_sub_manage' | 'tg_download' | 'tg_date' | 'tg_tag';
 type TelegramWizardStep = 'mode' | 'source' | 'path' | 'comments' | 'start_date' | 'end_date' | 'tag' | 'confirm';
@@ -1494,15 +1498,16 @@ async function handleTelegramSubscriptionCallback(update: Api.UpdateBotCallbackQ
     }
 }
 
-export async function initTelegramBot(): Promise<void> {
-    const apiId = parseInt(process.env.TELEGRAM_API_ID || '0');
-    const apiHash = process.env.TELEGRAM_API_HASH || '';
-    const botToken = process.env.TELEGRAM_BOT_TOKEN || '';
+export async function initTelegramBot(credentialsOverride?: TelegramBotCredentials): Promise<void> {
+    const effective = credentialsOverride ? null : await getEffectiveTelegramBotConfig();
+    const credentials = credentialsOverride || effective?.credentials || null;
+    const apiId = credentials?.apiId || 0;
+    const apiHash = credentials?.apiHash || '';
+    const botToken = credentials?.botToken || '';
 
-    if (!apiId || !apiHash || !botToken) {
+    if (!credentials || (!credentialsOverride && effective && !effective.enabled)) {
         resetTelegramBotStatus(false);
-        console.log('⚠️ 未配置 Telegram API 凭证，Bot 未启动');
-        console.log('   需要设置: TELEGRAM_API_ID, TELEGRAM_API_HASH, TELEGRAM_BOT_TOKEN');
+        console.log('⚠️ Telegram Bot 未配置或已停用');
         return;
     }
     markTelegramBotStarting();
@@ -1557,7 +1562,7 @@ export async function initTelegramBot(): Promise<void> {
                 send: async (targetChat, message) => { await client!.sendMessage(targetChat, { message }); },
             });
         });
-        const digestTimer = setInterval(() => {
+        digestTimer = setInterval(() => {
             if (!client) return;
             void listTelegramNotificationDigestScopes().then(scopes => Promise.all(scopes.map(scope =>
                 flushTelegramNotificationDigest(scope.userId, scope.chatId, {
@@ -2356,6 +2361,11 @@ export async function initTelegramBot(): Promise<void> {
         }, new Raw({}));
 
         markTelegramBotReady();
+        const me: any = await client.getMe();
+        setTelegramBotIdentity({
+            username: me?.username ? String(me.username) : null,
+            displayName: [me?.firstName, me?.lastName].filter(Boolean).join(' ') || null,
+        });
         console.log('🤖 Telegram Bot 启动成功! (最大 2GB，账号级下载器不受此限制)');
 
     } catch (error) {
@@ -2365,6 +2375,46 @@ export async function initTelegramBot(): Promise<void> {
         console.error('🤖 Telegram Bot 启动失败:', error);
         throw error;
     }
+}
+
+async function stopTelegramBotInternal(): Promise<void> {
+    const activeClient = client;
+    if (digestTimer) clearInterval(digestTimer);
+    digestTimer = null;
+    setYtDlpNotifier(null);
+    await stopTelegramBackgroundWorkers();
+    client = null;
+    if (activeClient) {
+        await activeClient.disconnect().catch(() => undefined);
+        await activeClient.destroy().catch(() => undefined);
+    }
+    resetTelegramBotStatus(false);
+}
+
+export interface TelegramBotLifecycleControls {
+    stop(): Promise<void>;
+    restart(credentialsOverride?: TelegramBotCredentials): Promise<void>;
+}
+
+export function withTelegramBotLifecycle<T>(operation: (controls: TelegramBotLifecycleControls) => Promise<T>): Promise<T> {
+    const controls: TelegramBotLifecycleControls = {
+        stop: () => stopTelegramBotInternal(),
+        restart: async (credentialsOverride?: TelegramBotCredentials) => {
+            await stopTelegramBotInternal();
+            await initTelegramBot(credentialsOverride);
+        },
+    };
+    const result = botLifecycle.catch(() => undefined).then(() => operation(controls));
+    botLifecycle = result.then(() => undefined, () => undefined);
+    return result;
+}
+
+export async function stopTelegramBot(): Promise<void> {
+    return withTelegramBotLifecycle(controls => controls.stop());
+}
+
+export async function restartTelegramBot(credentialsOverride?: TelegramBotCredentials): Promise<void> {
+    return withTelegramBotLifecycle(controls => controls.restart(credentialsOverride));
 }
 
 // 发送安全通知给所有已认证用户
@@ -2386,4 +2436,4 @@ export async function sendSecurityNotification(message: string): Promise<void> {
     }
 }
 
-export default { initTelegramBot, sendSecurityNotification };
+export default { initTelegramBot, restartTelegramBot, stopTelegramBot, sendSecurityNotification };

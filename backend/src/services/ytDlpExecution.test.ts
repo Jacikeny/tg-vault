@@ -84,7 +84,7 @@ test('restart reconciliation completes only an exact object and index match', as
 
 test('production yt-dlp admission locks its account before task persistence', () => {
     const source = fs.readFileSync(new URL('./ytDlpDownload.ts', import.meta.url), 'utf8');
-    const block = source.slice(source.indexOf('export async function handleYtDlpCommand'));
+    const block = source.slice(source.indexOf('export async function createYtDlpTask'), source.indexOf('export async function handleYtDlpCommand'));
     assert.match(block, /lockStorageAccountForUse/);
     assert.match(block, /ytdlp_admission/);
     assert.ok(block.indexOf('lockStorageAccountForUse') < block.indexOf('createTransferTask'));

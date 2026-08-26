@@ -6,7 +6,7 @@ import { HardDrive, ChevronRight, Palette, Globe, Cloud, Server, Database, Check
 import { Button } from "../ui/Button";
 import { LanguageToggle } from "../ui/LanguageToggle";
 import { cn } from "../../lib/utils";
-import { fileApi, type AdvancedTaskSettings, type StorageAccount, type StorageConfig, type StorageStats } from "../../services/api";
+import { fileApi, type AdvancedTaskSettings, type StorageAccount, type StorageConfig, type StorageStats, type TelegramBotPublicConfig } from "../../services/api";
 import { isTrustedOAuthPopupMessage } from "../../services/oauthPopupMessage";
 import { authService } from "../../services/auth";
 import { SETTINGS_SECTIONS, type SettingsSectionId } from "./settingsSections";
@@ -42,28 +42,30 @@ interface SettingsRowProps {
     action?: React.ReactNode;
     onClick?: () => void;
     description?: string;
+    stackActionOnMobile?: boolean;
 }
 
-const SettingsRow = ({ icon: Icon, label, value, action, onClick, description }: SettingsRowProps) => (
+const SettingsRow = ({ icon: Icon, label, value, action, onClick, description, stackActionOnMobile = false }: SettingsRowProps) => (
     <div
         className={cn(
-            "flex items-center justify-between p-4 border-b border-border/50 last:border-0 transition-colors",
+            "flex justify-between gap-4 p-4 border-b border-border/50 last:border-0 transition-colors",
+            stackActionOnMobile ? "flex-col items-stretch sm:flex-row sm:items-center" : "items-center",
             onClick ? "cursor-pointer hover:bg-muted/30" : ""
         )}
         onClick={onClick}
     >
-        <div className="flex flex-col gap-1">
+        <div className="min-w-0 flex-1">
             <div className="flex items-center gap-3">
-                <div className="p-2 rounded-lg bg-muted text-muted-foreground">
+                <div className="shrink-0 p-2 rounded-lg bg-muted text-muted-foreground">
                     <Icon className="h-4 w-4" />
                 </div>
                 <span className="text-sm font-medium">{label}</span>
             </div>
-            {description && <p className="text-xs text-muted-foreground pl-9">{description}</p>}
+            {description && <p className="mt-1.5 text-xs leading-5 text-muted-foreground sm:pl-11">{description}</p>}
         </div>
-        <div className="flex items-center gap-3">
+        <div className={cn("flex items-center gap-3", stackActionOnMobile && "w-full pl-11 sm:w-auto sm:shrink-0 sm:pl-0")}>
             {value && <span className="text-sm text-muted-foreground">{value}</span>}
-            {action && <div>{action}</div>}
+            {action && <div className={cn(stackActionOnMobile && "w-full sm:w-auto")}>{action}</div>}
             {!action && onClick && <ChevronRight className="h-4 w-4 text-muted-foreground/50" />}
         </div>
     </div>
@@ -80,6 +82,8 @@ interface ActionDialogState {
     message: string;
     inputType?: 'text' | 'password';
     tone?: 'default' | 'danger';
+    dangerDescription?: string;
+    cancelLabel?: string;
     confirmLabel?: string;
     resolve?: (value: boolean | string | null) => void;
 }
@@ -111,8 +115,9 @@ const StorageProbeStatus = ({ account, busy, feedback, onProbe }: { account: Sto
     );
 };
 
-const ActionNotice = ({ state, onClose }: { state: ActionNoticeState; onClose: () => void }) => (
-    <motion.div
+const ActionNotice = ({ state, onClose }: { state: ActionNoticeState; onClose: () => void }) => {
+    return createPortal(
+        <motion.div
         initial={{ opacity: 0, y: -12, scale: 0.98 }}
         animate={{ opacity: 1, y: 0, scale: 1 }}
         exit={{ opacity: 0, y: -12, scale: 0.98 }}
@@ -135,8 +140,10 @@ const ActionNotice = ({ state, onClose }: { state: ActionNoticeState; onClose: (
             </div>
             <button type="button" className="rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40" onClick={onClose} aria-label="关闭提示" title="关闭提示"><X className="h-4 w-4" /></button>
         </div>
-    </motion.div>
-);
+        </motion.div>,
+        document.body,
+    );
+};
 
 const ActionDialog = ({ state, input, onInput, onCancel, onConfirm }: {
     state: ActionDialogState;
@@ -162,7 +169,7 @@ const ActionDialog = ({ state, input, onInput, onCancel, onConfirm }: {
                     </div>
                     <div className="min-w-0 flex-1">
                         <h3 id="settings-action-title" className="text-base font-semibold sm:text-lg">{state.title}</h3>
-                        {danger && <p className="mt-1 text-xs font-medium text-destructive">此操作会降低默认网络安全保护</p>}
+                        {danger && <p className="mt-1 text-xs font-medium text-destructive">{state.dangerDescription || '此操作不可撤销，请谨慎确认'}</p>}
                     </div>
                     <button type="button" onClick={onCancel} className="rounded-lg p-1.5 text-muted-foreground transition-colors hover:bg-background/70 hover:text-foreground" aria-label="关闭确认弹窗"><X className="h-4 w-4" /></button>
                 </div>
@@ -180,7 +187,7 @@ const ActionDialog = ({ state, input, onInput, onCancel, onConfirm }: {
                     )}
                 </div>
                 <div className="flex flex-col-reverse gap-2 border-t border-border bg-muted/20 px-5 py-4 sm:flex-row sm:justify-end sm:px-6">
-                    <Button variant="outline" onClick={onCancel}>保持关闭</Button>
+                    <Button variant="outline" onClick={onCancel}>{state.cancelLabel || '取消'}</Button>
                     <Button variant={danger ? 'destructive' : 'default'} onClick={onConfirm}>{state.confirmLabel || '确认'}</Button>
                 </div>
             </motion.div>
@@ -211,7 +218,7 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
         setActionNotice({ title, message, tone: errorTone ? 'error' : 'success' });
         return Promise.resolve();
     };
-    const requestConfirmation = (message: string, title = '请确认', options?: { tone?: 'default' | 'danger'; confirmLabel?: string }) => new Promise<boolean>(resolve => {
+    const requestConfirmation = (message: string, title = '请确认', options?: { tone?: 'default' | 'danger'; dangerDescription?: string; cancelLabel?: string; confirmLabel?: string }) => new Promise<boolean>(resolve => {
         setActionDialog({ mode: 'confirm', title, message, ...options, resolve: value => resolve(value === true) });
     });
     const requestInput = (message: string, title = '请输入', inputType: 'text' | 'password' = 'text') => new Promise<string | null>(resolve => {
@@ -286,8 +293,27 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
     const [isChangingPassword, setIsChangingPassword] = useState(false);
     const [passwordError, setPasswordError] = useState<string | null>(null);
 
-    // Telegram User Download State
+    // Telegram Bot and User Download State
+    const [telegramBotConfig, setTelegramBotConfig] = useState<TelegramBotPublicConfig | null>(null);
+    const [telegramBotToken, setTelegramBotToken] = useState("");
+    const [telegramApiId, setTelegramApiId] = useState("");
+    const [telegramApiHash, setTelegramApiHash] = useState("");
+    const [telegramPin, setTelegramPin] = useState("");
+    const [showTelegramBotForm, setShowTelegramBotForm] = useState(false);
+    const [isSavingTelegramBot, setIsSavingTelegramBot] = useState(false);
+    const [showTelegramPinForm, setShowTelegramPinForm] = useState(false);
+    const [telegramPinVerificationMethod, setTelegramPinVerificationMethod] = useState<'current_pin' | 'web_password'>('current_pin');
+    const [telegramPinVerificationSecret, setTelegramPinVerificationSecret] = useState("");
+    const [newTelegramPin, setNewTelegramPin] = useState("");
+    const [confirmNewTelegramPin, setConfirmNewTelegramPin] = useState("");
+    const [isChangingTelegramPin, setIsChangingTelegramPin] = useState(false);
     const [showTelegramUserDownload, setShowTelegramUserDownload] = useState(false);
+    const [telegramUserLoginStep, setTelegramUserLoginStep] = useState<'phone' | 'code' | 'password' | 'complete'>('phone');
+    const [telegramUserPhone, setTelegramUserPhone] = useState('');
+    const [telegramUserCode, setTelegramUserCode] = useState('');
+    const [telegramUserPassword, setTelegramUserPassword] = useState('');
+    const [telegramUserFlowId, setTelegramUserFlowId] = useState('');
+    const [isTelegramUserLoginBusy, setIsTelegramUserLoginBusy] = useState(false);
     const [telegramAllowedUserIdsInput, setTelegramAllowedUserIdsInput] = useState("");
     const [isSavingTelegramAllowedUsers, setIsSavingTelegramAllowedUsers] = useState(false);
     const [cleanupRetentionDays, setCleanupRetentionDays] = useState(7);
@@ -300,15 +326,22 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
         return data;
     };
 
-    const updateAdvancedTask = async (patch: Partial<Pick<AdvancedTaskSettings, 'telegramDownloadWorkers' | 'telegramFileConcurrency' | 'duplicateMode' | 'autoCleanupOrphans'>>) => {
+    const updateAdvancedTask = async (patch: Partial<Pick<AdvancedTaskSettings, 'telegramDownloadWorkers' | 'telegramFileConcurrency' | 'duplicateMode' | 'autoCleanupOrphans' | 'telegramDownloadHistoryPolicy'>>) => {
+        let result: { success: boolean; deletedCount?: number };
         try {
-            await fileApi.updateAdvancedTaskSetting(patch);
+            result = await fileApi.updateAdvancedTaskSetting(patch);
         } catch (error: any) {
             if (error?.code !== 'CONFIRMATION_REQUIRED') throw error;
             if (!(await requestConfirmation('该并发值可能触发 Telegram 限流、断流或账号风控。确认继续吗？', '高并发二次确认'))) return;
-            await fileApi.updateAdvancedTaskSetting(patch, true);
+            result = await fileApi.updateAdvancedTaskSetting(patch, true);
         }
         await reloadAdvancedTasks();
+        if ('telegramDownloadHistoryPolicy' in patch) {
+            const message = patch.telegramDownloadHistoryPolicy === 'errors_only'
+                ? `已改为仅保留错误；同时移除了 ${result.deletedCount || 0} 条已完成的成功/跳过明细。`
+                : '已改为保留全部明细；从现在开始记录完整下载历史。';
+            await showNotice(message);
+        }
     };
 
     const handleCleanupDownloadItems = async () => {
@@ -323,6 +356,120 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
         } finally {
             setIsCleaningDownloadItems(false);
         }
+    };
+
+    const reloadTelegramBotConfig = async () => {
+        const data = await fileApi.getTelegramBotConfig();
+        setTelegramBotConfig(data);
+        return data;
+    };
+
+    const clearTelegramBotInputs = () => {
+        setTelegramBotToken('');
+        setTelegramApiId('');
+        setTelegramApiHash('');
+        setTelegramPin('');
+    };
+
+    const handleCancelTelegramBotEdit = () => {
+        clearTelegramBotInputs();
+        setShowTelegramBotForm(false);
+    };
+
+    const clearTelegramPinChangeInputs = () => {
+        setTelegramPinVerificationSecret('');
+        setNewTelegramPin('');
+        setConfirmNewTelegramPin('');
+    };
+
+    const handleCancelTelegramPinChange = () => {
+        clearTelegramPinChangeInputs();
+        setShowTelegramPinForm(false);
+    };
+
+    const handleChangeTelegramPin = async () => {
+        if (!telegramPinVerificationSecret) {
+            await showNotice(`请输入${telegramPinVerificationMethod === 'current_pin' ? '当前 PIN' : '网页管理员密码'}`, '修改失败');
+            return;
+        }
+        if (!/^\d{4}$/.test(newTelegramPin)) {
+            await showNotice('新 Telegram Bot PIN 必须是 4 位数字', '修改失败');
+            return;
+        }
+        if (newTelegramPin !== confirmNewTelegramPin) {
+            await showNotice('两次输入的新 PIN 不一致', '修改失败');
+            return;
+        }
+        setIsChangingTelegramPin(true);
+        try {
+            const result = await fileApi.changeTelegramBotPin({
+                verificationMethod: telegramPinVerificationMethod,
+                verificationSecret: telegramPinVerificationSecret,
+                newPin: newTelegramPin,
+            });
+            handleCancelTelegramPinChange();
+            await reloadTelegramBotConfig();
+            await showNotice(result.message || 'Telegram Bot PIN 已修改');
+        } catch (error: any) {
+            await showNotice(error.message || '修改 Telegram Bot PIN 失败', '修改失败');
+        } finally {
+            setIsChangingTelegramPin(false);
+        }
+    };
+
+    const handleTestTelegramBot = async () => {
+        setIsSavingTelegramBot(true);
+        try {
+            const result = await fileApi.testTelegramBotConfig({ botToken: telegramBotToken, apiId: telegramApiId, apiHash: telegramApiHash });
+            await showNotice(`连接成功${result.bot.username ? `：@${result.bot.username}` : ''}`);
+        } catch (error: any) {
+            await showNotice(error.message || 'Telegram Bot 凭证测试失败', '测试失败');
+        } finally { setIsSavingTelegramBot(false); }
+    };
+
+    const handleSaveTelegramBot = async () => {
+        if (!telegramBotConfig?.pinConfigured && !/^\d{4}$/.test(telegramPin)) {
+            await showNotice('Telegram Bot PIN 必须是 4 位数字', '保存失败');
+            return;
+        }
+        setIsSavingTelegramBot(true);
+        try {
+            const result = await fileApi.saveTelegramBotConfig({ botToken: telegramBotToken, apiId: telegramApiId, apiHash: telegramApiHash, enabled: true, required: false, telegramPin: telegramBotConfig?.pinConfigured ? undefined : telegramPin });
+            setTelegramBotConfig(result.config);
+            clearTelegramBotInputs();
+            setShowTelegramBotForm(false);
+            await showNotice('Telegram Bot 凭证已安全保存并启用');
+        } catch (error: any) {
+            await showNotice(error.message || '保存 Telegram Bot 配置失败', '保存失败');
+        } finally { setIsSavingTelegramBot(false); }
+    };
+
+    const handleMigrateTelegramBot = async () => {
+        if (!telegramBotConfig?.pinConfigured && !/^\d{4}$/.test(telegramPin)) {
+            await showNotice('迁移前请创建正好 4 位数字的 Telegram Bot PIN', '需要创建 PIN');
+            return;
+        }
+        if (!(await requestConfirmation('将从后端环境变量读取 Telegram Bot 凭证，加密保存到数据库，并切换为网页管理。浏览器不会收到原凭证。确认迁移吗？', '迁移 Telegram Bot 配置'))) return;
+        setIsSavingTelegramBot(true);
+        try {
+            const result = await fileApi.migrateTelegramBotConfig({ telegramPin: telegramBotConfig?.pinConfigured ? undefined : telegramPin });
+            setTelegramBotConfig(result.config);
+            setTelegramPin('');
+            await showNotice('已迁移到网页加密管理；确认运行正常后可从 .env 删除旧凭证');
+        } catch (error: any) { await showNotice(error.message || '迁移失败', '迁移失败'); }
+        finally { setIsSavingTelegramBot(false); }
+    };
+
+    const handleDeleteTelegramBot = async () => {
+        if (!(await requestConfirmation(
+            '删除后 Bot 将立即停止，已保存的 Bot Token、API ID、API Hash 和 Bot session 将被永久删除。\n\nTelegram 允许用户列表会保留；如需再次使用 Bot，必须重新填写完整凭证并建立连接。此操作无法撤销。',
+            '二次确认：删除 Telegram Bot 配置',
+            { tone: 'danger', dangerDescription: '将永久删除凭证和 Bot session，无法撤销', cancelLabel: '取消删除', confirmLabel: '确认永久删除' },
+        ))) return;
+        setIsSavingTelegramBot(true);
+        try { const result = await fileApi.deleteTelegramBotConfig(); setTelegramBotConfig(result.config); clearTelegramBotInputs(); setShowTelegramBotForm(true); await showNotice('Telegram Bot 配置已删除'); }
+        catch (error: any) { await showNotice(error.message || '删除失败', '操作失败'); }
+        finally { setIsSavingTelegramBot(false); }
     };
 
     const handleSaveTelegramAllowedUsers = async () => {
@@ -374,7 +521,7 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
     useEffect(() => {
         const loadConfig = async () => {
             try {
-                await Promise.all([reloadStorageConfig(), reloadAdvancedTasks()]);
+                await Promise.all([reloadStorageConfig(), reloadAdvancedTasks(), reloadTelegramBotConfig()]);
             } catch (error) {
                 console.error("Failed to load storage config:", error);
             }
@@ -463,7 +610,7 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
             confirmed = await requestConfirmation(
                 '开启后，WebDAV 可以访问内网、回环或保留地址，并允许使用明文 HTTP。\n\n风险：这会扩大服务端请求伪造（SSRF）攻击面；恶意或填错的地址可能探测、访问本机或局域网服务。HTTP 还会让 WebDAV 用户名、密码和文件内容在传输途中以明文暴露。\n\n仅在 TG Vault 为可信管理员专用、WebDAV 地址由你控制且网络隔离可靠时开启。是否确认承担风险并开启？',
                 '二次确认：开启高风险 WebDAV 访问',
-                { tone: 'danger', confirmLabel: '确认开启' },
+                { tone: 'danger', dangerDescription: '此操作会降低默认网络安全保护', cancelLabel: '保持关闭', confirmLabel: '确认开启' },
             );
             if (!confirmed) return;
         }
@@ -1048,15 +1195,33 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
             </SettingsSection>
             <SettingsSection title="数据维护">
                 <SettingsRow
+                    icon={Database}
+                    label="下载明细记录"
+                    description="推荐仅保留错误：适合磁盘空间较小或不需要完整审计的设备。任务运行时仍会临时记录，完成后自动删除成功和跳过明细，只留下失败记录用于排错和重试。磁盘充足且需要逐条核对下载历史时，可选择保留全部。"
+                    stackActionOnMobile
+                    action={advancedTasks ? (
+                        <select
+                            value={advancedTasks.telegramDownloadHistoryPolicy}
+                            onChange={(event) => void updateAdvancedTask({ telegramDownloadHistoryPolicy: event.target.value as AdvancedTaskSettings['telegramDownloadHistoryPolicy'] }).catch((error: any) => showNotice(error.message || '更新下载明细记录失败', '操作失败'))}
+                            className="h-10 w-full rounded-lg border border-border bg-background px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-primary/40 sm:w-auto sm:min-w-48"
+                            aria-label="下载明细记录策略"
+                        >
+                            <option value="errors_only">仅保留错误（推荐）</option>
+                            <option value="all">保留全部（完整审计）</option>
+                        </select>
+                    ) : <span className="text-sm text-muted-foreground">正在加载…</span>}
+                />
+                <SettingsRow
                     icon={Trash2}
-                    label="清理已完成下载明细"
-                    description="删除旧的 Telegram 下载审计明细，降低大型下载任务长期占用；不会删除文件索引或云端文件。"
+                    label="清理历史明细"
+                    description="手动删除指定天数以前的 Telegram 下载审计明细。只清理记录，不删除文件索引，也不删除云端文件。"
+                    stackActionOnMobile
                     action={
-                        <div className="flex flex-wrap items-center justify-end gap-2">
+                        <div className="grid w-full grid-cols-2 gap-2 sm:flex sm:w-auto sm:items-center sm:justify-end">
                             <select
                                 value={cleanupRetentionDays}
                                 onChange={(e) => setCleanupRetentionDays(Number(e.target.value))}
-                                className="h-9 rounded-lg border border-border bg-background px-2 text-sm outline-none"
+                                className="h-10 w-full rounded-lg border border-border bg-background px-3 text-sm outline-none"
                                 disabled={isCleaningDownloadItems}
                             >
                                 <option value={1}>保留 1 天</option>
@@ -1067,6 +1232,7 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
                             <Button
                                 size="sm"
                                 variant="outline"
+                                className="h-10 w-full whitespace-nowrap"
                                 onClick={handleCleanupDownloadItems}
                                 disabled={isCleaningDownloadItems}
                             >
@@ -1080,7 +1246,73 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
 
             {activeSection === 'telegram' && <>
             {/* Telegram Download Section */}
-            <SettingsSection title="Telegram Bot 设置">
+            <SettingsSection title="Telegram Bot 连接">
+                <div className="p-4 space-y-4">
+                    <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                        <div className="flex min-w-0 items-start gap-3">
+                            <div className="p-2 rounded-lg bg-muted text-muted-foreground"><KeyRound className="h-4 w-4" /></div>
+                            <div className="min-w-0">
+                                <div className="flex flex-wrap items-center gap-2">
+                                    <span className="text-sm font-medium">Bot 凭证与连接</span>
+                                    <span className={cn("rounded-full px-2 py-0.5 text-[11px] font-semibold", telegramBotConfig?.status === 'ready' ? "bg-green-500/10 text-green-600" : telegramBotConfig?.configured ? "bg-amber-500/10 text-amber-700" : "bg-muted text-muted-foreground")}>{telegramBotConfig?.status === 'ready' ? '已连接' : telegramBotConfig?.configured ? '已配置' : '未配置'}</span>
+                                    {telegramBotConfig?.source === 'environment' && <span className="rounded-full bg-blue-500/10 px-2 py-0.5 text-[11px] font-semibold text-blue-600">环境变量兼容</span>}
+                                    {telegramBotConfig?.source === 'web' && <span className="rounded-full bg-green-500/10 px-2 py-0.5 text-[11px] font-semibold text-green-600">网页加密管理</span>}
+                                </div>
+                                <p className="mt-1 text-xs text-muted-foreground">配置后只显示状态，不会回显 Bot Token、API ID 或 API Hash。</p>
+                                {telegramBotConfig?.configured && <div className="mt-2 text-xs leading-5 text-muted-foreground">
+                                    <p>凭证已安全保存</p>
+                                    {telegramBotConfig.bot?.username && <p>Bot：@{telegramBotConfig.bot.username}</p>}
+                                    {telegramBotConfig.lastConnectedAt && <p>最近连接：{new Date(telegramBotConfig.lastConnectedAt).toLocaleString()}</p>}
+                                    {telegramBotConfig.lastError && <p className="text-destructive">最近错误：{telegramBotConfig.lastError}</p>}
+                                </div>}
+                            </div>
+                        </div>
+                        <div className="w-full sm:w-auto">
+                            {telegramBotConfig?.source === 'environment' && <div className="flex flex-wrap gap-2 sm:justify-end"><Button size="sm" onClick={handleMigrateTelegramBot} disabled={isSavingTelegramBot}>迁移到网页管理</Button>{telegramBotConfig?.configured && <Button size="sm" variant="outline" disabled={isChangingTelegramPin} onClick={() => { if (showTelegramPinForm) handleCancelTelegramPinChange(); else { handleCancelTelegramBotEdit(); clearTelegramPinChangeInputs(); setTelegramPinVerificationMethod(telegramBotConfig.pinConfigured ? 'current_pin' : 'web_password'); setShowTelegramPinForm(true); } }}>{showTelegramPinForm ? (telegramBotConfig.pinConfigured ? '取消修改 PIN' : '取消设置 PIN') : (telegramBotConfig.pinConfigured ? '修改 Bot PIN' : '设置 Bot PIN')}</Button>}</div>}
+                            {telegramBotConfig?.source === 'web' && <div className="grid w-full grid-cols-3 gap-1.5 sm:w-auto sm:gap-2">
+                                <Button size="sm" variant="outline" className="min-w-0 whitespace-nowrap px-1 text-[11px] sm:px-3 sm:text-xs" disabled={isSavingTelegramBot} onClick={() => { if (showTelegramBotForm) handleCancelTelegramBotEdit(); else { handleCancelTelegramPinChange(); clearTelegramBotInputs(); setShowTelegramBotForm(true); } }}>{showTelegramBotForm ? '取消更换' : '更换凭证'}</Button>
+                                <Button size="sm" variant="outline" className="min-w-0 whitespace-nowrap px-1 text-[11px] sm:px-3 sm:text-xs" disabled={isChangingTelegramPin} onClick={() => { if (showTelegramPinForm) handleCancelTelegramPinChange(); else { handleCancelTelegramBotEdit(); clearTelegramPinChangeInputs(); setTelegramPinVerificationMethod(telegramBotConfig.pinConfigured ? 'current_pin' : 'web_password'); setShowTelegramPinForm(true); } }}>{showTelegramPinForm ? (telegramBotConfig.pinConfigured ? '取消修改 PIN' : '取消设置 PIN') : (telegramBotConfig.pinConfigured ? '修改 Bot PIN' : '设置 Bot PIN')}</Button>
+                                <Button size="sm" variant="destructive" className="min-w-0 whitespace-nowrap px-1 text-[11px] sm:px-3 sm:text-xs" onClick={handleDeleteTelegramBot} disabled={isSavingTelegramBot}>删除配置</Button>
+                            </div>}
+                        </div>
+                        {telegramBotConfig?.configured && !telegramBotConfig.pinConfigured && <p className="mt-3 rounded-lg border border-amber-300/60 bg-amber-500/10 px-3 py-2.5 text-sm text-amber-700 dark:text-amber-300">Telegram Bot PIN：未设置。请设置 4 位 PIN，供 Telegram 用户首次身份验证。</p>}
+                        {!telegramBotConfig?.pinConfigured && telegramBotConfig?.source === 'environment' && <div className="mt-4 space-y-2"><label className="text-sm font-medium">Telegram Bot PIN（4 位数字）</label><input type="password" inputMode="numeric" pattern="[0-9]{4}" maxLength={4} autoComplete="new-password" value={telegramPin} onChange={event => setTelegramPin(event.target.value.replace(/\D/g, '').slice(0, 4))} placeholder="迁移前创建 PIN" className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-primary/20" /><p className="text-xs text-muted-foreground">迁移环境变量凭证前必须创建 PIN，且只能是正好 4 位数字。</p></div>}
+                    </div>
+
+                    {(!telegramBotConfig?.configured || showTelegramBotForm) && <div className="rounded-xl border border-border bg-muted/20 p-4 space-y-4">
+                        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                            <div className="space-y-2 md:col-span-2"><label className="text-sm font-medium">Bot Token</label><input type="password" autoComplete="new-password" value={telegramBotToken} onChange={event => setTelegramBotToken(event.target.value)} placeholder="从 @BotFather 获取" className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-primary/20" /></div>
+                            <div className="space-y-2"><label className="text-sm font-medium">API ID</label><input type="password" inputMode="numeric" autoComplete="new-password" value={telegramApiId} onChange={event => setTelegramApiId(event.target.value)} placeholder="从 my.telegram.org 获取" className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-primary/20" /></div>
+                            <div className="space-y-2"><label className="text-sm font-medium">API Hash</label><input type="password" autoComplete="new-password" value={telegramApiHash} onChange={event => setTelegramApiHash(event.target.value)} placeholder="32 位 API Hash" className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-primary/20" /></div>
+                            {telegramBotConfig?.pinConfigured && <p className="md:col-span-2 rounded-lg border border-border bg-background px-3 py-2.5 text-sm text-muted-foreground">Telegram Bot PIN：已设置，本次更换不会修改</p>}
+                            {!telegramBotConfig?.pinConfigured && <div className="space-y-2 md:col-span-2"><label className="text-sm font-medium">Telegram Bot PIN（4 位数字）</label><input type="password" inputMode="numeric" pattern="[0-9]{4}" maxLength={4} autoComplete="new-password" value={telegramPin} onChange={event => setTelegramPin(event.target.value.replace(/\D/g, '').slice(0, 4))} placeholder="用于 Bot 首次身份验证" className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-primary/20" /><p className="text-xs text-muted-foreground">PIN 只在首次配置时创建，必须正好是 4 位数字。</p></div>}
+                        </div>
+                        <div className="flex flex-wrap justify-end gap-2">{telegramBotConfig?.configured && <Button variant="ghost" onClick={handleCancelTelegramBotEdit} disabled={isSavingTelegramBot}>取消</Button>}<Button variant="outline" onClick={handleTestTelegramBot} disabled={isSavingTelegramBot || !telegramBotToken || !telegramApiId || !telegramApiHash}>测试连接</Button><Button onClick={handleSaveTelegramBot} disabled={isSavingTelegramBot || !telegramBotToken || !telegramApiId || !telegramApiHash}>{isSavingTelegramBot ? '处理中...' : '保存并启用'}</Button></div>
+                    </div>}
+
+                    {showTelegramPinForm && telegramBotConfig?.configured && <div className="rounded-xl border border-border bg-muted/20 p-4 space-y-4">
+                        <div>
+                            <h4 className="text-sm font-semibold">{telegramBotConfig.pinConfigured ? '修改 Telegram Bot PIN' : '设置 Telegram Bot PIN'}</h4>
+                            <p className="mt-1 text-xs leading-5 text-muted-foreground">{telegramBotConfig.pinConfigured ? '请使用当前 PIN 或网页管理员密码验证身份。修改成功后，所有已认证的 Telegram 用户都需要使用新 PIN 重新验证。' : '未设置 PIN 时，需要使用网页管理员密码验证身份。设置后，Telegram 用户可使用该 4 位 PIN 完成首次身份验证。'}</p>
+                        </div>
+                        {telegramBotConfig.pinConfigured && <div className="space-y-2">
+                            <label className="text-sm font-medium">验证方式</label>
+                            <div className="grid grid-cols-2 gap-2">
+                                <Button type="button" variant={telegramPinVerificationMethod === 'current_pin' ? 'default' : 'outline'} onClick={() => { setTelegramPinVerificationMethod('current_pin'); setTelegramPinVerificationSecret(''); }}>当前 PIN</Button>
+                                <Button type="button" variant={telegramPinVerificationMethod === 'web_password' ? 'default' : 'outline'} onClick={() => { setTelegramPinVerificationMethod('web_password'); setTelegramPinVerificationSecret(''); }}>网页管理员密码</Button>
+                            </div>
+                        </div>}
+                        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                            <div className="space-y-2 md:col-span-2"><label className="text-sm font-medium">{telegramBotConfig.pinConfigured && telegramPinVerificationMethod === 'current_pin' ? '当前 PIN' : '网页管理员密码'}</label><input type="password" inputMode={telegramBotConfig.pinConfigured && telegramPinVerificationMethod === 'current_pin' ? 'numeric' : undefined} maxLength={telegramBotConfig.pinConfigured && telegramPinVerificationMethod === 'current_pin' ? 4 : 256} autoComplete="current-password" value={telegramPinVerificationSecret} onChange={event => setTelegramPinVerificationSecret(telegramBotConfig.pinConfigured && telegramPinVerificationMethod === 'current_pin' ? event.target.value.replace(/\D/g, '').slice(0, 4) : event.target.value)} placeholder={telegramBotConfig.pinConfigured && telegramPinVerificationMethod === 'current_pin' ? '输入当前 4 位 PIN' : '输入网页管理员密码'} className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-primary/20" /></div>
+                            <div className="space-y-2"><label className="text-sm font-medium">新 PIN</label><input type="password" inputMode="numeric" pattern="[0-9]{4}" maxLength={4} autoComplete="new-password" value={newTelegramPin} onChange={event => setNewTelegramPin(event.target.value.replace(/\D/g, '').slice(0, 4))} placeholder="4 位数字" className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-primary/20" /></div>
+                            <div className="space-y-2"><label className="text-sm font-medium">确认新 PIN</label><input type="password" inputMode="numeric" pattern="[0-9]{4}" maxLength={4} autoComplete="new-password" value={confirmNewTelegramPin} onChange={event => setConfirmNewTelegramPin(event.target.value.replace(/\D/g, '').slice(0, 4))} placeholder="再次输入 4 位数字" className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-primary/20" /></div>
+                        </div>
+                        <div className="flex flex-wrap justify-end gap-2"><Button variant="ghost" onClick={handleCancelTelegramPinChange} disabled={isChangingTelegramPin}>取消</Button><Button onClick={handleChangeTelegramPin} disabled={isChangingTelegramPin || !telegramPinVerificationSecret || newTelegramPin.length !== 4 || confirmNewTelegramPin.length !== 4}>{isChangingTelegramPin ? '处理中...' : (telegramBotConfig.pinConfigured ? '确认修改 PIN' : '确认设置 PIN')}</Button></div>
+                    </div>}
+                </div>
+            </SettingsSection>
+
+            <SettingsSection title="Telegram Bot 用户权限">
                 <div className="p-4 bg-muted/20 border-b border-border/50">
                     <div className="flex items-start justify-between gap-4">
                         <div className="flex items-start gap-3">
@@ -1132,12 +1364,12 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
 
             <SettingsSection title="Telegram 下载设置">
                 <div className="p-4 bg-muted/20 border-b border-border/50">
-                    <div className="flex items-center justify-between gap-4">
-                        <div className="flex items-center gap-3">
-                            <div className="p-2 rounded-lg bg-muted text-muted-foreground">
+                    <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+                        <div className="flex min-w-0 items-start gap-3">
+                            <div className="mt-0.5 shrink-0 p-2 rounded-lg bg-muted text-muted-foreground">
                                 <Cloud className="h-4 w-4" />
                             </div>
-                            <div>
+                            <div className="min-w-0">
                                 <div className="flex flex-wrap items-center gap-2">
                                     <span className="text-sm font-medium">账号级下载器</span>
                                     {!showTelegramUserDownload ? (
@@ -1148,15 +1380,20 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
                                         <span className="px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-700 dark:text-amber-400 text-[11px] font-semibold">session 未就绪</span>
                                     )}
                                 </div>
-                                <p className="text-xs text-muted-foreground">开启后，文件下载优先走已登录的 Telegram 用户账号 session</p>
+                                <p className="mt-1 max-w-xl text-xs leading-5 text-muted-foreground">开启后，文件下载优先使用已登录的 Telegram 用户账号</p>
                             </div>
                         </div>
                         <Button
                             size="sm"
                             variant={showTelegramUserDownload ? "default" : "outline"}
+                            className="w-full whitespace-normal sm:w-auto sm:shrink-0 sm:whitespace-nowrap"
                             onClick={async () => {
                                 if (isSaving) return;
                                 const nextEnabled = !showTelegramUserDownload;
+                                if (nextEnabled && !config?.telegramUserClientStatus?.userId) {
+                                    setTelegramUserLoginStep('phone');
+                                    return;
+                                }
                                 setIsSaving(true);
                                 try {
                                     await fileApi.setTelegramUserDownloadEnabled(nextEnabled);
@@ -1170,13 +1407,13 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
                                 }
                             }}
                         >
-                            {showTelegramUserDownload ? "停用账号级下载" : "启用账号级下载"}
+                            {showTelegramUserDownload ? "停用账号级下载" : (config?.telegramUserClientStatus?.userId ? "启用账号级下载" : "登录并启用")}
                         </Button>
                     </div>
                 </div>
 
                 <AnimatePresence>
-                    {showTelegramUserDownload && (
+                    {(
                         <motion.div
                             initial={{ height: 0, opacity: 0 }}
                             animate={{ height: "auto", opacity: 1 }}
@@ -1184,45 +1421,26 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
                             className="bg-muted/30 border-t border-border/50 overflow-hidden"
                         >
                             <div className="p-6 space-y-5">
-                                <div className="p-4 rounded-xl border border-amber-500/20 bg-amber-500/5 space-y-2">
-                                    <p className="text-sm font-medium text-amber-700 dark:text-amber-400">这项功能需要你先准备用户账号 session</p>
+                                {!config?.telegramUserClientStatus?.userId && <div className="p-4 rounded-xl border border-amber-500/20 bg-amber-500/5 space-y-3">
+                                    <p className="text-sm font-medium text-amber-700 dark:text-amber-400">登录 Telegram 用户账号</p>
+                                    <p className="text-xs text-muted-foreground">手机号 → 验证码 → 可选两步验证密码。登录信息只会加密保存在服务端。</p>
+                                    {telegramUserLoginStep === 'phone' && <div className="flex flex-col gap-2 sm:flex-row"><input aria-label="手机号" value={telegramUserPhone} onChange={e => setTelegramUserPhone(e.target.value)} placeholder="手机号（含国家区号，如 +86…）" className="min-w-0 flex-1 rounded-lg border border-border bg-background px-3 py-2 text-sm" /><Button className="w-full sm:w-auto sm:shrink-0" disabled={isTelegramUserLoginBusy} onClick={async () => { setIsTelegramUserLoginBusy(true); try { const result = await fileApi.startTelegramUserLogin(telegramUserPhone); setTelegramUserFlowId(result.flowId); setTelegramUserLoginStep('code'); await showNotice('验证码已发送'); } catch (error: any) { await showNotice(error.message, '登录失败'); } finally { setIsTelegramUserLoginBusy(false); } }}>发送验证码</Button></div>}
+                                    {telegramUserLoginStep === 'code' && <div className="flex flex-col gap-2 sm:flex-row"><input aria-label="验证码" autoComplete="one-time-code" inputMode="numeric" value={telegramUserCode} onChange={e => setTelegramUserCode(e.target.value)} placeholder="验证码" className="min-w-0 flex-1 rounded-lg border border-border bg-background px-3 py-2 text-sm" /><Button className="w-full sm:w-auto sm:shrink-0" disabled={isTelegramUserLoginBusy} onClick={async () => { setIsTelegramUserLoginBusy(true); try { const result = await fileApi.submitTelegramUserCode(telegramUserFlowId, telegramUserCode); if (result.step === 'password_required') setTelegramUserLoginStep('password'); else { setTelegramUserLoginStep('complete'); await reloadStorageConfig(); await showNotice('账号已绑定并自动启用'); } } catch (error: any) { await showNotice(error.message, '登录失败'); } finally { setIsTelegramUserLoginBusy(false); } }}>验证</Button></div>}
+                                    {telegramUserLoginStep === 'password' && <div className="flex flex-col gap-2 sm:flex-row"><input aria-label="两步验证密码" type="password" autoComplete="current-password" value={telegramUserPassword} onChange={e => setTelegramUserPassword(e.target.value)} placeholder="两步验证密码" className="min-w-0 flex-1 rounded-lg border border-border bg-background px-3 py-2 text-sm" /><Button className="w-full sm:w-auto sm:shrink-0" disabled={isTelegramUserLoginBusy} onClick={async () => { setIsTelegramUserLoginBusy(true); try { await fileApi.submitTelegramUserPassword(telegramUserFlowId, telegramUserPassword); setTelegramUserPassword(''); setTelegramUserLoginStep('complete'); await reloadStorageConfig(); await showNotice('账号已绑定并自动启用'); } catch (error: any) { await showNotice(error.message, '登录失败'); } finally { setIsTelegramUserLoginBusy(false); } }}>登录</Button></div>}
+                                </div>}
                                     {config?.telegramUserClientStatus && <div className="mt-3 rounded-lg border border-border bg-background/70 p-3 text-xs leading-5">
-                                        <p>状态：{config.telegramUserClientStatus.status}</p>
+                                        <p>状态：{{ ready: '已连接', disabled: '已停用', missing_session: '未绑定', expired: '登录已失效', not_configured: 'API 未配置', error: '连接失败', permission_denied: '无频道权限' }[config.telegramUserClientStatus.status] || config.telegramUserClientStatus.status}</p>
                                         {config.telegramUserClientStatus.username && <p>账号：@{config.telegramUserClientStatus.username}（ID {config.telegramUserClientStatus.userId}）</p>}
                                         {config.telegramUserClientStatus.checkedAt && <p>最近检查：{new Date(config.telegramUserClientStatus.checkedAt).toLocaleString()}</p>}
-                                        {config.telegramUserClientStatus.lastError && <p className="text-destructive">最近错误：{config.telegramUserClientStatus.lastError}</p>}
-                                        {config.telegramUserClientStatus.action && <p className="text-amber-700">下一步：{config.telegramUserClientStatus.action}</p>}
+                                        {config.telegramUserClientStatus.status === 'disabled' && <p className="text-muted-foreground">已停用，不会执行账号级下载；登录信息仍安全保留。</p>}
+                                        {config.telegramUserClientStatus.status !== 'disabled' && config.telegramUserClientStatus.lastError && <p className="text-destructive">最近错误：{config.telegramUserClientStatus.lastError}</p>}
+                                        {config.telegramUserClientStatus.status !== 'disabled' && config.telegramUserClientStatus.action && <p className="text-amber-700">下一步：{config.telegramUserClientStatus.action}</p>}
                                     </div>}
-                                </div>
+                                    {config?.telegramUserClientStatus?.userId && <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap">{config.telegramUserClientStatus?.status !== 'disabled' && <Button className="w-full sm:w-auto" variant="outline" onClick={async () => { try { await fileApi.disableTelegramUserAccount(); await reloadStorageConfig(); } catch (error: any) { await showNotice(error.message || '停用失败', '操作失败'); } }}>停用（保留登录）</Button>}<Button className="w-full sm:w-auto" variant="destructive" onClick={async () => { if (!(await requestConfirmation('解除绑定将永久删除已加密保存的登录信息，确认继续吗？', '解除绑定'))) return; try { await fileApi.unlinkTelegramUserAccount(); setTelegramUserLoginStep('phone'); await reloadStorageConfig(); } catch (error: any) { await showNotice(error.message || '解除绑定失败', '操作失败'); } }}>解除绑定</Button><span className="self-center text-xs text-muted-foreground">停用会保留已加密保存的登录信息</span></div>}
 
-                                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                    <div className="space-y-2">
-                                        <label className="text-sm font-medium">TELEGRAM_API_ID</label>
-                                        <input
-                                            type="text"
-                                            readOnly
-                                            className="w-full px-3 py-2 rounded-lg border border-border bg-muted/40 text-sm outline-none"
-                                            placeholder="在 .env 中配置"
-                                        />
-                                    </div>
-                                    <div className="space-y-2">
-                                        <label className="text-sm font-medium">TELEGRAM_API_HASH</label>
-                                        <input
-                                            type="text"
-                                            readOnly
-                                            className="w-full px-3 py-2 rounded-lg border border-border bg-muted/40 text-sm outline-none"
-                                            placeholder="在 .env 中配置"
-                                        />
-                                    </div>
-                                    <div className="space-y-2 md:col-span-2">
-                                        <label className="text-sm font-medium">TELEGRAM_USER_SESSION_FILE</label>
-                                        <input
-                                            type="text"
-                                            readOnly
-                                            className="w-full px-3 py-2 rounded-lg border border-border bg-muted/40 text-sm outline-none"
-                                            placeholder="./data/telegram_user_session.txt"
-                                        />
-                                    </div>
+                                <div className="rounded-xl border border-border bg-background/60 p-4 text-sm">
+                                    <p className="font-medium">Telegram API 凭证：{telegramBotConfig?.configured ? '已就绪' : '未配置'}</p>
+                                    <p className="mt-1 text-xs text-muted-foreground">账号级下载器会复用 Telegram Bot 的 API ID 与 API Hash；敏感凭证和 session 均不会回显到浏览器。</p>
                                 </div>
 
                                 <div className="flex flex-wrap gap-3">

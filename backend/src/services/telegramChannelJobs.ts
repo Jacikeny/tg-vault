@@ -24,6 +24,7 @@ import { resolveTelegramWriteCommittedWithQuery, claimTelegramWriteReconciliatio
 import { parseDateOnlyStrict, parseTelegramDateRange } from './telegramDateRange.js';
 import { enqueueTelegramNotification } from './telegramNotificationDelivery.js';
 import { resolveSubscriptionTarget } from './telegramSubscriptionManagement.js';
+import { compactTelegramDownloadHistory } from './telegramDownloadHistoryPolicy.js';
 
 const SUBSCRIPTION_INTERVAL_MS = Math.max(60_000, parseInt(process.env.TELEGRAM_SUBSCRIPTION_INTERVAL_MS || '300000', 10) || 300_000);
 const SUBSCRIPTION_SCAN_LIMIT = Math.max(1, parseInt(process.env.TELEGRAM_SUBSCRIPTION_SCAN_LIMIT || '100', 10) || 100);
@@ -36,6 +37,8 @@ let subscriptionTimer: NodeJS.Timeout | null = null;
 let subscriptionScanRunning = false;
 let recoveryStarted = false;
 let recoveryRunning = false;
+let recoveryTimeout: NodeJS.Timeout | null = null;
+let recoveryTimer: NodeJS.Timeout | null = null;
 
 function parseTelegramSourceAllowlist(raw: string | undefined): string[] {
     return (raw || '')
@@ -1365,6 +1368,12 @@ async function downloadPendingForJob(botClient: TelegramClient, requestMessage: 
     return aggregate;
 }
 
+async function compactTelegramDownloadHistorySafely(jobId: string): Promise<void> {
+    await compactTelegramDownloadHistory(jobId).catch(error => {
+        console.error(`压缩 Telegram 下载明细失败: job=${jobId}`, error);
+    });
+}
+
 async function finalizeTelegramJob(jobId: string, options: TelegramCommentScanOptions) {
     const job = await getJob(jobId);
     if (!job || job.cancelled_at || job.status === 'cancelled') return;
@@ -1400,7 +1409,10 @@ async function finalizeTelegramJob(jobId: string, options: TelegramCommentScanOp
             pending > 0 ? null : new Date(),
         ]
     );
-    if ((result.rowCount || 0) > 0) await notifyProgress(jobId, options);
+    if ((result.rowCount || 0) > 0) {
+        await notifyProgress(jobId, options);
+        if (pending === 0) await compactTelegramDownloadHistorySafely(jobId);
+    }
 }
 
 async function scanChannelSegment(userClient: TelegramClient, jobId: string, source: string, params: any, cursor: any, options: TelegramCommentScanOptions): Promise<{ messages: Api.Message[]; done: boolean; nextOffsetId: number }> {
@@ -1994,6 +2006,7 @@ async function runSubscriptionScan(botClient: TelegramClient) {
                 error: downloadResult.failed > 0 ? `${downloadResult.failed} 个文件下载失败` : null,
             });
             if (!finalized) continue;
+            await compactTelegramDownloadHistorySafely(jobId);
             await query(`UPDATE telegram_channel_subscriptions
                          SET last_success_at = NOW(), last_error = $2,
                              last_result = jsonb_build_object('status', $3::text, 'found', $4::int, 'skipped', $5::int, 'failed', $6::int)
@@ -2121,6 +2134,7 @@ async function recoverTelegramJob(botClient: TelegramClient, job: any): Promise<
             })) === 1;
         }
         if (!finalized) return;
+        await compactTelegramDownloadHistorySafely(String(job.id));
         await botClient.sendMessage(targetChat, {
             message: `♻️ 已恢复并完成任务 ${String(job.id).slice(0, 12)}：成功 ${result.successful}，跳过 ${result.skipped}，失败 ${result.failed}`,
         }).catch(() => undefined);
@@ -2263,8 +2277,8 @@ export async function recoverInterruptedTelegramJobs(botClient: TelegramClient):
 export function startTelegramJobRecoveryWorker(botClient: TelegramClient) {
     if (recoveryStarted) return;
     recoveryStarted = true;
-    setTimeout(() => recoverInterruptedTelegramJobs(botClient).catch(error => console.error('♻️ Telegram 任务恢复扫描失败:', error)), TG_JOB_RECOVERY_DELAY_MS);
-    setInterval(() => recoverInterruptedTelegramJobs(botClient).catch(error => console.error('♻️ Telegram 任务恢复扫描失败:', error)), SUBSCRIPTION_INTERVAL_MS);
+    recoveryTimeout = setTimeout(() => recoverInterruptedTelegramJobs(botClient).catch(error => console.error('♻️ Telegram 任务恢复扫描失败:', error)), TG_JOB_RECOVERY_DELAY_MS);
+    recoveryTimer = setInterval(() => recoverInterruptedTelegramJobs(botClient).catch(error => console.error('♻️ Telegram 任务恢复扫描失败:', error)), SUBSCRIPTION_INTERVAL_MS);
 }
 
 export function startTelegramSubscriptionWorker(botClient: TelegramClient) {
@@ -2274,4 +2288,19 @@ export function startTelegramSubscriptionWorker(botClient: TelegramClient) {
     }, SUBSCRIPTION_INTERVAL_MS);
     runSubscriptionScan(botClient).catch(error => console.error('🤖 Telegram 订阅扫描异常:', error));
     console.log(`🤖 Telegram 频道订阅扫描已启动，间隔 ${Math.round(SUBSCRIPTION_INTERVAL_MS / 1000)} 秒`);
+}
+
+export async function stopTelegramBackgroundWorkers(timeoutMs = 30_000): Promise<void> {
+    if (subscriptionTimer) clearInterval(subscriptionTimer);
+    if (recoveryTimeout) clearTimeout(recoveryTimeout);
+    if (recoveryTimer) clearInterval(recoveryTimer);
+    subscriptionTimer = null;
+    recoveryTimeout = null;
+    recoveryTimer = null;
+    recoveryStarted = false;
+    const deadline = Date.now() + timeoutMs;
+    while (subscriptionScanRunning || recoveryRunning) {
+        if (Date.now() >= deadline) throw new Error('Telegram 后台任务仍在运行，拒绝切换 Bot 客户端');
+        await new Promise(resolve => setTimeout(resolve, 100));
+    }
 }

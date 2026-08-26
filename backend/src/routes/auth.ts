@@ -11,6 +11,7 @@ import axios from 'axios';
 import { sendSecurityNotification } from '../services/telegramBot.js';
 import { changeWebPasswordAndRevokeSessions, createInitialAdminCredentials, isInitialSetupRequired, validateTelegramPin, validateWebPassword, verifyWebPassword } from '../utils/authSettings.js';
 import { shouldUseSecureCookie } from '../utils/cookieSecurity.js';
+import { getEffectiveTelegramBotConfig } from '../services/telegramBotConfig.js';
 
 // 导入可能需要的辅助函数
 async function getIPLocation(ip: string) {
@@ -136,10 +137,13 @@ router.post('/setup', loginLimiter, async (req: Request, res: Response) => {
         const { webPassword, telegramPin } = req.body;
         const webError = validateWebPassword(webPassword);
         if (webError) return res.status(400).json({ error: webError });
-        const pinError = validateTelegramPin(telegramPin);
-        if (pinError) return res.status(400).json({ error: pinError });
+        const telegramPinRequired = (await getEffectiveTelegramBotConfig()).configured;
+        if (telegramPinRequired) {
+            const pinError = validateTelegramPin(telegramPin);
+            if (pinError) return res.status(400).json({ error: pinError });
+        }
 
-        await createInitialAdminCredentials(webPassword, telegramPin);
+        await createInitialAdminCredentials(webPassword, telegramPinRequired ? telegramPin : undefined);
         await issueSession(req, res);
     } catch (error) {
         console.error('初始化管理员失败:', error);
@@ -316,9 +320,11 @@ router.post('/revoke-all', requireAuth, async (_req: Request, res: Response) => 
 // 检查认证初始化状态
 router.get('/status', async (_req: Request, res: Response) => {
     const setupRequired = await isInitialSetupRequired();
+    const telegramPinRequired = setupRequired && (await getEffectiveTelegramBotConfig()).configured;
     res.json({
         setupRequired,
         passwordRequired: true,
+        telegramPinRequired,
     });
 });
 

@@ -1,10 +1,12 @@
 export type DuplicateModeSetting = 'copy' | 'skip';
+export type TelegramDownloadHistoryPolicySetting = 'errors_only' | 'all';
 
 export interface AdvancedSettings {
     telegramDownloadWorkers: number;
     telegramFileConcurrency: number;
     duplicateMode: DuplicateModeSetting;
     autoCleanupOrphans: boolean;
+    telegramDownloadHistoryPolicy: TelegramDownloadHistoryPolicySetting;
     highRisk: { telegramDownloadWorkers: boolean; telegramFileConcurrency: boolean };
 }
 
@@ -21,15 +23,18 @@ export function buildAdvancedSettings(input: {
     telegramFileConcurrency: unknown;
     duplicateMode: unknown;
     autoCleanupOrphans: unknown;
+    telegramDownloadHistoryPolicy: unknown;
 }): AdvancedSettings {
     const workers = Number(input.telegramDownloadWorkers);
     const fileConcurrency = Number(input.telegramFileConcurrency);
     const duplicateMode: DuplicateModeSetting = input.duplicateMode === 'skip' ? 'skip' : 'copy';
+    const telegramDownloadHistoryPolicy: TelegramDownloadHistoryPolicySetting = input.telegramDownloadHistoryPolicy === 'all' ? 'all' : 'errors_only';
     return {
         telegramDownloadWorkers: WORKERS.has(workers) ? workers : 4,
         telegramFileConcurrency: FILE_CONCURRENCY.has(fileConcurrency) ? fileConcurrency : 2,
         duplicateMode,
         autoCleanupOrphans: booleanValue(input.autoCleanupOrphans, true),
+        telegramDownloadHistoryPolicy,
         highRisk: { telegramDownloadWorkers: workers >= 12, telegramFileConcurrency: fileConcurrency >= 4 },
     };
 }
@@ -55,6 +60,10 @@ export function normalizeAdvancedSettingsPatch(input: Record<string, unknown>): 
     if (key === 'autoCleanupOrphans') {
         if (typeof value !== 'boolean') throw new Error('autoCleanupOrphans 必须是布尔值');
         return { autoCleanupOrphans: value, highRisk: false };
+    }
+    if (key === 'telegramDownloadHistoryPolicy') {
+        if (value !== 'errors_only' && value !== 'all') throw new Error('telegramDownloadHistoryPolicy 必须是 errors_only 或 all');
+        return { telegramDownloadHistoryPolicy: value, highRisk: false };
     }
     throw new Error(`不支持的高级设置：${key}`);
 }

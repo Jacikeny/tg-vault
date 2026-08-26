@@ -16,7 +16,7 @@ test('Telegram user client readiness exposes actionable non-secret status', () =
 
 test('expired and access errors have distinct recovery actions', () => {
     recordTelegramUserClientFailure('expired', 'session 已失效');
-    assert.equal(getTelegramUserClientStatus().action, '重新生成 session 并重启后端');
+    assert.equal(getTelegramUserClientStatus().action, '在网页中重新登录 Telegram 用户账号');
     recordTelegramUserClientFailure('permission_denied', '当前账号未加入目标频道');
     assert.equal(getTelegramUserClientStatus().action, '先用该账号加入目标频道并重新测试');
 });

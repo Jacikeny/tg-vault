@@ -5,6 +5,7 @@ import fs from 'node:fs';
 const tasks = fs.readFileSync(new URL('./TasksPage.tsx', import.meta.url), 'utf8');
 const settings = fs.readFileSync(new URL('./SettingsPage.tsx', import.meta.url), 'utf8');
 const layout = fs.readFileSync(new URL('../layout/AppLayout.tsx', import.meta.url), 'utf8');
+const actionNotice = settings.slice(settings.indexOf('const ActionNotice'), settings.indexOf('const ActionDialog'));
 
 test('task success feedback auto-dismisses while retaining a manual close control', () => {
     assert.match(tasks, /interface TaskNotice \{ message: string; sequence: number; \}/);
@@ -41,6 +42,8 @@ test('settings uses non-modal transient feedback for notices but keeps confirmat
     assert.match(settings, /aria-live="polite"/);
     assert.match(settings, /window\.setTimeout\(\(\) => closeActionNotice\(\), 4_000\)/);
     assert.match(settings, /setActionNotice\(\{ title, message, tone:[^\n]*\}\);/);
+    assert.match(actionNotice, /return createPortal\(/);
+    assert.match(actionNotice, /document\.body/);
     assert.match(settings, /return Promise\.resolve\(\);/);
     assert.doesNotMatch(settings, /window\.location\.reload\(\)/);
     assert.doesNotMatch(settings, /interface ActionNoticeState\s*\{[^}]*resolve\?:/);

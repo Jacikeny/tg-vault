@@ -1,7 +1,8 @@
 import crypto from 'crypto';
 import type { PoolClient } from 'pg';
 import { pool } from '../db/index.js';
-import { getSetting } from './settings.js';
+import { getSetting, getSettingStrict, setSetting } from './settings.js';
+import { decryptSettingValue, encryptSettingValue } from './credentialCrypto.js';
 
 const WEB_PASSWORD_KEY = 'admin_password_hash';
 const TELEGRAM_PIN_KEY = 'telegram_pin_hash';
@@ -58,10 +59,101 @@ export async function verifyWebPassword(password: string): Promise<boolean> {
 
 export async function verifyTelegramPin(pin: string): Promise<boolean> {
     const stored = await getSetting<string>(TELEGRAM_PIN_KEY, '');
-    if (stored) return verifySecret(pin, stored);
+    return typeof stored === 'string' && stored.length > 0 && verifySecret(pin, stored);
+}
 
-    // Migration fallback for old deployments that used the web password in Bot.
-    return verifySecret(pin, await getStoredWebPasswordHash());
+export async function isTelegramPinConfigured(): Promise<boolean> {
+    const stored = await getSettingStrict<string>(TELEGRAM_PIN_KEY);
+    return stored.found && typeof stored.value === 'string' && stored.value.length > 0;
+}
+
+export async function ensureTelegramPinConfigured(pin: unknown): Promise<void> {
+    if (await isTelegramPinConfigured()) return;
+    const error = validateTelegramPin(pin);
+    if (error) throw new Error(error);
+    await setSetting(TELEGRAM_PIN_KEY, hashSecret(pin as string));
+}
+
+export type TelegramPinVerificationMethod = 'current_pin' | 'web_password';
+
+export class TelegramPinChangeError extends Error {
+    constructor(message: string, readonly statusCode: 400 | 403 | 409 = 400) {
+        super(message);
+        this.name = 'TelegramPinChangeError';
+    }
+}
+
+type TelegramPinChangeClient = Pick<PoolClient, 'query'>;
+
+export async function changeTelegramPinWithClient(
+    client: TelegramPinChangeClient,
+    verificationMethod: unknown,
+    verificationSecret: unknown,
+    newPin: unknown,
+): Promise<void> {
+    if (verificationMethod !== 'current_pin' && verificationMethod !== 'web_password') {
+        throw new TelegramPinChangeError('请选择当前 PIN 或网页管理员密码进行验证');
+    }
+    if (typeof verificationSecret !== 'string' || verificationSecret.length === 0) {
+        throw new TelegramPinChangeError('请输入验证信息');
+    }
+    const pinError = validateTelegramPin(newPin);
+    if (pinError) throw new TelegramPinChangeError(pinError);
+
+    await client.query(`SELECT pg_advisory_xact_lock(hashtext('tg-vault:telegram-pin-change'))`);
+    const current = await client.query(
+        'SELECT key, value FROM system_settings WHERE key = ANY($1::text[]) FOR UPDATE',
+        [[TELEGRAM_PIN_KEY, WEB_PASSWORD_KEY]],
+    );
+    const values = new Map<string, string>(current.rows.map(row => [String(row.key), String(row.value || '')]));
+    const storedPin = values.get(TELEGRAM_PIN_KEY) || '';
+
+    if (!storedPin && verificationMethod !== 'web_password') {
+        throw new TelegramPinChangeError('首次设置 PIN 必须使用网页管理员密码验证', 400);
+    }
+
+    const verificationKey = verificationMethod === 'current_pin' ? TELEGRAM_PIN_KEY : WEB_PASSWORD_KEY;
+    const storedVerification = values.get(verificationKey) || '';
+    const decryptedVerification = decryptSettingValue(verificationKey, storedVerification);
+    if (!verifySecret(verificationSecret, decryptedVerification)) {
+        throw new TelegramPinChangeError('当前 PIN 或网页管理员密码不正确', 403);
+    }
+
+    const decryptedCurrentPin = storedPin ? decryptSettingValue(TELEGRAM_PIN_KEY, storedPin) : '';
+    if (storedPin && verifySecret(newPin as string, decryptedCurrentPin)) {
+        throw new TelegramPinChangeError('新 PIN 不能与当前 PIN 相同');
+    }
+
+    await client.query(
+        `INSERT INTO system_settings (key, value, updated_at)
+         VALUES ($1, $2, NOW())
+         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+        [TELEGRAM_PIN_KEY, encryptSettingValue(TELEGRAM_PIN_KEY, hashSecret(newPin as string))],
+    );
+    // Changing the shared PIN invalidates prior Bot authentication grants.
+    await client.query('DELETE FROM telegram_auth');
+}
+
+export async function changeTelegramPin(
+    verificationMethod: unknown,
+    verificationSecret: unknown,
+    newPin: unknown,
+): Promise<void> {
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+        await changeTelegramPinWithClient(client, verificationMethod, verificationSecret, newPin);
+        await client.query('COMMIT');
+    } catch (error) {
+        await client.query('ROLLBACK').catch(() => undefined);
+        throw error;
+    } finally {
+        client.release();
+    }
+    const { authenticatedUsers, passwordInputState, userStates } = await import('../services/telegramState.js');
+    authenticatedUsers.clear();
+    passwordInputState.clear();
+    userStates.clear();
 }
 
 export function validateWebPassword(password: unknown): string | null {
@@ -83,14 +175,16 @@ export function validateTelegramPin(pin: unknown): string | null {
 
 type SetupQueryClient = Pick<PoolClient, 'query'>;
 
-export async function createInitialAdminCredentialsWithClient(client: SetupQueryClient, webPassword: string, telegramPin: string): Promise<void> {
+export async function createInitialAdminCredentialsWithClient(client: SetupQueryClient, webPassword: string, telegramPin?: string): Promise<void> {
     const webError = validateWebPassword(webPassword);
     if (webError) throw new Error(webError);
 
-    const pinError = validateTelegramPin(telegramPin);
-    if (pinError) throw new Error(pinError);
+    if (telegramPin !== undefined) {
+        const pinError = validateTelegramPin(telegramPin);
+        if (pinError) throw new Error(pinError);
+    }
 
-    if (webPassword === telegramPin) {
+    if (telegramPin !== undefined && webPassword === telegramPin) {
         throw new Error('网页密码不能与 Telegram Bot 4 位密码相同');
     }
 
@@ -103,13 +197,15 @@ export async function createInitialAdminCredentialsWithClient(client: SetupQuery
         'INSERT INTO system_settings (key, value) VALUES ($1, $2)',
         [WEB_PASSWORD_KEY, hashSecret(webPassword)],
     );
-    await client.query(
-        'INSERT INTO system_settings (key, value) VALUES ($1, $2)',
-        [TELEGRAM_PIN_KEY, hashSecret(telegramPin)],
-    );
+    if (telegramPin !== undefined) {
+        await client.query(
+            'INSERT INTO system_settings (key, value) VALUES ($1, $2)',
+            [TELEGRAM_PIN_KEY, hashSecret(telegramPin)],
+        );
+    }
 }
 
-export async function createInitialAdminCredentials(webPassword: string, telegramPin: string): Promise<void> {
+export async function createInitialAdminCredentials(webPassword: string, telegramPin?: string): Promise<void> {
     const client = await pool.connect();
     try {
         await client.query('BEGIN');

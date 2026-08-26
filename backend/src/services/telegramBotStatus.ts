@@ -20,8 +20,16 @@ export interface TelegramBotStatus {
     reconnectCount: number;
 }
 
+let requiredOverride: boolean | null = null;
+
 function requiredFromEnv(): boolean {
+    if (requiredOverride !== null) return requiredOverride;
     return /^(1|true|yes|on)$/i.test(process.env.TELEGRAM_REQUIRED || 'false');
+}
+
+export function setTelegramBotRequired(required: boolean): void {
+    requiredOverride = required;
+    current = { ...current, required };
 }
 
 let current: TelegramBotStatus = {

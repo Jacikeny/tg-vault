@@ -10,21 +10,31 @@ const backendPackage = JSON.parse(fs.readFileSync(new URL('../../package.json', 
 const frontendPackage = JSON.parse(fs.readFileSync(new URL('../../../frontend/package.json', import.meta.url), 'utf8'));
 const installScript = fs.readFileSync(new URL('../../../deploy/install.sh', import.meta.url), 'utf8');
 const deployGuide = fs.readFileSync(new URL('../../../deploy/DEPLOY.md', import.meta.url), 'utf8');
+const envExample = fs.readFileSync(new URL('../../../.env.example', import.meta.url), 'utf8');
+const readme = fs.readFileSync(new URL('../../../README.md', import.meta.url), 'utf8');
 
-function assertRequiredBuildMetadata(source: string): void {
-    assert.match(source, /required_keys=.*SOURCE_REVISION.*SOURCE_VERSION/);
-    assert.match(source, /\.env 缺少必填项/);
+function assertBeginnerFriendlyInstall(source: string): void {
+    assert.match(source, /CORS_ORIGIN_VALUE=.*CORS_ORIGIN/);
+    assert.match(source, /VITE_API_URL_VALUE=.*VITE_API_URL/);
+    assert.match(source, /prompt_origin '请输入 Web 前端 URL'/);
+    assert.match(source, /prompt_origin '请输入后端 API URL'/);
+    assert.match(source, /ensure_generated_secret DB_PASSWORD/);
+    assert.match(source, /if \[\[ "\$created_env" == true \]\]; then[\s\S]*ensure_generated_secret SESSION_SECRET[\s\S]*ensure_generated_secret STORAGE_CREDENTIALS_SECRET/);
+    assert.match(source, /SOURCE_REVISION=.*git rev-parse HEAD/);
+    assert.match(source, /SOURCE_VERSION=.*git describe/);
+    assert.match(source, /IMAGE_VERSION=.*SOURCE_VERSION/);
 }
 
 test('release images use locked dependencies, pinned bases, verified yt-dlp and source labels', () => {
-    assert.equal(backendPackage.version, '2.0.1');
-    assert.equal(frontendPackage.version, '2.0.1');
+    assert.equal(backendPackage.version, '2.1.0');
+    assert.equal(frontendPackage.version, '2.1.0');
     assert.equal((backend.match(/npm ci/g) || []).length, 2);
     assert.doesNotMatch(backend, /npm install/);
     assert.match(backend, /node@sha256:/);
     assert.match(frontend, /node@sha256:/);
     assert.match(frontend, /nginx@sha256:/);
-    assert.match(compose, /(?:postgres|pgvector\/pgvector)@sha256:/);
+    assert.match(compose, /postgres@sha256:/);
+    assert.doesNotMatch(compose, /pgvector\/pgvector/);
     assert.equal((compose.match(/\$\{IMAGE_VERSION:-source\}/g) || []).length, 2);
     assert.doesNotMatch(compose, /IMAGE_VERSION:\?IMAGE_VERSION is required/);
     assert.match(compose, /OAUTH_CALLBACK_BASE_URL/);
@@ -44,17 +54,19 @@ test('release images use locked dependencies, pinned bases, verified yt-dlp and 
     assert.match(workflow, /actions\/upload-artifact@[0-9a-f]{40}/);
 });
 
-test('direct Compose builds use local source metadata fallbacks while production installs stay traceable', () => {
+test('installer keeps beginner input to two public origins and derives the rest', () => {
     assert.equal((compose.match(/\$\{IMAGE_VERSION:-source\}/g) || []).length, 2);
     assert.equal((compose.match(/\$\{SOURCE_REVISION:-unknown\}/g) || []).length, 2);
     assert.equal((compose.match(/\$\{SOURCE_VERSION:-worktree\}/g) || []).length, 2);
     assert.doesNotMatch(compose, /IMAGE_VERSION:\?IMAGE_VERSION is required/);
     assert.doesNotMatch(compose, /SOURCE_REVISION:\?SOURCE_REVISION is required/);
     assert.doesNotMatch(compose, /SOURCE_VERSION:\?SOURCE_VERSION is required/);
-    assertRequiredBuildMetadata(installScript);
-    assert.match(installScript, /IMAGE_VERSION=/);
-    assert.match(installScript, /OAUTH_CALLBACK_BASE_URL=/);
-    assert.match(installScript, /OAUTH_FRONTEND_ORIGIN=/);
+    assert.doesNotMatch(compose, /DOMAIN=/);
+    assertBeginnerFriendlyInstall(installScript);
+    assert.match(envExample, /自动生成：数据库密码/);
+    assert.match(envExample, /高级覆盖：OAuth/);
+    assert.match(readme, /新手只需填写（2 项）/);
+    assert.match(deployGuide, /只需填写以下 2 项/);
     assert.match(deployGuide, /docker inspect/);
     assert.match(deployGuide, /assets\//);
     assert.match(deployGuide, /IMAGE_VERSION.*source/);

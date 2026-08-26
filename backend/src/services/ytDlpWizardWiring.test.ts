@@ -15,8 +15,8 @@ test('pasted and explicit URLs only create a probe preview before confirmation',
 
 test('confirmed yt-dlp keeps immutable target format folder and metadata in task admission', () => {
     assert.match(bot, /handleYtDlpCommand\(currentMessage, consumed\.value\.url, consumed\.value\.target/);
-    assert.match(download, /targetFolder: options\.folder \|\| 'ytdlp'/);
-    assert.match(download, /format: options\.format \|\| 'best'/);
+    assert.match(download, /targetFolder: input\.folder \|\| 'ytdlp'/);
+    assert.match(download, /format: input\.format \|\| 'best'/);
     assert.match(download, /\['--no-playlist', '--newline'/);
     assert.match(download, /'-o', outputTemplate, '--', url/);
     assert.doesNotMatch(bot, /cookie.*text/i);

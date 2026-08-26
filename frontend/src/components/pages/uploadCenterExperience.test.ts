@@ -20,6 +20,18 @@ test('upload center puts the upload action before secondary information and dest
     assert.ok(uploadZoneIndex < uploadCenter.indexOf('data-testid="upload-queue-summary"'));
 });
 
+test('upload center heading is at the top without a redundant home label', () => {
+    assert.ok(uploadCenter.indexOf('id="upload-center-title"') < uploadCenter.indexOf('<UploadZone'));
+    assert.doesNotMatch(uploadCenter, />\s*首页\s*</);
+});
+
+test('special file menus use context-specific headings and descriptions', () => {
+    assert.match(app, /currentCategory === "ytdlp"[\s\S]*t\("app\.ytdlpTitle"\)/);
+    assert.match(app, /t\("app\.ytdlpSubtitle"\)/);
+    assert.match(app, /currentCategory === "favorites"[\s\S]*t\("sidebar\.favorites"\)/);
+    assert.match(app, /t\("app\.favoritesSubtitle"\)/);
+});
+
 test('upload center exposes destination, queue status, and resumable upload guidance', () => {
     assert.match(uploadCenter, /data-testid="upload-destination"/);
     assert.match(uploadCenter, /data-testid="upload-queue-summary"/);

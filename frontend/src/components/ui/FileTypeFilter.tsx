@@ -89,7 +89,7 @@ export const FileTypeFilter = ({ value, onChange }: FileTypeFilterProps) => {
 
                 {isOpen && (
                     <div
-                        className="absolute left-0 top-12 z-50 w-44 overflow-hidden rounded-xl border border-border bg-popover p-1.5 text-popover-foreground shadow-xl"
+                        className="absolute left-0 top-12 z-50 w-44 overflow-hidden rounded-xl border border-border bg-popover p-1.5 text-popover-foreground shadow-2xl ring-1 ring-black/5 dark:ring-white/10"
                         role="menu"
                         aria-label={t("app.fileTypes.filter")}
                     >

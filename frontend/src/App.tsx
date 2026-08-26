@@ -32,6 +32,7 @@ import { appRouteHref, parseAppRoute, routeForCategory, routeForSettings, type A
 import type { SettingsSectionId } from "./components/pages/settingsSections";
 import { IndeterminateSpinner } from "./components/ui/IndeterminateSpinner";
 import { UploadCenter } from "./components/pages/UploadCenter";
+import { YtDlpTaskComposer } from "./components/pages/YtDlpTaskComposer";
 
 const SettingsPage = lazy(() => import("./components/pages/SettingsPage").then(module => ({ default: module.SettingsPage })));
 const TasksPage = lazy(() => import("./components/pages/TasksPage").then(module => ({ default: module.TasksPage })));
@@ -60,6 +61,7 @@ function App() {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [needsPassword, setNeedsPassword] = useState(true);
   const [setupRequired, setSetupRequired] = useState(false);
+  const [telegramPinRequired, setTelegramPinRequired] = useState(false);
   const [authChecking, setAuthChecking] = useState(true);
 
   const [files, setFiles] = useState<FileData[]>(() => initialFileSnapshot?.files ?? []);
@@ -280,6 +282,7 @@ function App() {
         const authStatus = await authService.getAuthStatus();
         setNeedsPassword(authStatus.passwordRequired);
         setSetupRequired(authStatus.setupRequired);
+        setTelegramPinRequired(authStatus.telegramPinRequired);
 
         if (authStatus.setupRequired) {
           setIsAuthenticated(false);
@@ -521,7 +524,7 @@ function App() {
     return result;
   };
 
-  const handleInitialSetup = async (webPassword: string, telegramPin: string) => {
+  const handleInitialSetup = async (webPassword: string, telegramPin?: string) => {
     const result = await authService.setup(webPassword, telegramPin);
     if (result.success) {
       setSetupRequired(false);
@@ -1224,7 +1227,7 @@ function App() {
 
   // 需要密码但未认证，显示登录页
   if (needsPassword && !isAuthenticated) {
-    return <LoginPage onLogin={handleLogin} setupRequired={setupRequired} onSetup={handleInitialSetup} />;
+    return <LoginPage onLogin={handleLogin} setupRequired={setupRequired} telegramPinRequired={telegramPinRequired} onSetup={handleInitialSetup} />;
   }
 
   return (
@@ -1261,11 +1264,22 @@ function App() {
             />
           ) : (
             <>
-              {/* Header Actions */}
               <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
                 <div>
-                  <h2 className="text-3xl font-bold tracking-tight text-foreground">{t("sidebar.files")}</h2>
-                  <p className="text-muted-foreground mt-1">{t("app.filesSubtitle")}</p>
+                  <h2 className="text-3xl font-bold tracking-tight text-foreground">
+                    {currentCategory === "ytdlp"
+                      ? t("app.ytdlpTitle")
+                      : currentCategory === "favorites"
+                        ? t("sidebar.favorites")
+                        : t("sidebar.files")}
+                  </h2>
+                  <p className="text-muted-foreground mt-1">
+                    {currentCategory === "ytdlp"
+                      ? t("app.ytdlpSubtitle")
+                      : currentCategory === "favorites"
+                        ? t("app.favoritesSubtitle")
+                        : t("app.filesSubtitle")}
+                  </p>
                 </div>
                 <div data-testid="file-toolbar" className="flex w-full flex-col gap-3 md:w-auto md:flex-row md:flex-nowrap md:items-center">
                   <div className="order-2 w-full md:order-1 md:w-auto">
@@ -1354,6 +1368,23 @@ function App() {
                   </div>
                 </div>
               </div>
+              {currentCategory === "ytdlp" && (
+                <YtDlpTaskComposer
+                  onSubmit={async input => {
+                    try {
+                      const result = await fileApi.createYtDlpTask(input);
+                      setNotification({ show: true, message: `下载任务 ${result.task.id} 已加入队列`, type: 'success' });
+                    } catch (error: any) {
+                      if (error?.message === 'UNAUTHORIZED') {
+                        authService.clearToken();
+                        setIsAuthenticated(false);
+                      }
+                      throw error;
+                    }
+                  }}
+                  onOpenTasks={() => navigateRoute({ kind: 'tasks', accountId: null, needsReplace: false })}
+                />
+              )}
               {isMobileSearchOpen && (
                 <div className="relative md:hidden">
                   <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
@@ -1388,7 +1419,7 @@ function App() {
                       setSelectedFileIds([]);
                       setSelectedFolderNames([]);
                     }}
-                    onDelete={handleBatchDelete}
+                    onDelete={() => void handleBatchDelete()}
                     onShare={handleShare}
                     shareCapabilities={storageConfig?.capabilities}
                   />

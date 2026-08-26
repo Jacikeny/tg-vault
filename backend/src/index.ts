@@ -13,6 +13,7 @@ import tasksRouter from './routes/tasks.js';
 import authRouter, { requireAuth } from './routes/auth.js';
 import { requireAuthOrSignedUrl } from './middleware/signedUrl.js';
 import { initTelegramBot } from './services/telegramBot.js';
+import { applyEffectiveTelegramBotConfig } from './services/telegramBotConfig.js';
 import { getTelegramBotStatus, markTelegramBotError, telegramBotBlocksReadiness } from './services/telegramBotStatus.js';
 import { initTelegramUserClient, isTelegramUserClientReady } from './services/telegramUserClient.js';
 import { isInitialSetupRequired } from './utils/authSettings.js';
@@ -186,19 +187,20 @@ app.use((err: Error, _req: express.Request, res: express.Response, _next: expres
 let server: ReturnType<typeof app.listen> | null = null;
 
 async function initializeApplication(): Promise<void> {
-    const telegramEnabled = !!process.env.TELEGRAM_BOT_TOKEN && !!process.env.TELEGRAM_API_ID && !!process.env.TELEGRAM_API_HASH;
     await ensureDatabaseInitialized();
+    const telegramConfig = await applyEffectiveTelegramBotConfig();
+    const telegramEnabled = telegramConfig.configured && telegramConfig.enabled;
     await markTransferTasksAfterRestart();
     const { storageManager } = await import('./services/storage.js');
     await storageManager.init();
     const twoFactor = await get2FAReadiness();
     if (!twoFactor.ready) throw new Error('2FA 已启用但密钥不可读取');
     if (telegramEnabled) {
-        await initTelegramUserClient();
+        await initTelegramUserClient(telegramConfig.credentials || undefined);
         try {
             await initTelegramBot();
         } catch (error) {
-            if (/^(1|true|yes|on)$/i.test(process.env.TELEGRAM_REQUIRED || 'false')) throw error;
+            if (telegramConfig.required) throw error;
             const message = error instanceof Error ? error.message : String(error);
             markTelegramBotError('error', message, '检查 Telegram 凭证/网络并重启后端');
             console.warn('Telegram Bot 可选组件启动失败，应用以 degraded 状态继续:', message);
@@ -212,7 +214,8 @@ async function initializeApplication(): Promise<void> {
 async function startApplication(): Promise<void> {
     await initializeApplication();
     server = app.listen(PORT, async () => {
-        const telegramEnabled = !!process.env.TELEGRAM_BOT_TOKEN && !!process.env.TELEGRAM_API_ID && !!process.env.TELEGRAM_API_HASH;
+        const telegramConfig = await applyEffectiveTelegramBotConfig();
+        const telegramEnabled = telegramConfig.configured && telegramConfig.enabled;
         const initialSetupRequired = await isInitialSetupRequired();
         console.log(`
 🚀 TG Vault 后端服务已启动

@@ -1,4 +1,4 @@
-export type TelegramUserClientState = 'not_configured' | 'missing_session' | 'ready' | 'expired' | 'permission_denied' | 'error';
+export type TelegramUserClientState = 'not_configured' | 'missing_session' | 'disabled' | 'ready' | 'expired' | 'permission_denied' | 'error';
 
 export interface TelegramUserClientStatus {
     status: TelegramUserClientState;
@@ -10,7 +10,7 @@ export interface TelegramUserClientStatus {
 }
 
 let current: TelegramUserClientStatus = {
-    status: 'not_configured', userId: null, username: null, checkedAt: null, lastError: null, action: '配置 Telegram API 与用户 session',
+    status: 'not_configured', userId: null, username: null, checkedAt: null, lastError: null, action: '配置 Telegram API 后在网页登录账号',
 };
 
 export function getTelegramUserClientStatus(): TelegramUserClientStatus {
@@ -26,9 +26,10 @@ export function recordTelegramUserClientReady(input: { userId: string; username?
 
 export function recordTelegramUserClientFailure(status: Exclude<TelegramUserClientState, 'ready'>, message: string): void {
     const actions: Record<Exclude<TelegramUserClientState, 'ready'>, string> = {
-        not_configured: '配置 TELEGRAM_API_ID、TELEGRAM_API_HASH 和 session 文件',
-        missing_session: '运行 Docker 登录命令生成 session 并重启后端',
-        expired: '重新生成 session 并重启后端',
+        not_configured: '配置 Telegram API 后在网页登录账号',
+        missing_session: '在网页中登录 Telegram 用户账号',
+        disabled: '可随时重新启用，已加密保存的登录信息会保留',
+        expired: '在网页中重新登录 Telegram 用户账号',
         permission_denied: '先用该账号加入目标频道并重新测试',
         error: '检查网络与后端日志后重新测试',
     };

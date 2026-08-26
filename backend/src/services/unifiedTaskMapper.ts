@@ -79,9 +79,12 @@ export function mapTelegramChannelJob(row: any, accountNames: ReadonlyMap<string
     const params = parseTaskOptions(row?.params);
     const state = telegramChannelJobTaskState(row);
     const total = Math.max(safeNumber(row?.total_count), safeNumber(row?.item_count));
-    const completed = safeNumber(row?.completed_items ?? row?.success_count);
     const failed = safeNumber(row?.failed_items ?? row?.failed_count);
     const skipped = safeNumber(row?.skipped_count_items ?? row?.skipped_count);
+    const completed = safeNumber(row?.completed_items ?? row?.success_count)
+        || (['completed', 'completed_with_errors'].includes(String(row?.status))
+            ? Math.max(0, total - failed - skipped - safeNumber(row?.active_items))
+            : 0);
     const accountId = params.storageAccountId == null ? null : String(params.storageAccountId);
     const provider = params.storageProvider == null ? null : String(params.storageProvider);
     return {

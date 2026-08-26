@@ -7,9 +7,10 @@ import path from 'path';
 import fs from 'fs';
 import axios from 'axios';
 import crypto from 'crypto';
+import { rateLimit } from 'express-rate-limit';
 import { getSetting, setSetting } from '../utils/settings.js';
-import { getConfiguredTelegramAllowedUsers, parseTelegramAllowedUserIds, setTelegramAllowedUsersAndReconcile } from '../utils/authSettings.js';
-import { getTelegramUserSessionFilePath, isTelegramUserClientReady } from '../services/telegramUserClient.js';
+import { changeTelegramPin, ensureTelegramPinConfigured, getConfiguredTelegramAllowedUsers, parseTelegramAllowedUserIds, setTelegramAllowedUsersAndReconcile, TelegramPinChangeError } from '../utils/authSettings.js';
+import { disableTelegramUserAccount, enableTelegramUserAccount, getTelegramUserAccountStatus, getTelegramUserSessionFilePath, isTelegramUserClientReady, telegramUserWebLogin, unlinkTelegramUserAccount } from '../services/telegramUserClient.js';
 import { assertPublicStorageEndpoint, assertStorageEndpoint } from '../utils/networkSecurity.js';
 import { getCurrentStorageScope } from '../utils/fileScope.js';
 import { getAuthToken } from './auth.js';
@@ -21,11 +22,32 @@ import { webDestructiveConfirmationStore } from '../services/webDestructiveConfi
 import { StorageProbeError } from '../services/storage.js';
 import { getTelegramUserClientStatus } from '../services/telegramUserClientStatus.js';
 import { getTelegramBotStatus } from '../services/telegramBotStatus.js';
+import {
+    applyEffectiveTelegramBotConfig,
+    deleteTelegramBotConfig,
+    getEnvironmentTelegramBotCredentials,
+    getEffectiveTelegramBotConfig,
+    getTelegramBotPublicConfig,
+    migrateEnvironmentTelegramBotConfig,
+    normalizeTelegramBotCredentials,
+    restoreTelegramBotConfig,
+    saveTelegramBotConfig,
+    snapshotTelegramBotConfig,
+    setTelegramBotEnabled,
+    setTelegramBotIdentity,
+    testTelegramBotCredentials,
+} from '../services/telegramBotConfig.js';
+import { withTelegramBotLifecycle } from '../services/telegramBot.js';
 import { maintenanceImpact } from '../utils/maintenanceActions.js';
 import { buildStorageCapabilities, buildStorageStatsPayload } from '../utils/storageProductContract.js';
 import { buildAdvancedSettings, normalizeAdvancedSettingsPatch } from '../utils/advancedSettings.js';
 import { getFileDownloadConcurrency, setFileDownloadConcurrency } from '../services/telegramUpload.js';
 import { startPeriodicCleanup, stopPeriodicCleanup } from '../services/orphanCleanup.js';
+import {
+    compactTelegramDownloadHistory,
+    DEFAULT_TELEGRAM_DOWNLOAD_HISTORY_POLICY,
+    TELEGRAM_DOWNLOAD_HISTORY_POLICY_SETTING,
+} from '../services/telegramDownloadHistoryPolicy.js';
 
 // ESM compatibility
 const checkDiskSpace = (checkDiskSpaceModule as any).default || checkDiskSpaceModule;
@@ -33,6 +55,22 @@ const checkDiskSpace = (checkDiskSpaceModule as any).default || checkDiskSpaceMo
 const router = Router();
 
 const UPLOAD_DIR = process.env.UPLOAD_DIR || './data/uploads';
+
+const telegramPinChangeLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 5,
+    message: { error: '修改 Telegram Bot PIN 请求过于频繁，请 15 分钟后再试' },
+    standardHeaders: true,
+    legacyHeaders: false,
+});
+
+const telegramUserLoginLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 10, message: { error: 'Telegram 用户账号登录请求过于频繁，请稍后再试' }, standardHeaders: true, legacyHeaders: false });
+function getTelegramUserLoginSessionKey(req: Request): string { const token = getAuthToken(req); if (!token) throw new Error('UNAUTHORIZED'); return crypto.createHash('sha256').update(token).digest('base64url'); }
+function sendTelegramUserLoginError(res: Response, error: unknown): void { const candidate = error as { code?: string; message?: string }; const status = candidate.code === 'ACCOUNT_ALREADY_BOUND' ? 409 : candidate.code === 'FLOW_NOT_FOUND' || candidate.code === 'FLOW_EXPIRED' ? 404 : candidate.code === 'TOO_MANY_ERRORS' ? 429 : 400; res.status(status).json({ error: candidate.message || 'Telegram 登录失败', code: candidate.code || 'TELEGRAM_ERROR' }); }
+
+function noStore(res: Response): void {
+    res.setHeader('Cache-Control', 'no-store');
+}
 
 function sendStorageOperationError(res: Response, error: unknown, fallback: string): void {
     if (error instanceof StorageProbeError) {
@@ -208,8 +246,7 @@ router.get('/config', requireAuth, async (req: Request, res: Response) => {
         const allowUnsafeWebdavEndpoints = await getSetting('allow_unsafe_webdav_endpoints', 'false');
         const telegramAllowedUserIds = await getConfiguredTelegramAllowedUsers();
         const telegramAllowedUserIdsFromEnv = parseTelegramAllowedUserIds(process.env.TELEGRAM_ALLOWED_USER_IDS || '').length > 0;
-        const telegramUserSessionFilePath = getTelegramUserSessionFilePath();
-        const telegramUserSessionReady = fs.existsSync(telegramUserSessionFilePath) && isTelegramUserClientReady();
+        const telegramUserSessionReady = isTelegramUserClientReady();
 
         const oneDriveOAuth = getOAuthRouteConfig('onedrive');
         const googleDriveOAuth = getOAuthRouteConfig('google_drive');
@@ -243,6 +280,10 @@ router.get('/config/advanced-tasks', requireAuth, async (_req: Request, res: Res
             telegramFileConcurrency: await getSetting('telegram_file_download_concurrency', String(getFileDownloadConcurrency())),
             duplicateMode: await getSetting('duplicate_file_mode', process.env.DUPLICATE_FILE_MODE || 'copy'),
             autoCleanupOrphans: await getSetting('auto_cleanup_orphans', process.env.AUTO_CLEANUP_ORPHANS || 'true'),
+            telegramDownloadHistoryPolicy: await getSetting(
+                TELEGRAM_DOWNLOAD_HISTORY_POLICY_SETTING,
+                DEFAULT_TELEGRAM_DOWNLOAD_HISTORY_POLICY,
+            ),
         }));
     } catch (error) {
         console.error('获取高级任务设置失败:', error);
@@ -271,6 +312,10 @@ router.patch('/config/advanced-tasks', requireAuth, async (req: Request, res: Re
             await setSetting('auto_cleanup_orphans', String(enabled));
             process.env.AUTO_CLEANUP_ORPHANS = String(enabled);
             if (enabled) startPeriodicCleanup(); else stopPeriodicCleanup();
+        } else if ('telegramDownloadHistoryPolicy' in patch) {
+            await setSetting(TELEGRAM_DOWNLOAD_HISTORY_POLICY_SETTING, String(patch.telegramDownloadHistoryPolicy));
+            const deletedCount = await compactTelegramDownloadHistory();
+            return res.json({ success: true, ...patch, deletedCount });
         }
         return res.json({ success: true, ...patch });
     } catch (error) {
@@ -296,19 +341,175 @@ router.patch('/config/webdav-security', requireAuth, async (req: Request, res: R
     }
 });
 
+router.get('/config/telegram-bot', requireAuth, async (_req: Request, res: Response) => {
+    noStore(res);
+    try {
+        return res.json(await getTelegramBotPublicConfig());
+    } catch (error) {
+        console.error('获取 Telegram Bot 配置状态失败:', (error as Error).message);
+        return res.status(500).json({ error: '获取 Telegram Bot 配置状态失败' });
+    }
+});
+
+router.post('/config/telegram-bot/test', requireAuth, async (req: Request, res: Response) => {
+    noStore(res);
+    try {
+        const credentials = normalizeTelegramBotCredentials(req.body);
+        const bot = await testTelegramBotCredentials(credentials);
+        return res.json({ success: true, bot });
+    } catch (error) {
+        return res.status(400).json({ error: error instanceof Error ? error.message : 'Telegram Bot 凭证测试失败' });
+    }
+});
+
+router.put('/config/telegram-bot', requireAuth, async (req: Request, res: Response) => {
+    noStore(res);
+    try {
+        const credentials = normalizeTelegramBotCredentials(req.body);
+        const bot = await testTelegramBotCredentials(credentials);
+        const enabled = req.body?.enabled !== false;
+        const required = req.body?.required === true;
+        await withTelegramBotLifecycle(async controls => {
+            await ensureTelegramPinConfigured(req.body?.telegramPin);
+            const previous = await snapshotTelegramBotConfig();
+            const previousEffective = await getEffectiveTelegramBotConfig();
+            await saveTelegramBotConfig(credentials, { enabled, required });
+            setTelegramBotIdentity(bot);
+            await applyEffectiveTelegramBotConfig();
+            try {
+                if (enabled) await controls.restart(credentials); else await controls.stop();
+            } catch (activationError) {
+                await restoreTelegramBotConfig(previous);
+                const restored = await applyEffectiveTelegramBotConfig();
+                if (previousEffective.enabled && restored.credentials) await controls.restart(restored.credentials);
+                else await controls.stop();
+                throw activationError;
+            }
+        });
+        return res.json({ success: true, config: await getTelegramBotPublicConfig() });
+    } catch (error) {
+        return res.status(400).json({ error: error instanceof Error ? error.message : '保存 Telegram Bot 配置失败' });
+    }
+});
+
+router.post('/config/telegram-bot/migrate', requireAuth, async (req: Request, res: Response) => {
+    noStore(res);
+    try {
+        const credentials = getEnvironmentTelegramBotCredentials();
+        const bot = await testTelegramBotCredentials(credentials);
+        await withTelegramBotLifecycle(async controls => {
+            await ensureTelegramPinConfigured(req.body?.telegramPin);
+            const previous = await snapshotTelegramBotConfig();
+            try {
+                await migrateEnvironmentTelegramBotConfig(credentials);
+                setTelegramBotIdentity(bot);
+                await applyEffectiveTelegramBotConfig();
+                await controls.restart(credentials);
+            } catch (activationError) {
+                await restoreTelegramBotConfig(previous);
+                await applyEffectiveTelegramBotConfig();
+                await controls.restart(credentials);
+                throw activationError;
+            }
+        });
+        return res.json({ success: true, config: await getTelegramBotPublicConfig() });
+    } catch (error) {
+        return res.status(400).json({ error: error instanceof Error ? error.message : '迁移 Telegram Bot 配置失败' });
+    }
+});
+
+router.post('/config/telegram-bot/disable', requireAuth, async (_req: Request, res: Response) => {
+    noStore(res);
+    try {
+        await withTelegramBotLifecycle(async controls => {
+            await setTelegramBotEnabled(false);
+            await applyEffectiveTelegramBotConfig();
+            await controls.stop();
+        });
+        return res.json({ success: true, config: await getTelegramBotPublicConfig() });
+    } catch {
+        return res.status(500).json({ error: '停用 Telegram Bot 失败' });
+    }
+});
+
+router.put('/config/telegram-bot/pin', requireAuth, telegramPinChangeLimiter, async (req: Request, res: Response) => {
+    noStore(res);
+    try {
+        const current = await getTelegramBotPublicConfig();
+        if (!current.configured) {
+            return res.status(409).json({ error: '请先配置 Telegram Bot，再设置 PIN' });
+        }
+        await changeTelegramPin(req.body?.verificationMethod, req.body?.verificationSecret, req.body?.newPin);
+        return res.json({
+            success: true,
+            message: current.pinConfigured
+                ? 'Telegram Bot PIN 已修改；所有已认证的 Telegram 用户需要使用新 PIN 重新验证'
+                : 'Telegram Bot PIN 已设置',
+        });
+    } catch (error) {
+        if (error instanceof TelegramPinChangeError) {
+            return res.status(error.statusCode).json({ error: error.message });
+        }
+        console.error('修改 Telegram Bot PIN 失败:', error);
+        return res.status(500).json({ error: '修改 Telegram Bot PIN 失败' });
+    }
+});
+
+router.delete('/config/telegram-bot', requireAuth, async (req: Request, res: Response) => {
+    noStore(res);
+    if (req.body?.confirmed !== true) return res.status(409).json({ error: '删除 Telegram Bot 配置需要二次确认', code: 'CONFIRMATION_REQUIRED' });
+    try {
+        const current = await getTelegramBotPublicConfig();
+        if (current.source !== 'web') return res.status(409).json({ error: '当前没有可删除的网页 Telegram Bot 配置' });
+        await withTelegramBotLifecycle(async controls => {
+            await controls.stop();
+            await deleteTelegramBotConfig();
+            const sessionPath = process.env.TELEGRAM_SESSION_FILE || './data/telegram_session.txt';
+            if (fs.existsSync(sessionPath)) fs.rmSync(sessionPath, { force: true });
+            const effective = await applyEffectiveTelegramBotConfig();
+            if (effective.source === 'environment' && effective.enabled && effective.credentials) await controls.restart(effective.credentials);
+        });
+        return res.json({ success: true, config: await getTelegramBotPublicConfig() });
+    } catch {
+        return res.status(500).json({ error: '删除 Telegram Bot 配置失败' });
+    }
+});
+
 router.post('/config/telegram-user-download', requireAuth, async (req: Request, res: Response) => {
     try {
         const enabled = !!req.body?.enabled;
-        if (enabled && !isTelegramUserClientReady()) {
-            return res.status(400).json({ error: 'Telegram 用户 session 未就绪，请先生成 session 并重启后端' });
-        }
-        await setSetting('telegram_user_download_enabled', enabled ? 'true' : 'false');
+        if (enabled) await enableTelegramUserAccount(); else await disableTelegramUserAccount();
+        if (enabled && !isTelegramUserClientReady()) return res.status(400).json({ error: 'Telegram 用户账号未就绪，请先在网页中登录' });
         res.json({ success: true, enabled });
     } catch (error) {
         console.error('更新 Telegram 用户下载设置失败:', error);
         res.status(500).json({ error: '更新 Telegram 用户下载设置失败' });
     }
 });
+
+router.get('/config/telegram-user', requireAuth, async (_req: Request, res: Response) => { noStore(res); res.json(await getTelegramUserAccountStatus()); });
+router.post('/config/telegram-user/login/phone', requireAuth, telegramUserLoginLimiter, async (req: Request, res: Response) => {
+    noStore(res);
+    try {
+        const account = await getTelegramUserAccountStatus();
+        if (account.configured) {
+            return res.status(409).json({ error: '当前已绑定 Telegram 用户账号，请先解除绑定后再登录其他账号', code: 'ACCOUNT_ALREADY_BOUND' });
+        }
+        return res.json(await telegramUserWebLogin.start(getTelegramUserLoginSessionKey(req), req.body?.phone));
+    } catch (error) {
+        return sendTelegramUserLoginError(res, error);
+    }
+});
+router.post('/config/telegram-user/login/code', requireAuth, telegramUserLoginLimiter, async (req: Request, res: Response) => { noStore(res); try { res.json(await telegramUserWebLogin.submitCode(getTelegramUserLoginSessionKey(req), req.body?.flowId, req.body?.code)); } catch (error) { sendTelegramUserLoginError(res, error); } });
+router.post('/config/telegram-user/login/password', requireAuth, telegramUserLoginLimiter, async (req: Request, res: Response) => { noStore(res); try { res.json(await telegramUserWebLogin.submitPassword(getTelegramUserLoginSessionKey(req), req.body?.flowId, req.body?.password)); } catch (error) { sendTelegramUserLoginError(res, error); } });
+router.post('/config/telegram-user/disable', requireAuth, async (_req: Request, res: Response) => {
+    noStore(res);
+    const account = await getTelegramUserAccountStatus();
+    if (!account.enabled) return res.status(409).json({ error: '账号级下载器当前已经停用', code: 'ALREADY_DISABLED' });
+    await disableTelegramUserAccount();
+    return res.json({ success: true, enabled: false });
+});
+router.delete('/config/telegram-user', requireAuth, async (_req: Request, res: Response) => { noStore(res); await unlinkTelegramUserAccount(); res.json({ success: true }); });
 
 router.post('/config/telegram-allowed-users', requireAuth, async (req: Request, res: Response) => {
     try {

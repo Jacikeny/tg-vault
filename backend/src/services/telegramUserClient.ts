@@ -1,85 +1,172 @@
-import fs from 'fs';
-import path from 'path';
-import { TelegramClient } from 'telegram';
+import fs from 'node:fs';
+import path from 'node:path';
+import { Api, TelegramClient } from 'telegram';
 import { StringSession } from 'telegram/sessions/index.js';
+import { getEffectiveTelegramBotConfig } from './telegramBotConfig.js';
+import { TelegramUserWebLoginFlows, type TelegramUserLoginAccount, type TelegramUserLoginClient } from './telegramUserWebLogin.js';
+import { deleteSettings, getSetting, setSetting, setSettings } from '../utils/settings.js';
 import { recordTelegramUserClientFailure, recordTelegramUserClientReady } from './telegramUserClientStatus.js';
+
+export const TELEGRAM_USER_SESSION_SETTING = 'telegram_user_session';
+const TELEGRAM_USER_ENABLED_SETTING = 'telegram_user_download_enabled';
+const TELEGRAM_USER_ID_SETTING = 'telegram_user_id';
+const TELEGRAM_USER_USERNAME_SETTING = 'telegram_user_username';
 
 let userClient: TelegramClient | null = null;
 let userSessionFilePath = '';
 
-function getUserApiId(): number {
-  return parseInt(process.env.TELEGRAM_API_ID || '0');
-}
-
-function getUserApiHash(): string {
-  return process.env.TELEGRAM_API_HASH || '';
+async function getUserCredentials(): Promise<{ apiId: number; apiHash: string } | null> {
+    const effective = await getEffectiveTelegramBotConfig();
+    if (effective.credentials) return { apiId: effective.credentials.apiId, apiHash: effective.credentials.apiHash };
+    const apiId = Number.parseInt(process.env.TELEGRAM_API_ID || '0', 10);
+    const apiHash = process.env.TELEGRAM_API_HASH || '';
+    return apiId && apiHash ? { apiId, apiHash } : null;
 }
 
 function getSessionFilePath(): string {
-  return process.env.TELEGRAM_USER_SESSION_FILE || './data/telegram_user_session.txt';
+    return process.env.TELEGRAM_USER_SESSION_FILE || './data/telegram_user_session.txt';
 }
 
-export async function initTelegramUserClient(): Promise<void> {
-  const apiId = getUserApiId();
-  const apiHash = getUserApiHash();
-  if (!apiId || !apiHash) {
-    recordTelegramUserClientFailure('not_configured', '未配置 Telegram API');
-    console.log('⚠️ 未配置 Telegram 用户账号下载器，跳过 user client 初始化');
-    return;
-  }
-
-  userSessionFilePath = getSessionFilePath();
-  const sessionDir = path.dirname(userSessionFilePath);
-  if (!fs.existsSync(sessionDir)) {
-    fs.mkdirSync(sessionDir, { recursive: true, mode: 0o700 });
-  }
-
-  const sessionString = fs.existsSync(userSessionFilePath)
-    ? fs.readFileSync(userSessionFilePath, 'utf-8').trim()
-    : '';
-
-  if (!sessionString) {
-    recordTelegramUserClientFailure('missing_session', 'Telegram 用户 session 文件为空或不存在');
-    console.log('⚠️ Telegram 用户 session 为空，先运行登录脚本生成 session 后再启用 user client');
-    return;
-  }
-
-  userClient = new TelegramClient(new StringSession(sessionString), apiId, apiHash, {
-    connectionRetries: 15,
-    retryDelay: 2000,
-    useWSS: false,
-    deviceModel: 'TG Vault User Downloader',
-    systemVersion: '1.0.0',
-    appVersion: '1.0.0',
-    floodSleepThreshold: 120,
-  });
-
-  await userClient.connect();
-  if (!(await userClient.checkAuthorization())) {
-    recordTelegramUserClientFailure('expired', 'Telegram 用户 session 无效或已过期');
-    console.log('⚠️ Telegram 用户 session 无效或已过期，user client 未启用');
+async function stopClient(): Promise<void> {
+    const current = userClient;
     userClient = null;
-    return;
-  }
-
-  fs.writeFileSync(userSessionFilePath, userClient.session.save() as unknown as string, { mode: 0o600 });
-  fs.chmodSync(userSessionFilePath, 0o600);
-  const me = await userClient.getMe();
-  recordTelegramUserClientReady({
-    userId: String((me as any)?.id || ''),
-    username: (me as any)?.username || null,
-  });
-  console.log('🤖 Telegram 用户账号下载器已连接');
+    if (!current) return;
+    try { await current.disconnect(); } catch { /* best effort */ }
+    try { await current.destroy(); } catch { /* best effort */ }
 }
 
-export function getTelegramUserClient(): TelegramClient | null {
-  return userClient;
+export async function migrateLegacyTelegramUserSession(): Promise<string> {
+    const stored = await getSetting<string>(TELEGRAM_USER_SESSION_SETTING, '');
+    if (stored) return stored;
+    userSessionFilePath = getSessionFilePath();
+    if (!fs.existsSync(userSessionFilePath)) return '';
+    const legacy = fs.readFileSync(userSessionFilePath, 'utf8').trim();
+    if (!legacy) return '';
+    await setSetting(TELEGRAM_USER_SESSION_SETTING, legacy);
+    return legacy;
 }
 
-export function isTelegramUserClientReady(): boolean {
-  return Boolean(userClient?.connected);
+function makeClient(session: string, credentials: { apiId: number; apiHash: string }): TelegramClient {
+    return new TelegramClient(new StringSession(session), credentials.apiId, credentials.apiHash, {
+        connectionRetries: 15,
+        retryDelay: 2000,
+        useWSS: false,
+        deviceModel: 'TG Vault User Downloader',
+        systemVersion: '1.0.0',
+        appVersion: '1.0.0',
+        floodSleepThreshold: 120,
+    });
 }
 
-export function getTelegramUserSessionFilePath(): string {
-  return userSessionFilePath || getSessionFilePath();
+export async function initTelegramUserClient(credentials?: { apiId: number; apiHash: string }): Promise<void> {
+    await stopClient();
+    const resolved = credentials || await getUserCredentials();
+    if (!resolved) {
+        recordTelegramUserClientFailure('not_configured', '未配置 Telegram API');
+        return;
+    }
+    const sessionString = await migrateLegacyTelegramUserSession();
+    if (!sessionString) {
+        recordTelegramUserClientFailure('missing_session', '尚未登录 Telegram 用户账号');
+        return;
+    }
+    if ((await getSetting(TELEGRAM_USER_ENABLED_SETTING, 'false')) !== 'true') {
+        recordTelegramUserClientFailure('disabled', '');
+        return;
+    }
+    const client = makeClient(sessionString, resolved);
+    try {
+        await client.connect();
+        if (!(await client.checkAuthorization())) throw new Error('SESSION_EXPIRED');
+        userClient = client;
+        const saved = client.session.save() as unknown as string;
+        if (saved !== sessionString) await setSetting(TELEGRAM_USER_SESSION_SETTING, saved);
+        const me = await client.getMe();
+        recordTelegramUserClientReady({ userId: String((me as any)?.id || ''), username: (me as any)?.username || null });
+        const legacyPath = getSessionFilePath();
+        if (fs.existsSync(legacyPath)) fs.rmSync(legacyPath, { force: true });
+    } catch (error) {
+        try { await client.disconnect(); } catch { /* best effort */ }
+        try { await client.destroy(); } catch { /* best effort */ }
+        recordTelegramUserClientFailure(String((error as Error).message).includes('EXPIRED') ? 'expired' : 'error', 'Telegram 用户账号连接失败');
+    }
 }
+
+async function persistAndActivate(session: string, account: TelegramUserLoginAccount): Promise<void> {
+    await setSettings([
+        [TELEGRAM_USER_SESSION_SETTING, session],
+        [TELEGRAM_USER_ENABLED_SETTING, 'true'],
+        [TELEGRAM_USER_ID_SETTING, account.userId],
+        [TELEGRAM_USER_USERNAME_SETTING, account.username || ''],
+    ]);
+    await initTelegramUserClient();
+}
+
+class GramJsWebLoginClient implements TelegramUserLoginClient {
+    constructor(private readonly client: TelegramClient, private readonly credentials: { apiId: number; apiHash: string }) {}
+    async connect(): Promise<void> { await this.client.connect(); }
+    sendCode(credentials: { apiId: number; apiHash: string }, phone: string) { return this.client.sendCode(credentials, phone); }
+    async signInCode(phone: string, phoneCodeHash: string, code: string): Promise<'authorized' | 'password_needed'> {
+        try {
+            await this.client.invoke(new Api.auth.SignIn({ phoneNumber: phone, phoneCodeHash, phoneCode: code }));
+            return 'authorized';
+        } catch (error) {
+            const name = String((error as any)?.errorMessage || (error as Error).message || '');
+            if (name.includes('SESSION_PASSWORD_NEEDED')) return 'password_needed';
+            throw error;
+        }
+    }
+    async signInPassword(password: string): Promise<void> {
+        let captured: unknown;
+        await this.client.signInWithPassword(this.credentials, {
+            password: async () => password,
+            onError: async error => { captured = error; return true; },
+        }).catch(error => { throw captured || error; });
+    }
+    async getMe() { return await this.client.getMe() as any; }
+    saveSession() { return this.client.session.save() as unknown as string; }
+    disconnect() { return this.client.disconnect(); }
+    destroy() { return this.client.destroy(); }
+}
+
+export const telegramUserWebLogin = new TelegramUserWebLoginFlows<GramJsWebLoginClient>({
+    credentials: getUserCredentials,
+    createClient: credentials => new GramJsWebLoginClient(makeClient('', credentials), credentials),
+    persistAndActivate,
+});
+
+export async function getTelegramUserAccountStatus(): Promise<{
+    configured: boolean; enabled: boolean; connected: boolean; account: TelegramUserLoginAccount | null;
+}> {
+    const session = await migrateLegacyTelegramUserSession();
+    const enabled = (await getSetting(TELEGRAM_USER_ENABLED_SETTING, 'false')) === 'true';
+    const userId = await getSetting<string>(TELEGRAM_USER_ID_SETTING, '');
+    const username = await getSetting<string>(TELEGRAM_USER_USERNAME_SETTING, '');
+    return {
+        configured: Boolean(session), enabled, connected: isTelegramUserClientReady(),
+        account: userId ? { userId, username: username || null, displayName: null } : null,
+    };
+}
+
+export async function disableTelegramUserAccount(): Promise<void> {
+    await setSetting(TELEGRAM_USER_ENABLED_SETTING, 'false');
+    await stopClient();
+    recordTelegramUserClientFailure('disabled', '');
+}
+
+export async function enableTelegramUserAccount(): Promise<void> {
+    await setSetting(TELEGRAM_USER_ENABLED_SETTING, 'true');
+    await initTelegramUserClient();
+}
+
+export async function unlinkTelegramUserAccount(): Promise<void> {
+    await stopClient();
+    await deleteSettings([TELEGRAM_USER_SESSION_SETTING, TELEGRAM_USER_ENABLED_SETTING, TELEGRAM_USER_ID_SETTING, TELEGRAM_USER_USERNAME_SETTING]);
+    const legacyPath = getSessionFilePath();
+    if (fs.existsSync(legacyPath)) fs.rmSync(legacyPath, { force: true });
+    recordTelegramUserClientFailure('missing_session', '尚未登录 Telegram 用户账号');
+}
+
+export function getTelegramUserClient(): TelegramClient | null { return userClient; }
+export function isTelegramUserClientReady(): boolean { return Boolean(userClient?.connected); }
+export function getTelegramUserSessionFilePath(): string { return userSessionFilePath || path.resolve(getSessionFilePath()); }

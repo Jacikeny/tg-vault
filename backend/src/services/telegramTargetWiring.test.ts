@@ -16,7 +16,7 @@ test('ordinary files, albums, channel jobs and yt-dlp resolve chat target at adm
     assert.match(bot, /createYtDlpPreview\(message, senderId, url\)/);
     assert.match(bot, /consumeOrGetTelegramTargetState\(messageChatKey\(message, userId\)\)/);
     assert.match(bot, /handleYtDlpCommand\(currentMessage, consumed\.value\.url, consumed\.value\.target/);
-    assert.match(ytdlp, /explicitTarget \|\| storageManager\.getActiveTarget\(\)/);
+    assert.match(ytdlp, /input\.target \|\| storageManager\.getActiveTarget\(\)/);
     assert.match(jobs, /target\?: StorageTargetSnapshot/);
 });
 

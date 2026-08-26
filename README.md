@@ -27,10 +27,11 @@
     <a href="https://github.com/hicocos/tg-vault/network/members"><img src="https://img.shields.io/github/forks/hicocos/tg-vault?style=for-the-badge&logo=github&color=8e44ad" alt="Forks" /></a>
   </p>
   <p>
+    <img src="https://img.shields.io/badge/Release-v2.1.0-2ea44f?style=flat-square" alt="Release v2.1.0" />
     <img src="https://img.shields.io/badge/Telegram-Bot-26A5E4?style=flat-square&logo=telegram&logoColor=white" alt="Telegram Bot" />
     <img src="https://img.shields.io/badge/Docker-Compose-2496ED?style=flat-square&logo=docker&logoColor=white" alt="Docker Compose" />
     <img src="https://img.shields.io/badge/React-TypeScript-3178C6?style=flat-square&logo=react&logoColor=white" alt="React TypeScript" />
-    <img src="https://img.shields.io/badge/PostgreSQL-pgvector-4169E1?style=flat-square&logo=postgresql&logoColor=white" alt="PostgreSQL pgvector" />
+    <img src="https://img.shields.io/badge/PostgreSQL-16-4169E1?style=flat-square&logo=postgresql&logoColor=white" alt="PostgreSQL 16" />
   </p>
 </div>
 
@@ -61,59 +62,23 @@ git clone https://github.com/hicocos/tg-vault.git
 cd tg-vault
 ```
 
-### 2. 配置环境变量
+### 2. 运行安装向导
 
 ```bash
-cp .env.example .env
-vi .env
+./deploy/install.sh
 ```
+
+安装向导会先检测 Docker Engine、Docker Compose 插件、Python 3 和 Git；缺少组件时，由你选择自动补全、查看手动提示或退出。环境通过后，依次输入 Web 前端 URL 和后端 API URL，确认后会在同一次运行中生成 `.env`、数据库密码、应用密钥和构建元数据，并执行 `docker compose up -d --build`。
 
 - **基础 Web 部署**
-  填写 `DB_PASSWORD`、`VITE_API_URL`、`CORS_ORIGIN` 和 `DOMAIN`。
+  只需输入 Web 前端 URL 与后端 API URL；地址必须是完整的 `http(s)` origin。
 - **启用 Telegram Bot 基础能力**
-  额外填写 `TELEGRAM_BOT_TOKEN`、`TELEGRAM_API_ID` 和 `TELEGRAM_API_HASH`；建议同时填写 `TELEGRAM_ALLOWED_USER_IDS`。
+  启动 Web 后进入 **设置 → Telegram → Telegram Bot 连接**，填写 Bot Token、API ID、API Hash 和 Bot PIN。凭证会加密保存且不回显。
 - **启用账号级 Telegram 下载器**
-  完成 Bot 基础配置后，运行登录脚本生成 `TELEGRAM_USER_SESSION_FILE`。
-
-### 3. 构建前端
-
-`VITE_API_URL` 是前端构建时变量。请先在 `.env` 中设置好它，然后用变量传入构建命令：
-
-```bash
-set -a
-source .env
-set +a
-
-docker build \
-  --build-arg VITE_API_URL="${VITE_API_URL}" \
-  -t tg-vault-frontend:latest \
-  ./frontend
-```
-
-### 4. 构建后端
-
-```bash
-docker build -t tg-vault-backend:latest ./backend
-```
-
-### 5. 生成用户账号 session（可选）
-
-仅在需要账号级 Telegram 下载器时执行。该命令会使用 `docker-compose.yml` 中的 `/data` 持久化卷，默认写入 `.env` 里的 `TELEGRAM_USER_SESSION_FILE` 路径。
-
-```bash
-docker compose run --rm --no-deps backend npm run login:telegram-user
-```
-
-如果暂时只用 Bot 基础能力，可以跳过这一步。
-
-### 6. 启动服务
-
-```bash
-docker compose up -d
-```
+  在 **设置 → Telegram → Telegram 账号下载器** 中使用手机号、验证码和可选的两步验证密码登录；session 加密保存在服务端。旧版 CLI 登录仅作为兼容方式保留。
 
 > [!IMPORTANT]
-> 修改 `VITE_API_URL` 后必须重新构建前端镜像；仅重启容器不会改变已经打包进前端静态文件的 API 地址。
+> `VITE_API_URL` 会打包进前端静态文件。修改该地址后必须重新运行 `deploy/install.sh`；仅重启容器不会更新 API 地址。
 
 ---
 
@@ -122,22 +87,40 @@ docker compose up -d
 > 下面仅列出部署时最常用的变量。点击各分组展开详情；完整模板以 [`.env.example`](.env.example) 为准。
 
 <details open>
-<summary><strong>必填项（4 项）</strong></summary>
+<summary><strong>新手只需填写（2 项）</strong></summary>
 
-- **`DB_PASSWORD`** — PostgreSQL 密码；示例：`change_me_to_a_strong_password`
 - **`VITE_API_URL`** — 前端访问后端的公网地址；示例：`https://api.yourdomain.com`
 - **`CORS_ORIGIN`** — 允许跨域的前端来源；示例：`https://cloud.yourdomain.com`
-- **`DOMAIN`** — 应用主域名，不带协议；示例：`cloud.yourdomain.com`
+
+> 两项都必须是完整的 `http(s)` origin，不要带路径、查询参数或末尾 `/`。安装向导会直接询问并校验这两个地址，无需手动编辑 `.env` 或重复运行脚本。
 
 </details>
 
 <details>
-<summary><strong>Telegram 相关（7 项）</strong></summary>
+<summary><strong>安装脚本自动生成</strong></summary>
 
-- **`TELEGRAM_BOT_TOKEN`** — Bot 基础能力必填；从 [@BotFather](https://t.me/BotFather) 获取
-- **`TELEGRAM_API_ID` / `TELEGRAM_API_HASH`** — Bot 或账号级下载器必填；从 [my.telegram.org](https://my.telegram.org) 获取
-- **`TELEGRAM_ALLOWED_USER_IDS`** — 建议填写；允许通过 Bot PIN 登录的 Telegram user id，多个用逗号分隔
-- **`TELEGRAM_USER_SESSION_FILE`** — 账号级下载器可选；默认 `/data/telegram_user_session.txt`
+- **`DB_PASSWORD`** — 自动生成 64 位十六进制 PostgreSQL 密码
+- **`SESSION_SECRET`** / **`STORAGE_CREDENTIALS_SECRET`** — 新安装时自动生成并保留；升级旧部署时不会覆盖 `/data/secrets` 中已有的持久密钥
+- **`SOURCE_REVISION`** — 自动读取当前 `git rev-parse HEAD`
+- **`SOURCE_VERSION`** / **`IMAGE_VERSION`** — 优先读取当前 Git tag，否则读取项目版本
+
+</details>
+
+<details>
+<summary><strong>高级部署覆盖</strong></summary>
+
+- **`OAUTH_CALLBACK_BASE_URL`** — 默认继承 `VITE_API_URL`；仅特殊 API 入口时填写
+- **`OAUTH_FRONTEND_ORIGIN`** — 默认继承 `CORS_ORIGIN` 的第一个地址；仅多前端入口时填写
+
+</details>
+
+<details>
+<summary><strong>Telegram 相关</strong></summary>
+
+- **Bot Token / API ID / API Hash** — 推荐在 Web“设置 → Telegram”中配置；使用 AES-256-GCM 加密保存，查询接口和页面均不回显
+- **旧 `.env` 凭证** — 仍兼容，可在 Web 中显式迁移到加密管理；Web 配置优先于环境变量
+- **允许用户** — 在 Web 中维护 Telegram user id；`TELEGRAM_ALLOWED_USER_IDS` 仅作为兼容覆盖
+- **用户账号 session** — 推荐在 Web 中登录并加密保存；`TELEGRAM_USER_SESSION_FILE` 仅用于旧版明文 session 文件迁移和 CLI 兼容
 - **`TELEGRAM_DOWNLOAD_WORKERS`** — 单文件分片并发；默认 `4`，建议 `4` 或 `8`
 - **`TELEGRAM_FILE_DOWNLOAD_CONCURRENCY`** — 同时下载的文件数；默认 `2`，可选 `1/2/3/4`
 
@@ -189,25 +172,23 @@ docker compose up -d
 1. 在 Telegram 中搜索 [@BotFather](https://t.me/BotFather) 并开始对话。
 2. 发送 `/newbot`，按提示创建机器人。
 3. 复制 BotFather 返回的 `HTTP API TOKEN`。
-4. 写入 `.env` 的 `TELEGRAM_BOT_TOKEN`。
+4. 在 TG Vault Web 的“设置 → Telegram”中填写 Token。
 
 ### 获取 API ID 和 API Hash
 
 1. 访问 [my.telegram.org](https://my.telegram.org) 并登录 Telegram 账号。
 2. 进入 `API development tools`。
 3. 创建应用后复制 `api_id` 和 `api_hash`。
-4. 写入 `.env` 的 `TELEGRAM_API_ID` / `TELEGRAM_API_HASH`。
-5. 如果启用账号级下载器，继续运行 `docker compose run --rm --no-deps backend npm run login:telegram-user` 生成用户账号 session。
+4. 在 **设置 → Telegram → Telegram Bot 连接** 中与 Bot Token 一起填写，先测试连接，再保存并启用。
+5. 需要账号级下载器时，在同页使用手机号、验证码和可选两步验证密码登录；无需手工生成或编辑 session 文件。
 
 ### Telegram Bot 允许用户
 
-TG Vault 会限制能通过 Bot PIN 登录的 Telegram 用户。推荐在 `.env` 中填写：
+TG Vault 会限制能通过 Bot PIN 登录的 Telegram 用户。推荐进入 **设置 → Telegram → Telegram Bot 用户权限**，填写一个或多个数字 user id；多个 ID 用英文逗号分隔。
 
-```env
-TELEGRAM_ALLOWED_USER_IDS=123456789,987654321
-```
+获取 user id：让用户在 Telegram 私聊 `@userinfobot` 查看 `Id`。如果允许列表留空，并且后台还没有任何 Telegram 用户认证成功，第一个正确输入 Bot PIN 的用户可自动加入允许列表。之后应在 Web 中明确维护列表。
 
-获取 user id：让用户在 Telegram 私聊 `@userinfobot` 查看 `Id`。如果部署时留空，系统会在“还没有任何 Telegram 用户认证成功”时，把第一个正确输入 Bot PIN 的用户自动加入后台允许列表；之后可以在 Web 后台的 **设置 → Telegram Bot 设置** 中动态维护允许列表。
+旧部署仍可使用 `TELEGRAM_ALLOWED_USER_IDS` 环境变量；一旦设置，Web 页面会显示“由环境变量管理”，需要修改 `.env` 并重启 backend。
 
 ### 账号级下载器什么时候需要？
 
@@ -285,13 +266,16 @@ TELEGRAM_ALLOWED_USER_IDS=123456789,987654321
 
 ## 📥 yt-dlp 视频下载
 
-通过集成 [yt-dlp](https://github.com/yt-dlp/yt-dlp)，你可以直接在 Telegram Bot 中发送视频链接，让服务器解析并下载到当前存储源。
+通过集成 [yt-dlp](https://github.com/yt-dlp/yt-dlp)，可以从 Web 文件页或 Telegram Bot 创建任务，下载到提交任务时选定的存储源。
+
+- **Web**：在文件页的“添加下载任务”中粘贴单个媒体页面 URL，选择“视频（最佳质量）”或“仅音频（MP3）”，提交后到任务中心查看进度。
+- **Telegram Bot**：先通过 `/start` 验证身份，再发送：
 
 ```text
 /ytdlp https://example.com/video
 ```
 
-限制：仅支持单个链接；需要先通过 `/start` 验证身份；链接必须以 `http://` 或 `https://` 开头。
+限制：每次只处理一个以 `http://` 或 `https://` 开头的媒体页面链接；播放列表默认不处理。
 
 ---
 
@@ -299,11 +283,10 @@ TELEGRAM_ALLOWED_USER_IDS=123456789,987654321
 
 TG Vault 默认采用“首次初始化”模式保护 Web 和 API：
 
-1. 服务启动后，首次访问 Web 页面会要求创建：
-   - 网页管理员密码：至少 8 位，使用 `scrypt` 加盐哈希后保存到数据库。
-   - Telegram Bot 4 位 PIN：仅用于 Bot `/start` 身份验证，同样使用 `scrypt` 加盐哈希保存。
-2. 登录成功后，浏览器会获得 HttpOnly Cookie 会话，前端不再把访问 token 写入 `localStorage`。
-3. 修改类请求会校验 `Origin`，请确保 `.env` 中的 `CORS_ORIGIN` 与前端公网地址一致。
+1. 服务启动后，首次访问 Web 页面始终创建至少 8 位的网页管理员密码，并使用 `scrypt` 加盐哈希保存到数据库。
+2. 如果此时已经通过环境变量配置 Telegram Bot，初始化页还会要求创建 Bot 4 位 PIN；新安装也可以先完成网页初始化，再到 **设置 → Telegram** 配置 Bot 和 PIN。
+3. 登录成功后，浏览器会获得 HttpOnly Cookie 会话，前端不再把访问 token 写入 `localStorage`。
+4. 修改类请求会校验 `Origin`，请确保 `.env` 中的 `CORS_ORIGIN` 与前端公网地址一致。
 
 > [!IMPORTANT]
 > 生产环境请使用 HTTPS。默认 `COOKIE_SECURE=true` 时，浏览器只会在 HTTPS 下发送登录 Cookie；如果你只在本地 HTTP 调试，可临时设置 `COOKIE_SECURE=false`。
@@ -355,23 +338,16 @@ COOKIE_SECURE=true
 
 ```bash
 git fetch origin
+git status --short
 git pull --ff-only origin main
-
-docker compose up -d --build
+./deploy/install.sh
 ```
 
 说明：
 
-- `docker compose up -d --build` 会按最新代码重新构建并启动前后端容器。
-- PostgreSQL 数据、上传文件、Telegram 用户 session 和内部密钥都在 Docker volume 中，正常重建容器不会丢失。
-- 如果你修改了 `.env` 中的 `VITE_API_URL`，也使用同一套更新命令；前端会重新打包新的 API 地址。
-- 如果 `git pull --ff-only` 提示本地有改动，请先用 `git status --short` 查看；确认要临时保存本地改动时可执行：
-
-```bash
-git stash push -u -m "before update"
-git pull --ff-only origin main
-docker compose up -d --build
-```
+- 安装向导会显示已有 Web/API URL；升级时直接按三次 Enter 即可保留地址、刷新构建版本信息并重建前后端。
+- PostgreSQL 数据、上传文件、内部密钥以及数据库中加密保存的 Telegram 配置都在持久化数据中，正常重建容器不会丢失。
+- 如果 `git status --short` 显示本地修改，先确认其用途，不要强制覆盖。
 
 清理无用 Docker 资源：
 

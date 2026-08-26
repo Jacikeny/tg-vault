@@ -72,7 +72,7 @@ export const ContextMenu = ({ x, y, isOpen, onClose, items }: ContextMenuProps) 
                     animate={{ opacity: 1, scale: 1 }}
                     exit={{ opacity: 0, scale: 0.92 }}
                     transition={{ duration: 0.12 }}
-                    className="fixed z-[9999] min-w-[168px] bg-white dark:bg-zinc-900 border border-border rounded-xl shadow-xl overflow-hidden p-1.5"
+                    className="fixed z-[9999] min-w-[168px] overflow-hidden rounded-xl border border-border bg-popover p-1.5 text-popover-foreground shadow-2xl ring-1 ring-black/5 dark:ring-white/10"
                     style={{ left: x, top: y }}
                 >
                     {items.map((item, index) => (

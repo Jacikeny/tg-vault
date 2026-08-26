@@ -54,6 +54,21 @@ export const UploadCenter = ({
 
     return (
         <section className="mx-auto flex min-h-full w-full max-w-6xl flex-col gap-4 pb-8 sm:gap-6" aria-labelledby="upload-center-title">
+            <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-end">
+                <div>
+                    <h1 id="upload-center-title" className="text-2xl font-bold tracking-tight sm:text-4xl">上传中心</h1>
+                    <p className="mt-1 max-w-2xl text-sm leading-6 text-muted-foreground sm:mt-2 sm:text-base">
+                        选择目标目录后直接添加文件。大文件自动分片，上传可在后台继续。
+                    </p>
+                </div>
+                {(queue.length > 0 || recoveredUploadCount > 0) && (
+                    <Button variant="outline" className="gap-2 self-start sm:self-auto" onClick={onOpenQueue}>
+                        <Gauge className="h-4 w-4" />
+                        管理上传队列
+                    </Button>
+                )}
+            </div>
+
             <div className="overflow-hidden rounded-2xl border border-border bg-card shadow-sm">
                 <div className="p-3 sm:p-6">
                     <UploadZone
@@ -82,25 +97,6 @@ export const UploadCenter = ({
                         {folders.map(folder => <option key={folder} value={folder}>{folder}</option>)}
                     </select>
                 </div>
-            </div>
-
-            <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-end">
-                <div>
-                    <div className="mb-1 flex items-center gap-2 text-sm font-medium text-muted-foreground">
-                        <Upload className="h-4 w-4" />
-                        首页
-                    </div>
-                    <h1 id="upload-center-title" className="text-2xl font-bold tracking-tight sm:text-4xl">上传中心</h1>
-                    <p className="mt-1 max-w-2xl text-sm leading-6 text-muted-foreground sm:mt-2 sm:text-base">
-                        选择目标目录后直接添加文件。大文件自动分片，上传可在后台继续。
-                    </p>
-                </div>
-                {(queue.length > 0 || recoveredUploadCount > 0) && (
-                    <Button variant="outline" className="gap-2 self-start sm:self-auto" onClick={onOpenQueue}>
-                        <Gauge className="h-4 w-4" />
-                        管理上传队列
-                    </Button>
-                )}
             </div>
 
             <div className="grid gap-3 sm:grid-cols-3">

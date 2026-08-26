@@ -9,10 +9,11 @@ import { useRuntimeUiLocalization } from './useRuntimeUiLocalization';
 interface LoginPageProps {
     onLogin: (password: string) => Promise<{ success: boolean; error?: string; requiresTOTP?: boolean }>;
     setupRequired?: boolean;
-    onSetup?: (webPassword: string, telegramPin: string) => Promise<{ success: boolean; error?: string }>;
+    telegramPinRequired?: boolean;
+    onSetup?: (webPassword: string, telegramPin?: string) => Promise<{ success: boolean; error?: string }>;
 }
 
-export const LoginPage = ({ onLogin, setupRequired = false, onSetup }: LoginPageProps) => {
+export const LoginPage = ({ onLogin, setupRequired = false, telegramPinRequired = false, onSetup }: LoginPageProps) => {
     const rootRef = useRef<HTMLDivElement>(null);
     useRuntimeUiLocalization(rootRef);
     const [password, setPassword] = useState('');
@@ -36,11 +37,11 @@ export const LoginPage = ({ onLogin, setupRequired = false, onSetup }: LoginPage
                 setError('两次输入的网页密码不一致');
                 return;
             }
-            if (!/^\d{4}$/.test(telegramPin)) {
+            if (telegramPinRequired && !/^\d{4}$/.test(telegramPin)) {
                 setError('Telegram Bot 密码必须是 4 位数字');
                 return;
             }
-            if (password === telegramPin) {
+            if (telegramPinRequired && password === telegramPin) {
                 setError('网页密码不能与 Telegram Bot 4 位密码相同');
                 return;
             }
@@ -51,7 +52,7 @@ export const LoginPage = ({ onLogin, setupRequired = false, onSetup }: LoginPage
             setLoading(true);
             setError('');
             try {
-                const result = await onSetup(password, telegramPin);
+                const result = await onSetup(password, telegramPinRequired ? telegramPin : undefined);
                 if (!result.success) {
                     setError(result.error || '初始化失败');
                     setLoading(false);
@@ -214,7 +215,7 @@ export const LoginPage = ({ onLogin, setupRequired = false, onSetup }: LoginPage
                                             disabled={loading}
                                         />
                                     </div>
-                                    <div className="space-y-2">
+                                    {telegramPinRequired && <div className="space-y-2">
                                         <label htmlFor="telegram-pin" className="text-sm font-medium text-foreground">
                                             Telegram Bot 密码（4 位数字）
                                         </label>
@@ -223,7 +224,7 @@ export const LoginPage = ({ onLogin, setupRequired = false, onSetup }: LoginPage
                                             type="password"
                                             autoComplete="new-password"
                                             inputMode="numeric"
-                                            pattern="[0-9]*"
+                                            pattern="[0-9]{4}"
                                             maxLength={4}
                                             value={telegramPin}
                                             onChange={(e) => setTelegramPin(e.target.value.replace(/\D/g, '').slice(0, 4))}
@@ -231,8 +232,8 @@ export const LoginPage = ({ onLogin, setupRequired = false, onSetup }: LoginPage
                                             className="w-full h-12 px-4 rounded-xl border border-border bg-background text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary transition-all"
                                             disabled={loading}
                                         />
-                                        <p className="text-xs text-muted-foreground">首次创建后会二次加密存入数据库，不再允许无密码访问。</p>
-                                    </div>
+                                        <p className="text-xs text-muted-foreground">Bot 已配置，PIN 必须正好是 4 位数字，并会加密保存。</p>
+                                    </div>}
                                 </div>
                             )}
 

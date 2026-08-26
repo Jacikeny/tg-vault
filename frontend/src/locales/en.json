@@ -3,6 +3,9 @@
     "title": "TG Vault",
     "subtitle": "Manage and organize your digital assets.",
     "filesSubtitle": "Browse and manage all files and folders.",
+    "ytdlpTitle": "YT-DLP",
+    "ytdlpSubtitle": "Browse and manage files downloaded with yt-dlp.",
+    "favoritesSubtitle": "View and manage your favorite files and folders in one place.",
     "allFiles": "All files",
     "fileTypes": {
       "filter": "File type",

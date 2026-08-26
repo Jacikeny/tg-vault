@@ -17,6 +17,10 @@ const SENSITIVE_SETTING_KEYS = new Set([
     'google_drive_refresh_token',
     'admin_password_hash',
     'telegram_pin_hash',
+    'telegram_bot_token',
+    'telegram_api_id',
+    'telegram_api_hash',
+    'telegram_user_session',
 ]);
 
 function getCredentialSecret(): string {

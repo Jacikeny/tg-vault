@@ -504,15 +504,21 @@ export async function retryYtDlpTask(id: string): Promise<TransferTaskRecord | n
     return getTransferTask('ytdlp', id);
 }
 
-export async function handleYtDlpCommand(
-    message: Api.Message,
-    url: string,
-    explicitTarget?: StorageTargetSnapshot,
-    options: { format?: 'best' | 'audio'; folder?: string; metadata?: Record<string, unknown>; playlist?: YtDlpPlaylistSelectionInput } = {},
-): Promise<void> {
-    await assertPublicHttpUrl(url);
+export interface CreateYtDlpTaskInput {
+    url: string;
+    target?: StorageTargetSnapshot;
+    format?: 'best' | 'audio';
+    folder?: string;
+    metadata?: Record<string, unknown>;
+    playlist?: YtDlpPlaylistSelectionInput;
+    ownerUserId?: number | null;
+    chatId?: string | null;
+}
+
+export async function createYtDlpTask(input: CreateYtDlpTaskInput): Promise<TransferTaskRecord> {
+    await assertPublicHttpUrl(input.url);
     const id = `yd-${crypto.randomBytes(8).toString('hex')}`;
-    const target = explicitTarget || storageManager.getActiveTarget();
+    const target = input.target || storageManager.getActiveTarget();
     await assertStorageTargetWritable(target);
     const client = target.accountId ? await pool.connect() : null;
     let admissionLease: Awaited<ReturnType<typeof acquireStorageAccountOperationLease>> | null = null;
@@ -530,36 +536,27 @@ export async function handleYtDlpCommand(
             sourceType: 'ytdlp',
             id,
             kind: 'video_download',
-            title: `yt-dlp: ${new URL(url).hostname}`,
+            title: `yt-dlp: ${new URL(input.url).hostname}`,
             status: 'pending',
             stage: 'waiting',
-            ownerUserId: message.senderId?.toJSNumber() ?? null,
-            chatId: message.chatId?.toString() || null,
-            source: url,
+            ownerUserId: input.ownerUserId ?? null,
+            chatId: input.chatId ?? null,
+            source: input.url,
             targetProvider: target.provider.name,
             targetAccountId: target.accountId,
-            targetFolder: options.folder || 'ytdlp',
+            targetFolder: input.folder || 'ytdlp',
             totalItems: 1,
             payload: {
-                url,
-                format: options.format || 'best',
-                metadata: options.metadata || {},
-                playlist: options.playlist,
+                url: input.url,
+                format: input.format || 'best',
+                metadata: input.metadata || {},
+                playlist: input.playlist,
                 targetAccountName: account?.name || (target.provider.name === 'local' ? '服务器本地目录' : null),
             },
             retryable: false,
         });
         ytDlpQueue.enqueue(task.id);
-        await message.reply({
-            message: [
-                '⏬ yt-dlp 任务已提交',
-                `任务: ${task.id}`,
-                `目标: ${task.targetProvider} / ${String(task.payload.targetAccountName || '默认账户')}`,
-                `目录: ${task.targetFolder}`,
-                '',
-                '可用 /tasks 查看阶段和进度；提交后的目标不会随系统默认存储切换而改变。',
-            ].join('\n'),
-        });
+        return task;
     } catch (error) {
         if (client) await client.query('ROLLBACK').catch(() => undefined);
         throw error;
@@ -567,4 +564,32 @@ export async function handleYtDlpCommand(
         client?.release();
         await admissionLease?.release();
     }
+}
+
+export async function handleYtDlpCommand(
+    message: Api.Message,
+    url: string,
+    explicitTarget?: StorageTargetSnapshot,
+    options: { format?: 'best' | 'audio'; folder?: string; metadata?: Record<string, unknown>; playlist?: YtDlpPlaylistSelectionInput } = {},
+): Promise<void> {
+    const task = await createYtDlpTask({
+        url,
+        target: explicitTarget,
+        format: options.format,
+        folder: options.folder,
+        metadata: options.metadata,
+        playlist: options.playlist,
+        ownerUserId: message.senderId?.toJSNumber() ?? null,
+        chatId: message.chatId?.toString() || null,
+    });
+    await message.reply({
+        message: [
+            '⏬ yt-dlp 任务已提交',
+            `任务: ${task.id}`,
+            `目标: ${task.targetProvider} / ${String(task.payload.targetAccountName || '默认账户')}`,
+            `目录: ${task.targetFolder}`,
+            '',
+            '可用 /tasks 查看阶段和进度；提交后的目标不会随系统默认存储切换而改变。',
+        ].join('\n'),
+    });
 }

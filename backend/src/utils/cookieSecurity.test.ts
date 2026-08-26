@@ -19,8 +19,8 @@ test('a formal install force keeps secure cookies on even if a stale COOKIE_SECU
 });
 
 test('formal installs still force secure cookies even if a stale environment tries to weaken them', () => {
-    assert.match(installScript, /COOKIE_SECURE=true/);
-    assert.match(installScript, /COOKIE_SECURE_FORCE=true/);
+    assert.match(installScript, /upsert_env COOKIE_SECURE true/);
+    assert.match(installScript, /upsert_env COOKIE_SECURE_FORCE true/);
     assert.match(compose, /COOKIE_SECURE_FORCE=\$\{COOKIE_SECURE_FORCE:-\}/);
 });
 

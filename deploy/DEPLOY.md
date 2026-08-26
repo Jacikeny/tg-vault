@@ -11,38 +11,41 @@ TG Vault 当前采用 **Docker Compose + 宿主机 Nginx/面板反向代理**。
 
 ## 2. 创建环境变量
 
+推荐先运行一次安装脚本，它会创建 `.env`、生成数据库密码和应用密钥，并写入当前源码版本信息：
+
 ```bash
-cp .env.example .env 2>/dev/null || touch .env
-nano .env
+./deploy/install.sh
 ```
 
-`.env` 使用普通 `KEY=value`，不要加 `export`。至少填写：
+首次运行会提示修改地址。新手只需填写以下 2 项：
 
 ```dotenv
-DB_PASSWORD=使用 openssl rand -hex 32 生成的随机值
-IMAGE_VERSION=v2.0.5
-SOURCE_REVISION=当前部署提交的完整 SHA（运行 git rev-parse HEAD 获取）
-SOURCE_VERSION=v2.0.5
 VITE_API_URL=https://api.example.com
-OAUTH_CALLBACK_BASE_URL=https://api.example.com
-OAUTH_FRONTEND_ORIGIN=https://cloud.example.com
 CORS_ORIGIN=https://cloud.example.com
-DOMAIN=cloud.example.com
-COOKIE_SECURE=true
 ```
 
-可选但建议显式保存：
+两项都应是完整的 HTTPS origin，不带路径、查询参数或末尾 `/`。修改后再次运行 `./deploy/install.sh` 即可构建并启动。
+
+新安装时，脚本会自动生成并保留：
 
 ```dotenv
-SESSION_SECRET=至少32字符；可用 openssl rand -hex 32
-STORAGE_CREDENTIALS_SECRET=至少32字符；可用 openssl rand -hex 32
+DB_PASSWORD=随机生成的64位十六进制密码
+SESSION_SECRET=随机生成的64位十六进制密钥
+STORAGE_CREDENTIALS_SECRET=随机生成的64位十六进制密钥
+SOURCE_REVISION=当前部署提交的完整 SHA
+SOURCE_VERSION=当前 Git tag 或项目版本
+IMAGE_VERSION=与 SOURCE_VERSION 相同
 ```
 
-如果这两个值留空，后端会在 `file-storage` 卷的 `/data/secrets` 中持久生成。迁移与恢复时必须同时备份该卷，否则已加密的 2FA 和存储凭证可能无法读取。
+升级已有部署时，如果 `.env` 没有 `SESSION_SECRET` 或 `STORAGE_CREDENTIALS_SECRET`，脚本不会突然写入新值覆盖 `/data/secrets` 中已有的持久密钥，避免现有 2FA 与存储凭证失效。
+
+OAuth 默认使用 `VITE_API_URL` 作为回调来源，并使用 `CORS_ORIGIN` 的第一个地址作为前端通知来源。只有多入口或特殊反代部署才需显式设置 `OAUTH_CALLBACK_BASE_URL`、`OAUTH_FRONTEND_ORIGIN`。
+
+如果不使用安装脚本而直接运行 Compose，至少需要手动生成 `DB_PASSWORD`；`IMAGE_VERSION` / `SOURCE_REVISION` / `SOURCE_VERSION` 会分别回退为 `source` / `unknown` / `worktree`。
 
 ## 3. 构建并启动
 
-直接运行 Compose 时，缺失的 `IMAGE_VERSION` / `SOURCE_REVISION` / `SOURCE_VERSION` 会分别回退为 `source` / `unknown` / `worktree`，因此旧 `.env` 和快速部署不会被本地镜像标签或构建标签阻断。`DB_PASSWORD` 仍必须在 `.env` 中设置。正式发布仍应显式填写 `IMAGE_VERSION`、`SOURCE_REVISION` 和 `SOURCE_VERSION`；`deploy/install.sh` 会拒绝缺失这些值，避免生成不可审计的生产镜像。每次发布前更新：
+直接运行 Compose 时，缺失的 `IMAGE_VERSION` / `SOURCE_REVISION` / `SOURCE_VERSION` 会分别回退为 `source` / `unknown` / `worktree`。使用 `deploy/install.sh` 时，这些构建元数据会从当前 Git 工作树自动刷新。手动发布时也可自行更新：
 
 ```bash
 revision=$(git rev-parse HEAD)

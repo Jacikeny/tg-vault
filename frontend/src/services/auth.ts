@@ -3,6 +3,7 @@ import { API_BASE } from './config';
 export interface AuthStatus {
     setupRequired: boolean;
     passwordRequired: boolean;
+    telegramPinRequired: boolean;
 }
 
 class AuthService {
@@ -37,14 +38,15 @@ class AuthService {
     async getAuthStatus(): Promise<AuthStatus> {
         try {
             const response = await fetch(`${API_BASE}/api/auth/status`);
-            if (!response.ok) return { setupRequired: false, passwordRequired: true };
+            if (!response.ok) return { setupRequired: false, passwordRequired: true, telegramPinRequired: false };
             const data = await response.json();
             return {
                 setupRequired: data.setupRequired === true,
                 passwordRequired: data.passwordRequired !== false,
+                telegramPinRequired: data.telegramPinRequired === true,
             };
         } catch {
-            return { setupRequired: false, passwordRequired: true };
+            return { setupRequired: false, passwordRequired: true, telegramPinRequired: false };
         }
     }
 
@@ -55,7 +57,7 @@ class AuthService {
     }
 
     // 首次启动创建唯一管理员凭证
-    async setup(webPassword: string, telegramPin: string): Promise<{ success: boolean; error?: string }> {
+    async setup(webPassword: string, telegramPin?: string): Promise<{ success: boolean; error?: string }> {
         try {
             const response = await fetch(`${API_BASE}/api/auth/setup`, {
                 credentials: 'include',
