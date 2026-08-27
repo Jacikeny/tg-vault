@@ -17,6 +17,8 @@
 - 改进任务轮询串行化、任务快速筛选及按账户清理任务的准确性。
 - 改进移动端和键盘操作、对话框异步失败反馈、上传失败原因展示及中英文界面一致性。
 - 修复构建产物数据库 schema 同步，确保源码、初始化脚本与发布镜像一致。
+- `.env.example` 不再包含 `IMAGE_VERSION`、`SOURCE_VERSION`、`SOURCE_REVISION`。应用版本统一从 `backend/package.json` 读取，Git 修订号在部署时读取，构建元数据只临时传给 Docker，不再持久化到 `.env`。
+- `deploy/install.sh` 升级旧部署时会清理遗留版本字段，避免旧 `.env` 覆盖新版本；同时只重建和替换前后端，不重建 PostgreSQL。
 
 ### 升级
 

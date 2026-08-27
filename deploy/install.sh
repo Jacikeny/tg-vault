@@ -264,6 +264,22 @@ PY
   fi
 }
 
+remove_env_keys() {
+  local temp
+  temp="$(mktemp)"
+  python3 - .env "$temp" "$@" <<'PY'
+from pathlib import Path
+import sys
+source, target, *keys = sys.argv[1:]
+blocked = set(keys)
+lines = Path(source).read_text().splitlines() if Path(source).exists() else []
+kept = [line for line in lines if line.split('=', 1)[0] not in blocked]
+Path(target).write_text('\n'.join(kept) + ('\n' if kept else ''))
+PY
+  chmod 600 "$temp"
+  mv "$temp" .env
+}
+
 created_env=false
 CURRENT_CORS_ORIGIN=""
 CURRENT_VITE_API_URL=""
@@ -321,15 +337,20 @@ if [[ "$created_env" == true ]]; then
   ensure_generated_secret STORAGE_CREDENTIALS_SECRET
 fi
 
-SOURCE_REVISION="$(git rev-parse HEAD 2>/dev/null || printf unknown)"
-SOURCE_VERSION="$(git describe --tags --exact-match 2>/dev/null || node -p "'v' + require('./backend/package.json').version" 2>/dev/null || printf worktree)"
-IMAGE_VERSION="$SOURCE_VERSION"
-upsert_env SOURCE_REVISION "$SOURCE_REVISION"
-upsert_env SOURCE_VERSION "$SOURCE_VERSION"
-upsert_env IMAGE_VERSION "$IMAGE_VERSION"
+# v2.2.0 及更早版本曾把构建元数据写入 .env，升级时主动清理，避免旧值覆盖新版本。
+remove_env_keys IMAGE_VERSION SOURCE_REVISION SOURCE_VERSION
 
-docker compose config --quiet
-docker compose up -d --build
+RELEASE_REVISION="$(git rev-parse HEAD 2>/dev/null || printf unknown)"
+RELEASE_VERSION="v$(python3 - <<'PY'
+import json
+from pathlib import Path
+print(json.loads(Path('backend/package.json').read_text())['version'])
+PY
+)"
+
+env IMAGE_VERSION="$RELEASE_VERSION" SOURCE_REVISION="$RELEASE_REVISION" SOURCE_VERSION="$RELEASE_VERSION" docker compose config --quiet
+env IMAGE_VERSION="$RELEASE_VERSION" SOURCE_REVISION="$RELEASE_REVISION" SOURCE_VERSION="$RELEASE_VERSION" docker compose build backend frontend
+env IMAGE_VERSION="$RELEASE_VERSION" SOURCE_REVISION="$RELEASE_REVISION" SOURCE_VERSION="$RELEASE_VERSION" docker compose up -d --no-build --no-deps backend frontend
 docker compose ps
 
 echo

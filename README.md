@@ -68,7 +68,7 @@ cd tg-vault
 ./deploy/install.sh
 ```
 
-安装向导会先检测 Docker Engine、Docker Compose 插件、Python 3 和 Git；缺少组件时，由你选择自动补全、查看手动提示或退出。环境通过后，依次输入 Web 前端 URL 和后端 API URL，确认后会在同一次运行中生成 `.env`、数据库密码、应用密钥和构建元数据，并执行 `docker compose up -d --build`。
+安装向导会先检测 Docker Engine、Docker Compose 插件、Python 3 和 Git；缺少组件时，由你选择自动补全、查看手动提示或退出。环境通过后，依次输入 Web 前端 URL 和后端 API URL，确认后会在同一次运行中生成 `.env`、数据库密码和应用密钥；版本号从 `backend/package.json` 读取，并只在本次构建命令中临时注入，不写入 `.env`。升级时只重建并替换前后端，不重建 PostgreSQL。
 
 - **基础 Web 部署**
   只需输入 Web 前端 URL 与后端 API URL；地址必须是完整的 `http(s)` origin。
@@ -101,8 +101,8 @@ cd tg-vault
 
 - **`DB_PASSWORD`** — 自动生成 64 位十六进制 PostgreSQL 密码
 - **`SESSION_SECRET`** / **`STORAGE_CREDENTIALS_SECRET`** — 新安装时自动生成并保留；升级旧部署时不会覆盖 `/data/secrets` 中已有的持久密钥
-- **`SOURCE_REVISION`** — 自动读取当前 `git rev-parse HEAD`
-- **`SOURCE_VERSION`** / **`IMAGE_VERSION`** — 优先读取当前 Git tag，否则读取项目版本
+
+版本号不保存在 `.env`。安装时会直接从 `backend/package.json` 读取应用版本，并从当前 Git 提交读取源码修订号，只把它们临时传给 Docker 构建。
 
 </details>
 

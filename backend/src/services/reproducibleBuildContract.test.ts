@@ -20,9 +20,9 @@ function assertBeginnerFriendlyInstall(source: string): void {
     assert.match(source, /prompt_origin '请输入后端 API URL'/);
     assert.match(source, /ensure_generated_secret DB_PASSWORD/);
     assert.match(source, /if \[\[ "\$created_env" == true \]\]; then[\s\S]*ensure_generated_secret SESSION_SECRET[\s\S]*ensure_generated_secret STORAGE_CREDENTIALS_SECRET/);
-    assert.match(source, /SOURCE_REVISION=.*git rev-parse HEAD/);
-    assert.match(source, /SOURCE_VERSION=.*git describe/);
-    assert.match(source, /IMAGE_VERSION=.*SOURCE_VERSION/);
+    assert.match(source, /RELEASE_REVISION=.*git rev-parse HEAD/);
+    assert.match(source, /RELEASE_VERSION=.*python3[\s\S]*backend\/package\.json/);
+    assert.match(source, /env IMAGE_VERSION="\$RELEASE_VERSION"/);
 }
 
 test('release images use locked dependencies, pinned bases, verified yt-dlp and source labels', () => {
@@ -69,5 +69,16 @@ test('installer keeps beginner input to two public origins and derives the rest'
     assert.match(deployGuide, /只需填写以下 2 项/);
     assert.match(deployGuide, /docker inspect/);
     assert.match(deployGuide, /assets\//);
-    assert.match(deployGuide, /IMAGE_VERSION.*source/);
+    assert.match(deployGuide, /镜像名称会使用 `source`/);
+});
+
+test('release metadata is derived per deployment and never persisted in user env files', () => {
+    for (const key of ['IMAGE_VERSION', 'SOURCE_REVISION', 'SOURCE_VERSION']) {
+        assert.doesNotMatch(envExample, new RegExp(`^${key}=`, 'm'));
+        assert.doesNotMatch(installScript, new RegExp(`upsert_env ${key}\\b`));
+    }
+    assert.match(installScript, /remove_env_keys IMAGE_VERSION SOURCE_REVISION SOURCE_VERSION/);
+    assert.match(installScript, /env IMAGE_VERSION="\$RELEASE_VERSION" SOURCE_REVISION="\$RELEASE_REVISION" SOURCE_VERSION="\$RELEASE_VERSION" docker compose config --quiet/);
+    assert.match(installScript, /env IMAGE_VERSION="\$RELEASE_VERSION" SOURCE_REVISION="\$RELEASE_REVISION" SOURCE_VERSION="\$RELEASE_VERSION" docker compose build backend frontend/);
+    assert.match(installScript, /env IMAGE_VERSION="\$RELEASE_VERSION" SOURCE_REVISION="\$RELEASE_REVISION" SOURCE_VERSION="\$RELEASE_VERSION" docker compose up -d --no-build --no-deps backend frontend/);
 });

@@ -11,7 +11,7 @@ TG Vault 当前采用 **Docker Compose + 宿主机 Nginx/面板反向代理**。
 
 ## 2. 创建环境变量
 
-推荐先运行一次安装脚本，它会创建 `.env`、生成数据库密码和应用密钥，并写入当前源码版本信息：
+推荐先运行一次安装脚本，它会创建 `.env`、生成数据库密码和应用密钥；当前源码版本只在构建命令中临时注入，不写入 `.env`：
 
 ```bash
 ./deploy/install.sh
@@ -32,24 +32,22 @@ CORS_ORIGIN=https://cloud.example.com
 DB_PASSWORD=随机生成的64位十六进制密码
 SESSION_SECRET=随机生成的64位十六进制密钥
 STORAGE_CREDENTIALS_SECRET=随机生成的64位十六进制密钥
-SOURCE_REVISION=当前部署提交的完整 SHA
-SOURCE_VERSION=当前 Git tag 或项目版本
-IMAGE_VERSION=与 SOURCE_VERSION 相同
 ```
 
 升级已有部署时，如果 `.env` 没有 `SESSION_SECRET` 或 `STORAGE_CREDENTIALS_SECRET`，脚本不会突然写入新值覆盖 `/data/secrets` 中已有的持久密钥，避免现有 2FA 与存储凭证失效。
 
 OAuth 默认使用 `VITE_API_URL` 作为回调来源，并使用 `CORS_ORIGIN` 的第一个地址作为前端通知来源。只有多入口或特殊反代部署才需显式设置 `OAUTH_CALLBACK_BASE_URL`、`OAUTH_FRONTEND_ORIGIN`。
 
-如果不使用安装脚本而直接运行 Compose，至少需要手动生成 `DB_PASSWORD`；`IMAGE_VERSION` / `SOURCE_REVISION` / `SOURCE_VERSION` 会分别回退为 `source` / `unknown` / `worktree`。
+如果不使用安装脚本而直接运行 Compose，至少需要手动生成 `DB_PASSWORD`；镜像名称会使用 `source`，镜像标签中的源码版本元数据会分别回退为 `unknown` / `worktree`。
 
 ## 3. 构建并启动
 
-直接运行 Compose 时，缺失的 `IMAGE_VERSION` / `SOURCE_REVISION` / `SOURCE_VERSION` 会分别回退为 `source` / `unknown` / `worktree`。使用 `deploy/install.sh` 时，这些构建元数据会从当前 Git 工作树自动刷新。手动发布时也可自行更新：
+版本号不保存在 `.env`。使用 `deploy/install.sh` 时，应用版本直接读取 `backend/package.json`，源码修订号读取当前 Git 提交，并只在本次 Compose 调用中传入。直接运行 Compose 时，镜像名称和标签元数据会回退为 `source` / `unknown` / `worktree`。手动构建时可临时传入：
 
 ```bash
 revision=$(git rev-parse HEAD)
-# 将 .env 中 SOURCE_REVISION 更新为 $revision；IMAGE_VERSION 与 SOURCE_VERSION 必须等于发布版本。
+version="v$(node -p "require('./backend/package.json').version")"
+IMAGE_VERSION="$version" SOURCE_REVISION="$revision" SOURCE_VERSION="$version" docker compose up -d --build
 ```
 
 ```bash
@@ -58,7 +56,7 @@ docker compose up -d --build
 docker compose ps
 ```
 
-数据库 schema 会在后端启动时自动检查/迁移。`postgres`、`backend`、`frontend` 都配置了健康检查；只有 `/readyz` 通过后 backend 才为 healthy。
+安装脚本先构建 `backend` 和 `frontend`，再通过 `--no-deps` 只替换这两个服务，不会重建 PostgreSQL。数据库 schema 会在后端启动时自动检查/迁移。`postgres`、`backend`、`frontend` 都配置了健康检查；只有 `/readyz` 通过后 backend 才为 healthy。
 
 ## 4. 配置宿主机反向代理
 
@@ -77,7 +75,7 @@ docker compose ps
 git fetch origin
 git status --short
 git pull --ff-only origin main
-docker compose up -d --build
+./deploy/install.sh
 ```
 
 如果 `git status --short` 显示本地改动，先人工确认，不要强制覆盖。
@@ -91,7 +89,7 @@ curl -fsS http://127.0.0.1:51947/readyz
 docker compose logs --tail=100 backend frontend postgres
 
 expected_revision=$(git rev-parse HEAD)
-expected_version=$(grep '^SOURCE_VERSION=' .env | cut -d= -f2-)
+expected_version="v$(node -p "require('./backend/package.json').version")"
 docker inspect --format='{{index .Config.Labels "org.opencontainers.image.revision"}} {{index .Config.Labels "org.opencontainers.image.version"}}' tg-vault-backend tg-vault-frontend
 # 两个容器都必须输出 "$expected_revision $expected_version"。
 

@@ -60,7 +60,8 @@ test_interactive_new_install_collects_urls_and_starts_compose() {
   assert_contains "$FIXTURE/output.log" '请输入后端 API URL'
   assert_contains "$FIXTURE/output.log" '按 Enter 保存配置并开始安装'
   assert_contains "$FIXTURE/docker.log" 'compose config --quiet'
-  assert_contains "$FIXTURE/docker.log" 'compose up -d --build'
+  assert_contains "$FIXTURE/docker.log" 'compose build backend frontend'
+  assert_contains "$FIXTURE/docker.log" 'compose up -d --no-build --no-deps backend frontend'
   assert_contains "$FIXTURE/docker.log" 'compose ps'
 }
 
@@ -86,7 +87,8 @@ test_non_interactive_uses_environment_without_waiting() {
 
   assert_contains "$FIXTURE/.env" 'CORS_ORIGIN=https://cloud.example.net'
   assert_contains "$FIXTURE/.env" 'VITE_API_URL=https://api.example.net'
-  assert_contains "$FIXTURE/docker.log" 'compose up -d --build'
+  assert_contains "$FIXTURE/docker.log" 'compose build backend frontend'
+  assert_contains "$FIXTURE/docker.log" 'compose up -d --no-build --no-deps backend frontend'
 }
 
 test_existing_install_keeps_urls_on_enter() {
@@ -97,6 +99,9 @@ VITE_API_URL=https://existing-api.example.net
 DB_PASSWORD=keep-this-password
 SESSION_SECRET=keep-this-session
 STORAGE_CREDENTIALS_SECRET=keep-this-storage-secret
+IMAGE_VERSION=v1.0.0
+SOURCE_REVISION=stale-revision
+SOURCE_VERSION=v1.0.0
 EOF
   run_in_tty '\n\n\n' "$FIXTURE/output.log"
 
@@ -105,6 +110,9 @@ EOF
   assert_contains "$FIXTURE/.env" 'DB_PASSWORD=keep-this-password'
   assert_contains "$FIXTURE/.env" 'SESSION_SECRET=keep-this-session'
   assert_contains "$FIXTURE/.env" 'STORAGE_CREDENTIALS_SECRET=keep-this-storage-secret'
+  if grep -Eq '^(IMAGE_VERSION|SOURCE_REVISION|SOURCE_VERSION)=' "$FIXTURE/.env"; then
+    fail "升级后应清理旧版持久化版本元数据"
+  fi
   assert_contains "$FIXTURE/output.log" '直接按 Enter 保留当前值'
 }
 
@@ -138,24 +146,24 @@ SH
 
 test_secret_generation_does_not_require_openssl() {
   make_fixture
-  hidden="$FIXTURE/hidden-bin"
-  mkdir -p "$hidden"
-  for cmd in python3 git node mktemp chmod mv bash dirname id touch; do
-    target="$(command -v "$cmd")"
-    ln -s "$target" "$hidden/$cmd"
-  done
-  ln -s "$FIXTURE/fake-bin/docker" "$hidden/docker"
+  openssl_stub="$FIXTURE/fake-bin/openssl"
+  cat > "$openssl_stub" <<'SH'
+#!/usr/bin/env bash
+echo "openssl 不应被调用" >&2
+exit 99
+SH
+  chmod +x "$openssl_stub"
   (
     cd "$FIXTURE"
-    env PATH="$hidden" \
+    env PATH="$FIXTURE/fake-bin:$PATH" \
       INSTALL_TEST_DOCKER_LOG="$FIXTURE/docker.log" \
       CORS_ORIGIN='https://cloud.example.net' \
       VITE_API_URL='https://api.example.net' \
       bash deploy/install.sh --non-interactive > "$FIXTURE/output.log" 2>&1
   )
   assert_contains "$FIXTURE/.env" 'DB_PASSWORD='
-  if grep -Fq '未找到 openssl' "$FIXTURE/output.log"; then
-    fail "安装脚本不应再要求 openssl"
+  if grep -Fq 'openssl 不应被调用' "$FIXTURE/output.log"; then
+    fail "安装脚本不应调用 openssl"
   fi
 }
 
