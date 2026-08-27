@@ -67,6 +67,11 @@ CREATE TABLE IF NOT EXISTS oauth_pending_flows (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_oauth_pending_flows_expiry ON oauth_pending_flows(expires_at);
+DELETE FROM oauth_pending_flows older
+USING oauth_pending_flows newer
+WHERE older.auth_session_hash = newer.auth_session_hash
+  AND (older.created_at, older.state_hash) < (newer.created_at, newer.state_hash);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_oauth_pending_flows_session ON oauth_pending_flows(auth_session_hash);
 
 -- 存储账户冷却表（如 Google Drive 每日上传限额触发后暂停 24 小时）
 CREATE TABLE IF NOT EXISTS storage_account_cooldowns (
@@ -149,6 +154,38 @@ CREATE TABLE IF NOT EXISTS system_settings (
 
 CREATE OR REPLACE TRIGGER system_settings_updated_at
     BEFORE UPDATE ON system_settings
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at();
+
+-- 已通过 Telegram Bot PIN 身份验证的用户。
+CREATE TABLE IF NOT EXISTS telegram_auth (
+    user_id BIGINT PRIMARY KEY,
+    authenticated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- 新版本通知投递状态：每位收件人、每个版本、每个渠道最多成功投递一次。
+CREATE TABLE IF NOT EXISTS update_notification_deliveries (
+    version VARCHAR(64) NOT NULL,
+    channel VARCHAR(32) NOT NULL,
+    recipient_id VARCHAR(255) NOT NULL,
+    status VARCHAR(32) NOT NULL DEFAULT 'pending',
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    last_attempt_at TIMESTAMPTZ,
+    delivered_at TIMESTAMPTZ,
+    last_error TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    PRIMARY KEY (version, channel, recipient_id),
+    CHECK (status IN ('pending', 'sending', 'delivered', 'failed'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_update_notification_pending
+    ON update_notification_deliveries (status, last_attempt_at)
+    WHERE status <> 'delivered';
+
+DROP TRIGGER IF EXISTS update_notification_deliveries_updated_at ON update_notification_deliveries;
+CREATE TRIGGER update_notification_deliveries_updated_at
+    BEFORE UPDATE ON update_notification_deliveries
     FOR EACH ROW
     EXECUTE FUNCTION update_updated_at();
 

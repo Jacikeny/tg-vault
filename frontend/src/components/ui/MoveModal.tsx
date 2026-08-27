@@ -5,11 +5,12 @@ import { Button } from "./Button";
 import { useState, useEffect } from "react";
 import { createPortal } from "react-dom";
 import type { FolderMovePreview } from "../../services/api";
+import { performAsyncMutation } from "../../services/asyncMutation";
 
 interface MoveModalProps {
     isOpen: boolean;
     onClose: () => void;
-    onConfirm: (destinationFolder: string | null) => void;
+    onConfirm: (destinationFolder: string | null) => Promise<void>;
     currentFolder: string | null;
     folders: string[]; // List of available folder names
     title?: string;
@@ -24,10 +25,14 @@ export const MoveModal = ({ isOpen, onClose, onConfirm, currentFolder, folders, 
     const [preview, setPreview] = useState<FolderMovePreview | null>(null);
     const [previewError, setPreviewError] = useState<string | null>(null);
     const [isPreviewLoading, setIsPreviewLoading] = useState(false);
+    const [isSubmitting, setIsSubmitting] = useState(false);
+    const [submitError, setSubmitError] = useState<string | null>(null);
 
     useEffect(() => {
         if (isOpen) {
             setSelectedFolder(currentFolder);
+            setSubmitError(null);
+            setIsSubmitting(false);
         }
     }, [isOpen, currentFolder]);
 
@@ -79,7 +84,7 @@ export const MoveModal = ({ isOpen, onClose, onConfirm, currentFolder, folders, 
                     exit={{ opacity: 0 }}
                     transition={{ duration: 0.2 }}
                     className="absolute inset-0 bg-black/50 backdrop-blur-sm"
-                    onClick={onClose}
+                    onClick={isSubmitting ? undefined : onClose}
                 />
                 
                 {/* Modal Container */}
@@ -103,7 +108,8 @@ export const MoveModal = ({ isOpen, onClose, onConfirm, currentFolder, folders, 
                             <p className="text-sm text-muted-foreground mt-1.5">选择目标文件夹位置</p>
                         </div>
                         <button
-                            onClick={onClose}
+                            onClick={isSubmitting ? undefined : onClose}
+                            disabled={isSubmitting}
                             className="flex items-center justify-center w-8 h-8 rounded-lg hover:bg-muted transition-colors"
                         >
                             <X className="h-4 w-4 text-muted-foreground" />
@@ -138,6 +144,8 @@ export const MoveModal = ({ isOpen, onClose, onConfirm, currentFolder, folders, 
                             ) : null}
                         </div>
                     )}
+
+                    {submitError && <p role="alert" className="px-6 py-3 text-sm text-destructive">{submitError}</p>}
 
                     {/* Folder List */}
                     <div className="px-4 py-3 max-h-[45vh] overflow-y-auto min-h-[200px]"
@@ -223,7 +231,7 @@ export const MoveModal = ({ isOpen, onClose, onConfirm, currentFolder, folders, 
                             {availableFolders.length === 0 && (
                                 <div className="flex flex-col items-center justify-center py-10 text-muted-foreground/60">
                                     <Folder className="h-10 w-10 mb-2 opacity-20" />
-                                    <p className="text-xs">{t("app.noOtherFolders") || "暂无其它文件夹"}</p>
+                                    <p className="text-xs">{t("app.noOtherFolders")}</p>
                                 </div>
                             )}
                         </div>
@@ -235,18 +243,26 @@ export const MoveModal = ({ isOpen, onClose, onConfirm, currentFolder, folders, 
                             variant="outline"
                             className="h-10 px-5 text-sm font-medium border-border/80 hover:bg-muted"
                             onClick={onClose}
+                            disabled={isSubmitting}
                         >
                             {t("app.cancel") || "取消"}
                         </Button>
                         <Button 
-                            onClick={() => {
-                                onConfirm(selectedFolder);
-                                onClose();
+                            onClick={async () => {
+                                if (isSubmitting) return;
+                                setIsSubmitting(true);
+                                setSubmitError(null);
+                                await performAsyncMutation({
+                                    action: () => onConfirm(selectedFolder),
+                                    onSuccess: onClose,
+                                    onFailure: error => setSubmitError(error instanceof Error ? error.message : '移动失败'),
+                                    onSettled: () => setIsSubmitting(false),
+                                });
                             }} 
                             className="h-10 px-5 text-sm font-medium shadow-sm"
-                            disabled={!canConfirm}
+                            disabled={!canConfirm || isSubmitting}
                         >
-                            {t("app.confirm") || "确认移动"}
+                            {isSubmitting ? '正在移动...' : (t("app.confirm") || "确认移动")}
                         </Button>
                     </div>
                 </motion.div>

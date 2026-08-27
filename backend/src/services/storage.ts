@@ -23,6 +23,7 @@ import {
 import { DEFAULT_STORAGE_COOLDOWN_MS, STORAGE_COOLDOWN_REASON_DAILY_UPLOAD_LIMIT } from './storageCooldown.js';
 import { switchStorageAccountWithClient, switchStorageToLocalWithClient } from './storageAccountLifecycle.js';
 import { validateConfiguredStorageTarget } from './storageTargetReadiness.js';
+import { OpenListStorageProvider } from './openListStorage.js';
 
 export class StorageQuotaCooldownError extends Error {
     provider: string;
@@ -1592,6 +1593,15 @@ export class StorageManager {
                         config.password
                     );
                     this.providers.set(`webdav:${row.id}`, provider);
+                } else if (row.type === 'openlist') {
+                    provider = new OpenListStorageProvider(
+                        row.id,
+                        config.baseUrl,
+                        config.rootPath || '/',
+                        config.username,
+                        config.password
+                    );
+                    this.providers.set(`openlist:${row.id}`, provider);
                 } else if (row.type === 'google_drive') {
                     provider = new GoogleDriveStorageProvider(
                         row.id,
@@ -1912,6 +1922,24 @@ export class StorageManager {
         const webdav = new WebDAVStorageProvider(targetId, url, username, password);
         this.providers.set(`webdav:${targetId}`, webdav);
 
+        return targetId;
+    }
+
+    async addOpenListAccount(name: string, baseUrl: string, rootPath: string, username: string, password: string) {
+        const candidate = new OpenListStorageProvider('probe', baseUrl, rootPath, username, password);
+        await candidate.probeWritable();
+        const config = JSON.stringify(encryptStorageConfig({ baseUrl, rootPath, username, password }));
+
+        const res = await query(
+            `INSERT INTO storage_accounts (type, name, config, is_active, last_probe_status, last_probe_error, last_probed_at)
+             VALUES ($1, $2, $3, $4, 'available', NULL, NOW()) RETURNING id`,
+            ['openlist', name, config, false]
+        );
+        const targetId = res.rows[0].id;
+        console.log(`[StorageManager] Added new OpenList account: ${targetId}`);
+
+        const openList = new OpenListStorageProvider(targetId, baseUrl, rootPath, username, password);
+        this.providers.set(`openlist:${targetId}`, openList);
         return targetId;
     }
 

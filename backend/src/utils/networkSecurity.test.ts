@@ -29,3 +29,18 @@ test('keeps ordinary public IPv4 and IPv6 addresses admissible', () => {
     assert.equal(isPrivateAddress('8.8.8.8'), false);
     assert.equal(isPrivateAddress('2606:4700:4700::1111'), false);
 });
+
+test('rejects metadata, carrier-grade NAT, benchmark, documentation and non-global IPv6 ranges', () => {
+    for (const address of [
+        '100.100.100.200',
+        '100.64.0.1',
+        '198.18.0.1',
+        '192.0.2.1',
+        'fe90::1',
+        'ff02::1',
+        '2001:db8::1',
+        '2002:7f00:1::',
+    ]) {
+        assert.equal(isPrivateAddress(address), true, address);
+    }
+});

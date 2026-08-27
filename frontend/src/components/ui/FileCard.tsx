@@ -1,5 +1,5 @@
 import { motion } from "framer-motion";
-import { Download, Eye, FileText, Image as ImageIcon, Music, Video, Cloud, HardDrive, Database, Package, Network, Star, MoreVertical } from "lucide-react";
+import { Download, Eye, FileText, Image as ImageIcon, Music, Video, Cloud, HardDrive, Database, Package, Network, Server, Star, MoreVertical } from "lucide-react";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "./Button";
@@ -8,6 +8,7 @@ import { ContextMenu, createFileMenuItems } from "./ContextMenu";
 import { useLongPress } from "../../hooks/useLongPress";
 import { ApiActionError, describeActionFailure } from "../../services/apiActionError";
 import { authService } from "../../services/auth";
+import { activateParentControl } from "../../services/keyboardActivation";
 
 // Re-export FileData type for convenience
 export type { FileData } from "../../services/api";
@@ -98,6 +99,8 @@ export const FileCard = ({
                 return { Icon: Package, label: 'S3' };
             case 'webdav':
                 return { Icon: Network, label: 'WebDAV' };
+            case 'openlist':
+                return { Icon: Server, label: 'OpenList' };
             case 'google_drive':
                 return { Icon: Database, label: 'Google Drive' };
             default:
@@ -115,10 +118,23 @@ export const FileCard = ({
         }
     };
 
+    const handleCardKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+        activateParentControl(e, handleCardClick);
+    };
+
+    const openContextMenuFromButton = (button: HTMLElement) => {
+        const rect = button.getBoundingClientRect();
+        setContextMenu({ x: rect.left, y: rect.bottom + 5 });
+    };
+
     return (
         <>
             <motion.div
                 layout
+                role="button"
+                tabIndex={0}
+                aria-label={`${isSelectionMode ? '选择' : '打开'} ${file.name}`}
+                onKeyDown={handleCardKeyDown}
                 whileHover={{ y: isSelectionMode ? 0 : -4, transition: { duration: 0.2 } }}
                 className={`group relative flex flex-col rounded-2xl border ${isSelected ? 'border-primary ring-2 ring-primary/20 bg-primary/5' : 'border-border/50 bg-card'} overflow-hidden shadow-sm transition-all touch-manipulation select-none ${!isSelectionMode ? 'hover:shadow-lg hover:border-border cursor-pointer active:scale-[0.99]' : 'cursor-pointer active:scale-[0.99]'}`}
                 {...(!isSelectionMode ? longPressHandlers : { onClick: handleCardClick })}
@@ -236,14 +252,21 @@ export const FileCard = ({
                             className="h-11 w-11 rounded-full md:opacity-0 group-hover:opacity-100 transition-opacity -mr-1.5 touch-manipulation"
                             onClick={(e) => {
                                 e.stopPropagation();
-                                const rect = e.currentTarget.getBoundingClientRect();
-                                setContextMenu({ x: rect.left, y: rect.bottom + 5 });
+                                openContextMenuFromButton(e.currentTarget);
+                            }}
+                            onKeyDown={(e) => {
+                                if (e.key !== 'Enter' && e.key !== ' ') return;
+                                e.preventDefault();
+                                e.stopPropagation();
+                                openContextMenuFromButton(e.currentTarget);
                             }}
                             onMouseDown={(e) => e.stopPropagation()}
                             onMouseUp={(e) => e.stopPropagation()}
                             onTouchStart={(e) => e.stopPropagation()}
                             onTouchEnd={(e) => e.stopPropagation()}
-                                                    aria-label={`更多操作：${file.name}`}
+                            aria-label={`更多操作：${file.name}`}
+                            aria-haspopup="menu"
+                            aria-expanded={!!contextMenu}
                         >
                             <MoreVertical className="h-5 w-5" />
                         </Button>

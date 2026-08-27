@@ -14,7 +14,7 @@ test('media categories live in the my-files toolbar instead of the sidebar', () 
     assert.doesNotMatch(layout, /id: "document"/);
     assert.match(app, /<FileTypeFilter/);
     assert.match(app, /value=\{currentCategory\}/);
-    assert.match(app, /handleCategoryChange\(category\)/);
+    assert.match(app, /onChange=\{handleFileTypeChange\}/);
 });
 
 test('file type filter exposes all requested categories and accessible selection state', () => {

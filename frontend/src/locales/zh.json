@@ -38,7 +38,8 @@
     "sortName": "名称",
     "sortDate": "日期",
     "loadMore": "加载更多",
-    "loading": "加载中…"
+    "loading": "加载中…",
+    "noOtherFolders": "暂无其它文件夹"
   },
   "sidebar": {
     "uploadCenter": "上传中心",
@@ -78,7 +79,12 @@
     "move": "移动文件",
     "favorite": "收藏",
     "unfavorite": "取消收藏",
-    "share": "分享"
+    "share": "分享",
+    "moreActions": "更多操作"
+  },
+  "storage": {
+    "fileCount_one": "{{count}} 个文件",
+    "fileCount_other": "{{count}} 个文件"
   },
   "folder": {
     "move": "移动文件夹"
@@ -112,6 +118,26 @@
     "clearFilter": "查看全部文件",
     "retry": "重试"
   },
+  "updates": {
+    "bannerTitle": "TG Vault v{{latest}} 已发布",
+    "bannerCurrent": "你当前使用 v{{current}}",
+    "viewRelease": "查看更新",
+    "dismiss": "暂不提醒此版本",
+    "settingsTitle": "版本信息",
+    "lastChecked": "上次检查：{{time}}",
+    "staleSuffix": "（显示上次成功结果）",
+    "disabled": "自动检查已关闭",
+    "notChecked": "尚未完成版本检查",
+    "current": "当前 v{{version}}",
+    "latest": "最新 v{{version}}",
+    "upToDate": "已是最新",
+    "waiting": "等待检查",
+    "releaseNotes": "发布说明",
+    "checkNow": "立即检查",
+    "checking": "正在检查版本",
+    "found": "发现 TG Vault v{{version}}，可查看发布说明。",
+    "alreadyLatest": "当前 v{{version}} 已是最新版本。"
+  },
   "settings": {
     "title": "设置",
     "subtitle": "管理外观、安全、Telegram、存储和数据维护。",
@@ -142,6 +168,39 @@
       "total": "总空间",
       "used": "已用",
       "free": "剩余"
+    },
+    "openlist": {
+      "title": "OpenList 原生存储",
+      "accounts": "OpenList 存储账户",
+      "description": "使用 OpenList 原生 API 存储文件；不提供远端搜索、删除、离线下载或分享管理。",
+      "cancelAdd": "取消添加",
+      "addAccount": "添加新账户",
+      "unnamed": "未命名账户",
+      "inUse": "正在使用",
+      "switchAccount": "切换到此账户",
+      "deleteTitle": "删除连接配置（不删除 OpenList 文件）",
+      "empty": "尚未配置 OpenList 原生存储账户",
+      "accountName": "账户显示名称",
+      "accountPlaceholder": "例如：我的 OpenList",
+      "address": "OpenList 地址",
+      "rootPath": "根目录",
+      "rootHint": "若 OpenList 专用用户的基础路径已经限定到 TG Vault 目录，这里保持 /。",
+      "username": "用户名",
+      "password": "密码",
+      "cancel": "取消",
+      "saving": "正在测试并保存…",
+      "save": "测试连接并保存",
+      "required": "请填写账户名称、OpenList 地址、用户名和密码",
+      "incomplete": "信息不完整",
+      "success": "OpenList 原生存储账户添加成功！",
+      "failure": "添加 OpenList 原生存储账户失败: {{message}}"
+    },
+    "probe": {
+      "available": "连接可用",
+      "failed": "连接失败",
+      "notTested": "尚未测试",
+      "testing": "正在测试存储连接",
+      "test": "测试连接"
     }
   }
 }

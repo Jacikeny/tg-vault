@@ -10,6 +10,8 @@ import { authService } from '../../services/auth';
 import { cn } from '../../lib/utils';
 import { useTranslation } from 'react-i18next';
 import { useRuntimeUiLocalization } from './useRuntimeUiLocalization';
+import { dismissibleTaskSnapshot, pruneSelectedTaskKeys, scopeTasks, summarizeTaskStatuses, type TaskQuickFilter } from '../../services/taskQuickFilters';
+import { createSerialPoller } from '../../services/serialPoller';
 
 interface TasksPageProps { onUnauthorized?: () => void; onOpenUploads?: () => void; initialAccountId?: string | null; }
 interface TaskNotice { message: string; sequence: number; }
@@ -71,6 +73,7 @@ export const TasksPage = ({ onUnauthorized, onOpenUploads, initialAccountId = nu
     const [tasks, setTasks] = useState<UnifiedTask[]>([]);
     const [source, setSource] = useState('');
     const [status, setStatus] = useState('');
+    const [quickFilter, setQuickFilter] = useState<TaskQuickFilter>('all');
     const [loading, setLoading] = useState(true);
     const [refreshing, setRefreshing] = useState(false);
     const [error, setError] = useState<string | null>(null);
@@ -82,6 +85,12 @@ export const TasksPage = ({ onUnauthorized, onOpenUploads, initialAccountId = nu
     const [selected, setSelected] = useState<string[]>([]);
     const [acting, setActing] = useState(false);
     const requestGeneration = useRef(0);
+    const scopeFilters = useMemo(() => ({
+        source,
+        status,
+        accountId: initialAccountId,
+        quickFilter,
+    }), [initialAccountId, quickFilter, source, status]);
 
     const loadTasks = useCallback(async (quiet = false) => {
         const generation = ++requestGeneration.current;
@@ -94,7 +103,7 @@ export const TasksPage = ({ onUnauthorized, onOpenUploads, initialAccountId = nu
                 ? result.tasks.filter(task => task.target.accountId === initialAccountId)
                 : result.tasks;
             setTasks(relevantTasks); setError(null);
-            setSelected(previous => previous.filter(key => relevantTasks.some(task => task.dismissible && taskKey(task) === key)));
+            setSelected(previous => pruneSelectedTaskKeys(previous, relevantTasks, scopeFilters, taskKey));
         } catch (loadError: any) {
             if (generation !== requestGeneration.current) return;
             if (loadError?.message === 'UNAUTHORIZED') { authService.clearToken(); onUnauthorized?.(); return; }
@@ -102,12 +111,24 @@ export const TasksPage = ({ onUnauthorized, onOpenUploads, initialAccountId = nu
         } finally {
             if (generation === requestGeneration.current) { setLoading(false); setRefreshing(false); }
         }
-    }, [initialAccountId, onUnauthorized, source, status]);
+    }, [initialAccountId, onUnauthorized, scopeFilters, source, status]);
 
     useEffect(() => {
-        void loadTasks(false);
-        const timer = window.setInterval(() => void loadTasks(true), 5_000);
-        return () => window.clearInterval(timer);
+        let first = true;
+        const poller = createSerialPoller({
+            run: async () => {
+                await loadTasks(!first);
+                first = false;
+            },
+            schedule: (callback, delay) => window.setTimeout(callback, delay),
+            cancel: handle => window.clearTimeout(handle as number),
+            delayMs: 5_000,
+        });
+        poller.start();
+        return () => {
+            poller.stop();
+            requestGeneration.current += 1;
+        };
     }, [loadTasks]);
 
     useEffect(() => {
@@ -116,12 +137,9 @@ export const TasksPage = ({ onUnauthorized, onOpenUploads, initialAccountId = nu
         return () => window.clearTimeout(timer);
     }, [notice?.sequence]);
 
-    const summary = useMemo(() => ({
-        active: tasks.filter(t => ['pending', 'running', 'paused', 'waiting'].includes(t.status)).length,
-        failed: tasks.filter(t => ['failed', 'interrupted', 'retry_required'].includes(t.status)).length,
-        completed: tasks.filter(t => t.status === 'completed').length,
-    }), [tasks]);
-    const dismissibleTasks = useMemo(() => tasks.filter(task => task.dismissible), [tasks]);
+    const summary = useMemo(() => summarizeTaskStatuses(tasks), [tasks]);
+    const visibleTasks = useMemo(() => scopeTasks(tasks, scopeFilters), [scopeFilters, tasks]);
+    const dismissibleTasks = useMemo(() => dismissibleTaskSnapshot(tasks, scopeFilters), [scopeFilters, tasks]);
 
     const taskActionLabel = (task: UnifiedTask, action: 'cancel' | 'retry'): string => {
         if (action === 'retry') return task.sourceType === 'web_upload' ? '续传' : '重试';
@@ -151,12 +169,12 @@ export const TasksPage = ({ onUnauthorized, onOpenUploads, initialAccountId = nu
         } finally { setActing(false); }
     };
 
-    const prepareDismissal = async (input: { tasks?: UnifiedTask[]; filtered?: boolean }) => {
+    const prepareDismissal = async (input: { tasks: UnifiedTask[] }) => {
         setActing(true); setError(null);
         try {
-            const preview = await fileApi.prepareTaskDismissal(input.tasks
-                ? { tasks: input.tasks.map(task => ({ sourceType: task.sourceType, id: task.id })) }
-                : { source, status });
+            const preview = await fileApi.prepareTaskDismissal({
+                tasks: input.tasks.map(task => ({ sourceType: task.sourceType, id: task.id })),
+            });
             setDismissalPreview(preview);
         } catch (dismissError: any) {
             if (dismissError?.message === 'UNAUTHORIZED') { authService.clearToken(); onUnauthorized?.(); }
@@ -191,20 +209,37 @@ export const TasksPage = ({ onUnauthorized, onOpenUploads, initialAccountId = nu
                     <p className="mt-1 text-sm text-muted-foreground">{initialAccountId ? '仅显示仍引用所选存储账户的任务或 Telegram 目标。' : '查看和管理 Web、Telegram、频道订阅及 yt-dlp 任务。'}</p>
                     {initialAccountId && <button type="button" className="mt-2 text-sm font-medium text-primary hover:underline" onClick={() => { window.history.replaceState({}, '', '/tasks'); window.dispatchEvent(new PopStateEvent('popstate')); }}>显示全部任务</button>}
                 </div>
-                <div className="grid grid-cols-3 gap-2 text-center text-xs sm:text-sm">
-                    <button className="rounded-md border px-2 py-2" onClick={() => setStatus('')}>进行中 {summary.active}</button>
-                    <button className="rounded-md border border-red-200 bg-red-50 px-2 py-2 text-red-700" onClick={() => setStatus('failed')}>需处理 {summary.failed}</button>
-                    <button className="rounded-md border border-emerald-200 bg-emerald-50 px-2 py-2 text-emerald-700" onClick={() => setStatus('completed')}>已完成 {summary.completed}</button>
+                <div className="grid grid-cols-4 gap-2 text-center text-xs sm:text-sm">
+                    {([
+                        ['all', '全部', tasks.length, ''],
+                        ['active', '进行中', summary.active, ''],
+                        ['attention', '需处理', summary.attention, 'border-red-200 text-red-700'],
+                        ['completed', '已完成', summary.completed, 'border-emerald-200 text-emerald-700'],
+                    ] as const).map(([filter, label, count, tone]) => (
+                        <button
+                            key={filter}
+                            type="button"
+                            aria-pressed={quickFilter === filter}
+                            className={cn(
+                                'rounded-md border px-2 py-2 transition-colors',
+                                tone,
+                                quickFilter === filter ? 'bg-primary text-primary-foreground ring-2 ring-primary/20' : 'bg-background hover:bg-muted/60',
+                            )}
+                            onClick={() => { setStatus(''); setQuickFilter(filter); }}
+                        >
+                            {label} {count}
+                        </button>
+                    ))}
                 </div>
             </div>
 
             <div className="border-y border-border py-4">
                 <div className="grid grid-cols-2 gap-2 sm:flex sm:items-center">
                     <select className="h-10 min-w-0 rounded-md border bg-background px-2 text-sm sm:w-auto" value={source} onChange={e => setSource(e.target.value)} aria-label="按任务来源筛选">{SOURCE_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}</select>
-                    <select className="h-10 min-w-0 rounded-md border bg-background px-2 text-sm sm:w-auto" value={status} onChange={e => setStatus(e.target.value)} aria-label="按任务状态筛选">{STATUS_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}</select>
+                    <select className="h-10 min-w-0 rounded-md border bg-background px-2 text-sm sm:w-auto" value={status} onChange={e => { setStatus(e.target.value); setQuickFilter('all'); }} aria-label="按任务状态筛选">{STATUS_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}</select>
                     <div className="col-span-2 flex flex-wrap gap-2 sm:ml-auto">
                         <Button size="sm" variant="outline" className="gap-2" onClick={() => { setSelectionMode(!selectionMode); setSelected([]); }} disabled={!dismissibleTasks.length}><CheckSquare className="h-4 w-4" />{selectionMode ? '退出选择' : '选择任务'}</Button>
-                        <Button size="sm" variant="outline" className="gap-2 text-red-700" onClick={() => void prepareDismissal({ filtered: true })} disabled={!dismissibleTasks.length || acting}><Trash2 className="h-4 w-4" />清理终态记录</Button>
+                        <Button size="sm" variant="outline" className="gap-2 text-red-700" onClick={() => void prepareDismissal({ tasks: dismissibleTasks })} disabled={!dismissibleTasks.length || acting}><Trash2 className="h-4 w-4" />清理终态记录</Button>
                         <Button size="icon" variant="outline" aria-label="刷新任务" title="刷新" onClick={() => void loadTasks(true)} disabled={refreshing}>{refreshing ? <IndeterminateSpinner label="正在刷新任务" size="sm" /> : <RefreshCw className="h-4 w-4" />}</Button>
                     </div>
                 </div>
@@ -214,9 +249,9 @@ export const TasksPage = ({ onUnauthorized, onOpenUploads, initialAccountId = nu
             {notice && <div className="flex items-center justify-between gap-3 rounded-md border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800" role="status" aria-live="polite"><span>{notice.message}</span><button type="button" className="rounded p-1 hover:bg-emerald-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600" onClick={() => setNotice(null)} aria-label="关闭提示" title="关闭提示"><X className="h-4 w-4" /></button></div>}
             {error && <div className="flex items-start justify-between gap-3 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800"><span>{error}</span><Button size="sm" variant="outline" onClick={() => void loadTasks(false)}>重试</Button></div>}
 
-            {loading ? <div className="flex min-h-48 items-center justify-center"><IndeterminateSpinner label="正在加载任务" size="md" /></div> : tasks.length === 0 ? <div className="flex min-h-48 flex-col items-center justify-center border-y text-center"><Clock3 className="mb-3 h-7 w-7 text-muted-foreground" /><p className="font-medium">没有符合条件的任务</p><p className="mt-1 text-sm text-muted-foreground">调整来源或状态筛选后再查看。</p></div> : (
+            {loading ? <div className="flex min-h-48 items-center justify-center"><IndeterminateSpinner label="正在加载任务" size="md" /></div> : visibleTasks.length === 0 ? <div className="flex min-h-48 flex-col items-center justify-center border-y text-center"><Clock3 className="mb-3 h-7 w-7 text-muted-foreground" /><p className="font-medium">没有符合条件的任务</p><p className="mt-1 text-sm text-muted-foreground">调整来源或状态筛选后再查看。</p></div> : (
                 <div className="divide-y divide-border border-y">
-                    {tasks.map(task => {
+                    {visibleTasks.map(task => {
                         const stageLabel = STAGE_LABELS[task.stage] || task.stage;
                         const statusLabel = STATUS_LABELS[task.status] || task.status;
                         const showStage = STAGE_LABELS[task.stage] !== STATUS_LABELS[task.status] && stageLabel !== statusLabel;

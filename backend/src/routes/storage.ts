@@ -15,7 +15,7 @@ import { assertPublicStorageEndpoint, assertStorageEndpoint } from '../utils/net
 import { getCurrentStorageScope } from '../utils/fileScope.js';
 import { getAuthToken } from './auth.js';
 import { oauthFlowStore, OAuthFlowError, type OAuthProvider } from '../services/oauthFlowStore.js';
-import { getOAuthRouteConfig, renderOAuthSuccessPage } from '../services/oauthRouteConfig.js';
+import { getOAuthRouteConfig, renderOAuthFailurePage, renderOAuthSuccessPage } from '../services/oauthRouteConfig.js';
 import { deleteStorageAccountWithClient, StorageAccountConflictError, StorageAccountNotFoundError } from '../services/storageAccountLifecycle.js';
 import { logOperationalEvent } from '../services/operationalEvents.js';
 import { webDestructiveConfirmationStore } from '../services/webDestructiveConfirmation.js';
@@ -40,7 +40,7 @@ import {
 } from '../services/telegramBotConfig.js';
 import { withTelegramBotLifecycle } from '../services/telegramBot.js';
 import { maintenanceImpact } from '../utils/maintenanceActions.js';
-import { buildStorageCapabilities, buildStorageStatsPayload } from '../utils/storageProductContract.js';
+import { buildStorageCapabilities, buildStorageScopeForTarget, buildStorageStatsPayload } from '../utils/storageProductContract.js';
 import { buildAdvancedSettings, normalizeAdvancedSettingsPatch } from '../utils/advancedSettings.js';
 import { getFileDownloadConcurrency, setFileDownloadConcurrency } from '../services/telegramUpload.js';
 import { startPeriodicCleanup, stopPeriodicCleanup } from '../services/orphanCleanup.js';
@@ -118,6 +118,22 @@ function sendOAuthSuccessPage(res: Response, input: {
     res.type('html').send(renderOAuthSuccessPage({ ...input, scriptNonce: nonce }));
 }
 
+function sendOAuthFailurePage(res: Response, input: {
+    provider: OAuthProvider;
+    providerName: string;
+    frontendOrigin: string;
+    flowNonce: string;
+    error: string;
+}): void {
+    const nonce = crypto.randomBytes(16).toString('base64');
+    res.setHeader('Content-Security-Policy', [
+        "default-src 'self'", "style-src 'unsafe-inline'", `script-src 'nonce-${nonce}'`,
+        "script-src-attr 'none'", "base-uri 'none'", "object-src 'none'",
+    ].join('; '));
+    res.setHeader('Cross-Origin-Opener-Policy', 'unsafe-none');
+    res.status(400).type('html').send(renderOAuthFailurePage({ ...input, scriptNonce: nonce }));
+}
+
 function getOAuthSessionToken(req: Request): string {
     const token = getAuthToken(req);
     if (!token) throw new OAuthFlowError();
@@ -135,16 +151,17 @@ function sendOAuthFlowError(res: Response, error: unknown): void {
 // 获取存储统计：服务器临时空间、当前账户索引量和远端 quota 分开表达。
 router.get('/stats', requireAuth, async (_req: Request, res: Response) => {
     try {
+        const { storageManager } = await import('../services/storage.js');
+        const target = storageManager.getActiveTarget();
+        const provider = target.provider;
+        const activeAccountId = target.accountId;
+        const scope = buildStorageScopeForTarget({ providerName: provider.name, accountId: activeAccountId });
         const diskPath = os.platform() === 'win32' ? 'C:' : path.resolve(UPLOAD_DIR);
         const diskSpace = await checkDiskSpace(diskPath);
-        const scope = await getCurrentStorageScope();
         const result = await query(`
             SELECT COUNT(*) as file_count, COALESCE(SUM(size), 0) as total_size
             FROM files WHERE ${scope.clause}
         `, scope.params);
-        const { storageManager } = await import('../services/storage.js');
-        const provider = storageManager.getProvider();
-        const activeAccountId = storageManager.getActiveAccountId();
         const account = activeAccountId
             ? (await query(`SELECT last_probe_status, last_probed_at FROM storage_accounts WHERE id = $1`, [activeAccountId])).rows[0]
             : null;
@@ -609,68 +626,73 @@ router.post('/config/onedrive/auth-url', requireAuth, async (req: Request, res: 
 router.get('/onedrive/callback', async (req: Request, res: Response) => {
     try {
         const { code, state, error, error_description } = req.query;
-        if (error) return res.type('text/plain').send(`授权失败: ${String(error_description || error)}`);
-        if (!code || typeof code !== 'string') return res.status(400).send('缺少授权码 (code)');
         if (!state || typeof state !== 'string') return res.status(400).send('缺少 OAuth state');
-
         const flow = await oauthFlowStore.consume({
             state,
             provider: 'onedrive',
             authSessionToken: getOAuthSessionToken(req),
         });
-        const { clientId, clientSecret = '', tenantId = 'common', name = '' } = flow.config;
-        if (typeof clientId !== 'string' || !clientId) return res.status(400).send('OAuth 配置信息不完整');
+        const routeConfig = getOAuthRouteConfig('onedrive');
+        const fail = (message: string) => sendOAuthFailurePage(res, {
+            provider: 'onedrive', providerName: 'OneDrive', frontendOrigin: routeConfig.frontendOrigin,
+            flowNonce: flow.flowNonce, error: message,
+        });
+        if (error) return fail(`授权失败：${String(error_description || error)}`);
+        if (!code || typeof code !== 'string') return fail('授权失败：未收到授权码');
 
-        const { storageManager, OneDriveStorageProvider } = await import('../services/storage.js');
-        let tokens;
+        const { clientId, clientSecret = '', tenantId = 'common', name = '' } = flow.config;
+        if (typeof clientId !== 'string' || !clientId) return fail('OAuth 配置信息不完整');
         try {
-            tokens = await OneDriveStorageProvider.exchangeCodeForToken(
+            const { storageManager, OneDriveStorageProvider } = await import('../services/storage.js');
+            let tokens;
+            try {
+                tokens = await OneDriveStorageProvider.exchangeCodeForToken(
+                    clientId,
+                    typeof clientSecret === 'string' ? clientSecret : '',
+                    typeof tenantId === 'string' ? tenantId : 'common',
+                    flow.redirectUri,
+                    code,
+                );
+            } catch (err: any) {
+                const msError = err.response?.data;
+                const errorCode = Array.isArray(msError?.error_codes) ? msError.error_codes[0] : undefined;
+                const description = String(msError?.error_description || err.message || '未知错误');
+                if (errorCode === 7000215 || /invalid client secret|AADSTS7000215/i.test(description)) {
+                    return fail('Microsoft 返回 AADSTS7000215，Client Secret 无效。请复制客户端密码的值 Value。');
+                }
+                return fail(`授权失败：${description}`);
+            }
+
+            let accountName = 'OneDrive Account';
+            try {
+                const profileRes = await axios.get('https://graph.microsoft.com/v1.0/me', {
+                    headers: { 'Authorization': `Bearer ${tokens.access_token}` }
+                });
+                accountName = profileRes.data.mail || profileRes.data.userPrincipalName || accountName;
+            } catch {
+                // User.Read is optional for account creation.
+            }
+            const accountId = await storageManager.addOneDriveAccount(
+                typeof name === 'string' && name ? name : accountName,
                 clientId,
                 typeof clientSecret === 'string' ? clientSecret : '',
+                tokens.refresh_token,
                 typeof tenantId === 'string' ? tenantId : 'common',
-                flow.redirectUri,
-                code,
             );
-        } catch (err: any) {
-            const msError = err.response?.data;
-            const errorCode = Array.isArray(msError?.error_codes) ? msError.error_codes[0] : undefined;
-            const errorDescription = msError?.error_description || err.message || '未知错误';
-            if (errorCode === 7000215 || /invalid client secret|AADSTS7000215/i.test(errorDescription)) {
-                return res.status(400).send('授权失败：Microsoft 返回 AADSTS7000215，Client Secret 无效。请复制客户端密码的值 Value。');
-            }
-            return res.status(err.response?.status || 400).type('text/plain').send(`授权失败：${String(errorDescription)}`);
-        }
-
-        let accountName = 'OneDrive Account';
-        try {
-            const profileRes = await axios.get('https://graph.microsoft.com/v1.0/me', {
-                headers: { 'Authorization': `Bearer ${tokens.access_token}` }
+            await storageManager.switchAccount(accountId);
+            return sendOAuthSuccessPage(res, {
+                provider: 'onedrive', providerName: 'OneDrive', frontendOrigin: routeConfig.frontendOrigin,
+                flowNonce: flow.flowNonce, accountId,
             });
-            accountName = profileRes.data.mail || profileRes.data.userPrincipalName || accountName;
-        } catch {
-            // User.Read is optional for account creation.
+        } catch (unexpected) {
+            console.error('OneDrive 回调处理失败:', unexpected);
+            return fail('授权处理失败，请检查配置后重试');
         }
-        const accountId = await storageManager.addOneDriveAccount(
-            typeof name === 'string' && name ? name : accountName,
-            clientId,
-            typeof clientSecret === 'string' ? clientSecret : '',
-            tokens.refresh_token,
-            typeof tenantId === 'string' ? tenantId : 'common',
-        );
-        await storageManager.switchAccount(accountId);
-        const routeConfig = getOAuthRouteConfig('onedrive');
-        sendOAuthSuccessPage(res, {
-            provider: 'onedrive',
-            providerName: 'OneDrive',
-            frontendOrigin: routeConfig.frontendOrigin,
-            flowNonce: flow.flowNonce,
-            accountId,
-        });
     } catch (error: any) {
         try {
             sendOAuthFlowError(res, error);
         } catch (unexpected) {
-            console.error('OneDrive 回调处理失败:', unexpected);
+            console.error('OneDrive OAuth 流程校验失败:', unexpected);
             res.status(500).send('授权处理出错，请检查后端日志。');
         }
     }
@@ -711,48 +733,54 @@ router.post('/config/google-drive/auth-url', requireAuth, async (req: Request, r
 
 // Google Drive OAuth 回调
 router.get('/google-drive/callback', async (req: Request, res: Response) => {
+    const fail = async (message: string, flow?: { flowNonce: string }) => {
+        if (flow) {
+            const routeConfig = getOAuthRouteConfig('google_drive');
+            return sendOAuthFailurePage(res, {
+                provider: 'google_drive', providerName: 'Google Drive', frontendOrigin: routeConfig.frontendOrigin,
+                flowNonce: flow.flowNonce, error: message,
+            });
+        }
+        return res.status(400).type('text/plain').send(message);
+    };
     try {
         const { code, state, error } = req.query;
-        if (error) return res.type('text/plain').send(`授权失败: ${String(error)}`);
-        if (!code || typeof code !== 'string') return res.status(400).send('缺少授权码 (code)');
-        if (!state || typeof state !== 'string') return res.status(400).send('缺少 OAuth state');
-
+        if (!state || typeof state !== 'string') return fail('缺少 OAuth state');
         const flow = await oauthFlowStore.consume({
             state,
             provider: 'google_drive',
             authSessionToken: getOAuthSessionToken(req),
         });
+        if (error) return fail(`授权失败：${String(error)}`, flow);
+        if (!code || typeof code !== 'string') return fail('授权失败：未收到授权码', flow);
         const { clientId, clientSecret, name = '', sharedDriveId = '' } = flow.config;
         if (typeof clientId !== 'string' || !clientId || typeof clientSecret !== 'string' || !clientSecret) {
-            return res.status(400).send('OAuth 配置信息不完整');
+            return fail('OAuth 配置信息不完整', flow);
         }
-        const { storageManager, GoogleDriveStorageProvider } = await import('../services/storage.js');
-        const tokens = await GoogleDriveStorageProvider.exchangeCodeForToken(clientId, clientSecret, flow.redirectUri, code);
-        if (!tokens.refresh_token) {
-            return res.status(400).send('授权失败：未获得 Refresh Token。请在 Google 控制台中撤销权限后重试。');
+        try {
+            const { storageManager, GoogleDriveStorageProvider } = await import('../services/storage.js');
+            const tokens = await GoogleDriveStorageProvider.exchangeCodeForToken(clientId, clientSecret, flow.redirectUri, code);
+            if (!tokens.refresh_token) return fail('授权失败：未获得 Refresh Token。请在 Google 控制台中撤销权限后重试。', flow);
+            const accountId = await storageManager.addGoogleDriveAccount(
+                typeof name === 'string' && name ? name : 'Google Drive Account',
+                clientId, clientSecret, tokens.refresh_token, flow.redirectUri,
+                typeof sharedDriveId === 'string' ? sharedDriveId : '',
+            );
+            await storageManager.switchAccount(accountId);
+            const routeConfig = getOAuthRouteConfig('google_drive');
+            return sendOAuthSuccessPage(res, {
+                provider: 'google_drive', providerName: 'Google Drive', frontendOrigin: routeConfig.frontendOrigin,
+                flowNonce: flow.flowNonce, accountId,
+            });
+        } catch (unexpected) {
+            console.error('Google Drive 回调处理失败:', unexpected);
+            return fail('授权处理失败，请检查配置后重试', flow);
         }
-        const accountId = await storageManager.addGoogleDriveAccount(
-            typeof name === 'string' && name ? name : 'Google Drive Account',
-            clientId,
-            clientSecret,
-            tokens.refresh_token,
-            flow.redirectUri,
-            typeof sharedDriveId === 'string' ? sharedDriveId : '',
-        );
-        await storageManager.switchAccount(accountId);
-        const routeConfig = getOAuthRouteConfig('google_drive');
-        sendOAuthSuccessPage(res, {
-            provider: 'google_drive',
-            providerName: 'Google Drive',
-            frontendOrigin: routeConfig.frontendOrigin,
-            flowNonce: flow.flowNonce,
-            accountId,
-        });
     } catch (error: any) {
         try {
             sendOAuthFlowError(res, error);
         } catch (unexpected) {
-            console.error('Google Drive 回调处理失败:', unexpected);
+            console.error('Google Drive OAuth 流程校验失败:', unexpected);
             res.status(500).send('授权处理出错，请检查后端日志。');
         }
     }
@@ -850,6 +878,41 @@ router.post('/config/webdav', requireAuth, async (req: Request, res: Response) =
     }
 });
 
+// 添加 OpenList 原生存储配置。仅保存连接凭据，不提供 OpenList 远端管理功能。
+router.post('/config/openlist', requireAuth, async (req: Request, res: Response) => {
+    try {
+        const { name, baseUrl, rootPath = '/', username, password } = req.body || {};
+        if (!name || !baseUrl || !username || !password) {
+            return res.status(400).json({ error: '缺少必要参数（名称、地址、用户名和密码）' });
+        }
+        try {
+            await assertPublicStorageEndpoint(baseUrl);
+        } catch (error) {
+            return sendStorageEndpointValidationError(res, error);
+        }
+        const normalizedRoot = `/${String(rootPath || '/').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '')}`.replace(/\/$/, '') || '/';
+        if (normalizedRoot.includes('..')) return res.status(400).json({ error: '根目录不能包含 ..' });
+
+        const { storageManager } = await import('../services/storage.js');
+        const accountId = await storageManager.addOpenListAccount(
+            String(name).trim(),
+            String(baseUrl).trim(),
+            normalizedRoot,
+            String(username),
+            String(password),
+        );
+        res.json({ success: true, message: 'OpenList 原生存储账户已添加', accountId });
+    } catch (error) {
+        const message = String((error as Error)?.message || '');
+        if (/OpenList 请求失败|OpenList 请求超时|OpenList 端点无法连接|OpenList 上传后文件大小校验失败|OpenList 写入测试|OpenList 未返回|OpenList 文件读取/.test(message)) {
+            res.status(422).json({ error: message, code: 'STORAGE_PROBE_FAILED', provider: 'openlist', retryable: true });
+            return;
+        }
+        console.error('添加 OpenList 配置失败:', error);
+        res.status(500).json({ error: '添加 OpenList 配置失败' });
+    }
+});
+
 // 切换存储提供商或具体账户
 router.post('/switch', requireAuth, async (req: Request, res: Response) => {
     try {
@@ -859,7 +922,7 @@ router.post('/switch', requireAuth, async (req: Request, res: Response) => {
         if (provider === 'local') {
             await storageManager.switchToLocal();
             return res.json({ success: true, message: '已切换到本地存储。该系统默认值只影响后续新任务，已提交任务目标保持不变。', scope: 'global_default', inFlightTargetsPreserved: true });
-        } else if (provider === 'onedrive' || provider === 'aliyun_oss' || provider === 's3' || provider === 'webdav' || provider === 'google_drive') {
+        } else if (provider === 'onedrive' || provider === 'aliyun_oss' || provider === 's3' || provider === 'webdav' || provider === 'openlist' || provider === 'google_drive') {
             if (accountId) {
                 await storageManager.switchAccount(accountId);
                 return res.json({ success: true, message: `已切换 ${provider} 账户。该系统默认值只影响后续新任务，已提交任务目标保持不变。`, scope: 'global_default', inFlightTargetsPreserved: true });

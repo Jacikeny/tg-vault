@@ -214,6 +214,11 @@ export const UploadQueueModal = ({
                                         <Button variant="outline" size="sm" onClick={() => onRetry(item.id)}>重试</Button>
                                     )}
                                 </div>
+                                {item.error && (
+                                    <p role="alert" className="break-words rounded-md bg-red-50 px-3 py-2 text-xs text-red-700 dark:bg-red-950/30 dark:text-red-300">
+                                        {item.error}
+                                    </p>
+                                )}
 
                                 {/* 进度条 */}
                                 {(item.status === 'uploading' || item.status === 'processing' || item.progress > 0) && (

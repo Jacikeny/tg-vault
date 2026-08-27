@@ -67,6 +67,7 @@ export const ContextMenu = ({ x, y, isOpen, onClose, items }: ContextMenuProps) 
         <AnimatePresence>
             {isOpen && (
                 <motion.div
+                    role="menu"
                     ref={menuRef}
                     initial={{ opacity: 0, scale: 0.92 }}
                     animate={{ opacity: 1, scale: 1 }}
@@ -77,6 +78,7 @@ export const ContextMenu = ({ x, y, isOpen, onClose, items }: ContextMenuProps) 
                 >
                     {items.map((item, index) => (
                         <button
+                            role="menuitem"
                             key={index}
                             className={`w-full min-h-11 flex items-center gap-3 px-4 py-3 text-base md:text-sm rounded-lg transition-colors text-left font-medium touch-manipulation ${item.variant === "danger"
                                 ? "text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-500/10"

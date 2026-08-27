@@ -27,6 +27,7 @@ function event(overrides: Partial<MessageEvent> = {}): MessageEvent {
 
 test('accepts only the expected OAuth popup success message', () => {
     assert.equal(isTrustedOAuthPopupMessage(event(), expected), true);
+    assert.equal(isTrustedOAuthPopupMessage(event({ data: { type: 'oauth_failure', provider: 'google_drive', flowNonce: 'flow-nonce-a', error: 'denied' } }), expected), true);
 });
 
 test('rejects OAuth messages from the wrong origin', () => {

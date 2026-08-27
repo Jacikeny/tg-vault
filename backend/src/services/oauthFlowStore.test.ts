@@ -17,11 +17,14 @@ class FakeOAuthDb {
     readonly rows = new Map<string, Row>();
 
     async query(text: string, params: unknown[] = []): Promise<QueryResult<any>> {
-        if (/CREATE TABLE|CREATE INDEX|DELETE FROM oauth_pending_flows\s+WHERE expires_at/i.test(text)) {
+        if (/CREATE TABLE|CREATE (?:UNIQUE )?INDEX|DELETE FROM oauth_pending_flows\s+WHERE expires_at|DELETE FROM oauth_pending_flows older/i.test(text)) {
             return { rows: [], rowCount: 0 } as unknown as QueryResult<any>;
         }
         if (/INSERT INTO oauth_pending_flows/i.test(text)) {
             const [stateHash, provider, authSessionHash, redirectUri, pendingConfig, flowNonce, expiresAt] = params;
+            for (const [key, row] of this.rows) {
+                if (row.auth_session_hash === String(authSessionHash)) this.rows.delete(key);
+            }
             this.rows.set(String(stateHash), {
                 state_hash: String(stateHash),
                 provider: String(provider),
@@ -62,7 +65,7 @@ function createStore(db: FakeOAuthDb, now: { value: number }, states: string[], 
     });
 }
 
-test('concurrent OAuth tabs retain separate immutable provider config and redirect URI', async () => {
+test('a newer OAuth flow invalidates the older flow for the same authenticated session', async () => {
     const db = new FakeOAuthDb();
     const now = { value: Date.parse('2026-07-13T00:00:00.000Z') };
     const store = createStore(db, now, ['state-a', 'state-b'], ['nonce-a', 'nonce-b']);
@@ -82,10 +85,11 @@ test('concurrent OAuth tabs retain separate immutable provider config and redire
 
     assert.notEqual(flowA.state, flowB.state);
     const consumedB = await store.consume({ state: flowB.state, provider: 'onedrive', authSessionToken: 'session-a' });
-    const consumedA = await store.consume({ state: flowA.state, provider: 'onedrive', authSessionToken: 'session-a' });
     assert.deepEqual(consumedB.config, { clientId: 'client-b', clientSecret: 'secret-b', name: 'Account B', tenantId: 'tenant-b' });
-    assert.deepEqual(consumedA.config, { clientId: 'client-a', clientSecret: 'secret-a', name: 'Account A', tenantId: 'tenant-a' });
-    assert.equal(consumedA.redirectUri, 'https://api.example.test/api/storage/onedrive/callback');
+    await assert.rejects(
+        store.consume({ state: flowA.state, provider: 'onedrive', authSessionToken: 'session-a' }),
+        (error: unknown) => error instanceof OAuthFlowError,
+    );
 });
 
 test('OAuth flow rejects wrong session without consuming the owner flow', async () => {

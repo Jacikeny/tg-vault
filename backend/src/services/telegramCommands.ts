@@ -1095,6 +1095,10 @@ export async function handleDelete(message: Api.Message, args: string[]): Promis
         }
 
         const file = result.rows[0];
+        if (file.source === 'openlist') {
+            await message.reply({ message: 'OpenList 存储不提供用户删除功能。' });
+            return;
+        }
         const sent = await message.reply({
             message: [
                 '⚠️ **确认删除这个文件？**',
@@ -1180,6 +1184,11 @@ export async function handleDeleteConfirmCallback(client: TelegramClient, update
             pendingDeleteConfirmations.delete(confirmId);
             await client.editMessage(update.peer, { message: Number(update.msgId), text: '❌ 文件已不存在或不在当前存储范围内。', buttons: new Api.ReplyInlineMarkup({ rows: [] }) });
             await client.invoke(new Api.messages.SetBotCallbackAnswer({ queryId: update.queryId, message: '文件不存在', alert: true }));
+            return;
+        }
+        if (file.source === 'openlist') {
+            await client.editMessage(update.peer, { message: Number(update.msgId), text: '❌ OpenList 存储不提供用户删除功能。', buttons: new Api.ReplyInlineMarkup({ rows: [] }) });
+            await client.invoke(new Api.messages.SetBotCallbackAnswer({ queryId: update.queryId, message: '当前存储不支持用户删除', alert: true }));
             return;
         }
         await removePhysicalFile(file);

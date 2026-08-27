@@ -4,7 +4,7 @@ import { query } from '../db/index.js';
 import fs from 'fs';
 import path from 'path';
 import { getSignedUrl } from '../middleware/signedUrl.js';
-import { getCurrentStorageScope, getScopedFileById, nextParam, removePhysicalFile, updateScopedFileById } from '../utils/fileScope.js';
+import { CLOUD_SOURCES, getCurrentStorageScope, getScopedFileById, nextParam, removePhysicalFile, updateScopedFileById } from '../utils/fileScope.js';
 import { createFileDeletionService } from '../services/fileDeletion.js';
 import { webDestructiveConfirmationStore } from '../services/webDestructiveConfirmation.js';
 import { getAuthToken } from './auth.js';
@@ -464,7 +464,7 @@ router.get('/:id([0-9a-fA-F-]{36})/preview', async (req: Request, res: Response)
             return;
         }
 
-        if (file.source === 'onedrive' || file.source === 'aliyun_oss' || file.source === 's3' || file.source === 'webdav' || file.source === 'google_drive') {
+        if (CLOUD_SOURCES.has(file.source)) {
             try {
                 const { storageManager } = await import('../services/storage.js');
                 const provider = storageManager.getProvider(`${file.source}:${file.storage_account_id}`);
@@ -554,7 +554,7 @@ router.get('/:id([0-9a-fA-F-]{36})/original', async (req: Request, res: Response
         const file = await getScopedFileById(id);
         if (!file) return res.status(404).json({ error: '文件不存在' });
 
-        if (file.source === 'onedrive' || file.source === 'aliyun_oss' || file.source === 's3' || file.source === 'webdav' || file.source === 'google_drive') {
+        if (CLOUD_SOURCES.has(file.source)) {
             try {
                 const { storageManager } = await import('../services/storage.js');
                 const provider = storageManager.getProvider(`${file.source}:${file.storage_account_id}`);
@@ -600,7 +600,7 @@ router.get('/:id([0-9a-fA-F-]{36})/download-url', async (req: Request, res: Resp
         }
 
         // 1. 云存储文件：获取临时下载链接
-        if (file.source === 'onedrive' || file.source === 'aliyun_oss' || file.source === 's3' || file.source === 'webdav' || file.source === 'google_drive') {
+        if (CLOUD_SOURCES.has(file.source)) {
             try {
                 const { storageManager } = await import('../services/storage.js');
                 const provider = storageManager.getProvider(`${file.source}:${file.storage_account_id}`);
@@ -644,7 +644,7 @@ router.get('/:id([0-9a-fA-F-]{36})/download', async (req: Request, res: Response
         }
 
         // 处理云存储文件 (如果直接访问此接口，仍然尝试重定向或流式传输)
-        if (file.source === 'onedrive' || file.source === 'aliyun_oss' || file.source === 's3' || file.source === 'webdav' || file.source === 'google_drive') {
+        if (CLOUD_SOURCES.has(file.source)) {
             try {
                 const { storageManager } = await import('../services/storage.js');
                 const provider = storageManager.getProvider(`${file.source}:${file.storage_account_id}`);
@@ -720,6 +720,7 @@ router.get('/:id([0-9a-fA-F-]{36})/thumbnail', async (req: Request, res: Respons
 router.post('/:id([0-9a-fA-F-]{36})/delete-confirmation', async (req: Request, res: Response) => {
     const file = await getScopedFileById(req.params.id);
     if (!file) return res.status(404).json({ error: '文件不存在' });
+    if (file.source === 'openlist') return res.status(403).json({ error: 'OpenList 存储不提供用户删除功能', code: 'USER_DELETE_UNSUPPORTED' });
     const authToken = getAuthToken(req);
     if (!authToken) return res.status(401).json({ error: '未认证' });
     res.json(webDestructiveConfirmationStore.issue({ authToken, action: 'delete_file', objectId: req.params.id }));
@@ -738,6 +739,9 @@ router.delete('/:id([0-9a-fA-F-]{36})', async (req: Request, res: Response) => {
 
         if (!file) {
             return res.status(404).json({ error: '文件不存在' });
+        }
+        if (file.source === 'openlist') {
+            return res.status(403).json({ error: 'OpenList 存储不提供用户删除功能', code: 'USER_DELETE_UNSUPPORTED' });
         }
 
         const deletionService = createFileDeletionService({

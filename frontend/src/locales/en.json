@@ -38,7 +38,8 @@
     "sortName": "Name",
     "sortDate": "Date",
     "loadMore": "Load more",
-    "loading": "Loading…"
+    "loading": "Loading…",
+    "noOtherFolders": "No other folders"
   },
   "sidebar": {
     "uploadCenter": "Upload center",
@@ -78,7 +79,12 @@
     "move": "Move file",
     "favorite": "Favorite",
     "unfavorite": "Remove from favorites",
-    "share": "Share"
+    "share": "Share",
+    "moreActions": "More actions"
+  },
+  "storage": {
+    "fileCount_one": "{{count}} file",
+    "fileCount_other": "{{count}} files"
   },
   "folder": {
     "move": "Move folder"
@@ -112,6 +118,26 @@
     "clearFilter": "View all files",
     "retry": "Retry"
   },
+  "updates": {
+    "bannerTitle": "TG Vault v{{latest}} is available",
+    "bannerCurrent": "You are using v{{current}}",
+    "viewRelease": "View release",
+    "dismiss": "Dismiss this version",
+    "settingsTitle": "Version information",
+    "lastChecked": "Last checked: {{time}}",
+    "staleSuffix": " (showing the last successful result)",
+    "disabled": "Automatic update checks are disabled",
+    "notChecked": "No version check has completed yet",
+    "current": "Current v{{version}}",
+    "latest": "Latest v{{version}}",
+    "upToDate": "Up to date",
+    "waiting": "Waiting for check",
+    "releaseNotes": "Release notes",
+    "checkNow": "Check now",
+    "checking": "Checking for updates",
+    "found": "TG Vault v{{version}} is available. You can view the release notes.",
+    "alreadyLatest": "Current v{{version}} is up to date."
+  },
   "settings": {
     "title": "Settings",
     "subtitle": "Manage appearance, security, Telegram, storage, and data maintenance.",
@@ -142,6 +168,39 @@
       "total": "Total storage",
       "used": "Used",
       "free": "Free"
+    },
+    "openlist": {
+      "title": "OpenList native storage",
+      "accounts": "OpenList storage accounts",
+      "description": "Store files through the native OpenList API. Remote search, deletion, offline downloads, and share management are not included.",
+      "cancelAdd": "Cancel adding",
+      "addAccount": "Add account",
+      "unnamed": "Unnamed account",
+      "inUse": "In use",
+      "switchAccount": "Switch to this account",
+      "deleteTitle": "Delete connection settings (OpenList files are kept)",
+      "empty": "No OpenList native storage accounts configured",
+      "accountName": "Account display name",
+      "accountPlaceholder": "Example: My OpenList",
+      "address": "OpenList address",
+      "rootPath": "Root path",
+      "rootHint": "Keep this as / if the OpenList user's base path already points to the TG Vault directory.",
+      "username": "Username",
+      "password": "Password",
+      "cancel": "Cancel",
+      "saving": "Testing and saving…",
+      "save": "Test connection and save",
+      "required": "Enter an account name, OpenList address, username, and password",
+      "incomplete": "Missing information",
+      "success": "OpenList native storage account added.",
+      "failure": "Could not add the OpenList native storage account: {{message}}"
+    },
+    "probe": {
+      "available": "Connection available",
+      "failed": "Connection failed",
+      "notTested": "Not tested",
+      "testing": "Testing storage connection",
+      "test": "Test connection"
     }
   }
 }

@@ -1,6 +1,6 @@
 import type { StorageAccount, StorageConfig, UploadTargetSnapshot } from './api.js';
 
-export const STORAGE_PROVIDER_IDS = ['local', 'onedrive', 'google_drive', 'aliyun_oss', 's3', 'webdav'] as const;
+export const STORAGE_PROVIDER_IDS = ['local', 'onedrive', 'google_drive', 'aliyun_oss', 's3', 'webdav', 'openlist'] as const;
 export type StorageProviderId = typeof STORAGE_PROVIDER_IDS[number];
 
 type UploadStorageConfig = {

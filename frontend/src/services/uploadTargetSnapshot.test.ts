@@ -9,6 +9,7 @@ const cases = [
     ['aliyun_oss', '阿里云 OSS', 'account-oss'],
     ['s3', 'S3', 'account-s3'],
     ['webdav', 'WebDAV', 'account-webdav'],
+    ['openlist', 'OpenList', 'account-openlist'],
 ] as const;
 
 for (const [provider, providerLabel, accountId] of cases) {

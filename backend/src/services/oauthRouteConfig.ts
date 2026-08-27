@@ -87,3 +87,43 @@ export function renderOAuthSuccessPage(input: {
         </html>
     `;
 }
+
+export function renderOAuthFailurePage(input: {
+    provider: OAuthProvider;
+    providerName: string;
+    frontendOrigin: string;
+    flowNonce: string;
+    error: string;
+    scriptNonce: string;
+}): string {
+    const message = JSON.stringify({
+        type: 'oauth_failure',
+        provider: input.provider,
+        flowNonce: input.flowNonce,
+        error: input.error,
+    }).replace(/</g, '\\u003c');
+    const targetOrigin = JSON.stringify(input.frontendOrigin);
+    const providerName = escapeHtml(input.providerName);
+    const error = escapeHtml(input.error);
+    const nonce = escapeHtml(input.scriptNonce);
+    return `
+        <!doctype html>
+        <html lang="zh-CN">
+            <head><meta charset="utf-8" /><title>${providerName} 授权失败</title></head>
+            <body style="font-family: sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0;">
+                <div style="max-width: 520px; text-align: center; padding: 36px; border-radius: 20px; background: #fef2f2; border: 1px solid #fecaca;">
+                    <h2 style="color: #dc2626;">授权失败</h2>
+                    <p style="color: #991b1b;">${error}</p>
+                    <button id="close-window" type="button">关闭窗口</button>
+                    <script nonce="${nonce}">
+                        const targetOrigin = ${targetOrigin};
+                        const message = ${message};
+                        const notifyParent = () => { if (window.opener && !window.opener.closed) window.opener.postMessage(message, targetOrigin); };
+                        document.getElementById('close-window')?.addEventListener('click', () => { notifyParent(); window.close(); });
+                        notifyParent();
+                    </script>
+                </div>
+            </body>
+        </html>
+    `;
+}

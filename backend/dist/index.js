@@ -320,7 +320,8 @@ var init_credentialCrypto = __esm({
       "clientSecret",
       "refreshToken",
       "accessKeySecret",
-      "password"
+      "password",
+      "username"
     ]);
     SENSITIVE_SETTING_KEYS = /* @__PURE__ */ new Set([
       "onedrive_client_secret",
@@ -752,6 +753,553 @@ var init_storageTargetReadiness = __esm({
   }
 });
 
+// src/utils/networkSecurity.ts
+import dns from "dns/promises";
+import net from "net";
+import { Agent, fetch as undiciFetch } from "undici";
+function ipv4ToInt(ip) {
+  return ip.split(".").reduce((acc, part) => (acc << 8) + Number(part) >>> 0, 0);
+}
+function isPrivateIPv4(ip) {
+  const n = ipv4ToInt(ip);
+  const ranges = [
+    ["0.0.0.0", "0.255.255.255"],
+    ["10.0.0.0", "10.255.255.255"],
+    ["100.64.0.0", "100.127.255.255"],
+    ["127.0.0.0", "127.255.255.255"],
+    ["169.254.0.0", "169.254.255.255"],
+    ["172.16.0.0", "172.31.255.255"],
+    ["192.0.0.0", "192.0.0.255"],
+    ["192.0.2.0", "192.0.2.255"],
+    ["192.88.99.0", "192.88.99.255"],
+    ["192.168.0.0", "192.168.255.255"],
+    ["198.18.0.0", "198.19.255.255"],
+    ["198.51.100.0", "198.51.100.255"],
+    ["203.0.113.0", "203.0.113.255"],
+    ["224.0.0.0", "239.255.255.255"],
+    ["240.0.0.0", "255.255.255.255"]
+  ];
+  return ranges.some(([start, end]) => n >= ipv4ToInt(start) && n <= ipv4ToInt(end));
+}
+function ipv6ToBigInt(ip) {
+  let normalized = ip.toLowerCase().split("%", 1)[0];
+  if (net.isIP(normalized) !== 6) return null;
+  if (normalized.includes(".")) {
+    const lastColon = normalized.lastIndexOf(":");
+    const dotted = normalized.slice(lastColon + 1);
+    const octets = dotted.split(".").map(Number);
+    if (octets.length !== 4 || octets.some((value) => !Number.isInteger(value) || value < 0 || value > 255)) return null;
+    normalized = `${normalized.slice(0, lastColon + 1)}${(octets[0] << 8 | octets[1]).toString(16)}:${(octets[2] << 8 | octets[3]).toString(16)}`;
+  }
+  const halves = normalized.split("::");
+  if (halves.length > 2) return null;
+  const parseHalf = (half) => half ? half.split(":").map((part) => Number.parseInt(part, 16)) : [];
+  const left = parseHalf(halves[0]);
+  const right = parseHalf(halves[1] || "");
+  const parts = halves.length === 2 ? [...left, ...Array(8 - left.length - right.length).fill(0), ...right] : left;
+  if (parts.length !== 8 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 65535)) return null;
+  return parts.reduce((value, part) => value << 16n | BigInt(part), 0n);
+}
+function isInIpv6Cidr(ip, base, prefix) {
+  const baseValue = ipv6ToBigInt(base);
+  if (baseValue === null) return false;
+  const shift = 128n - BigInt(prefix);
+  return ip >> shift === baseValue >> shift;
+}
+function isPrivateIPv6(ip) {
+  const numeric = ipv6ToBigInt(ip);
+  if (numeric === null) return true;
+  if (!isInIpv6Cidr(numeric, "2000::", 3)) return true;
+  for (const [base, prefix] of [
+    ["2001::", 32],
+    ["2001:2::", 48],
+    ["2001:10::", 28],
+    ["2001:20::", 28],
+    ["2001:db8::", 32]
+  ]) {
+    if (isInIpv6Cidr(numeric, base, prefix)) return true;
+  }
+  if (isInIpv6Cidr(numeric, "2002::", 16)) {
+    const embedded = Number(numeric >> 80n & 0xffffffffn);
+    const dotted = `${embedded >>> 24}.${embedded >>> 16 & 255}.${embedded >>> 8 & 255}.${embedded & 255}`;
+    return isPrivateIPv4(dotted);
+  }
+  return false;
+}
+function isPrivateAddress(ip) {
+  const version2 = net.isIP(ip);
+  if (version2 === 4) return isPrivateIPv4(ip);
+  if (version2 === 6) return isPrivateIPv6(ip);
+  return true;
+}
+async function resolvePublicHttpUrl(rawUrl) {
+  let parsed;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    throw new Error("\u94FE\u63A5\u683C\u5F0F\u65E0\u6548");
+  }
+  if (!["http:", "https:"].includes(parsed.protocol)) throw new Error("\u4EC5\u5141\u8BB8 http/https \u94FE\u63A5");
+  const hostname = parsed.hostname;
+  if (!hostname || ["localhost", "localhost.localdomain"].includes(hostname.toLowerCase())) throw new Error("\u4E0D\u5141\u8BB8\u8BBF\u95EE\u672C\u673A\u5730\u5740");
+  const directIpVersion = net.isIP(hostname);
+  const resolved = directIpVersion ? [{ address: hostname, family: directIpVersion }] : await dns.lookup(hostname, { all: true, verbatim: true });
+  const addresses = resolved.map((item) => ({ address: item.address, family: item.family }));
+  if (addresses.length === 0 || addresses.some((item) => isPrivateAddress(item.address))) {
+    throw new Error("\u4E0D\u5141\u8BB8\u8BBF\u95EE\u5185\u7F51\u3001\u56DE\u73AF\u6216\u4FDD\u7559\u5730\u5740");
+  }
+  return { url: parsed, addresses };
+}
+function pinnedLookup(addresses) {
+  let cursor = 0;
+  return (_hostname, options, callback) => {
+    if (options?.all) {
+      callback(null, addresses.map((item) => ({ ...item })));
+      return;
+    }
+    const selected = addresses[cursor++ % addresses.length];
+    callback(null, selected.address, selected.family);
+  };
+}
+async function fetchPinnedPublicUrl(rawUrl, init) {
+  const resolved = await resolvePublicHttpUrl(rawUrl);
+  const dispatcher = new Agent({ connect: { lookup: pinnedLookup(resolved.addresses) } });
+  try {
+    const response = await undiciFetch(resolved.url, {
+      ...init,
+      redirect: "manual",
+      dispatcher
+    });
+    if (!response.body) {
+      await dispatcher.close();
+      return response;
+    }
+    const reader = response.body.getReader();
+    let closed = false;
+    const close = async () => {
+      if (closed) return;
+      closed = true;
+      await dispatcher.close().catch(() => void 0);
+    };
+    const body = new ReadableStream({
+      async pull(controller) {
+        try {
+          const chunk = await reader.read();
+          if (chunk.done) {
+            controller.close();
+            await close();
+          } else controller.enqueue(chunk.value);
+        } catch (error) {
+          controller.error(error);
+          await close();
+        }
+      },
+      async cancel(reason) {
+        await reader.cancel(reason).catch(() => void 0);
+        await close();
+      }
+    });
+    return new Response(body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers
+    });
+  } catch (error) {
+    await dispatcher.close().catch(() => void 0);
+    throw error;
+  }
+}
+async function fetchPublicHttpUrl(rawUrl, init = {}, maxRedirects = 5) {
+  let current3 = new URL(rawUrl);
+  const method = String(init.method || "GET").toUpperCase();
+  for (let redirectCount = 0; ; redirectCount += 1) {
+    const response = await fetchPinnedPublicUrl(current3.toString(), init);
+    if (![301, 302, 303, 307, 308].includes(response.status)) return response;
+    const location = response.headers.get("location");
+    await response.body?.cancel().catch(() => void 0);
+    if (!location) throw new Error("\u8FDC\u7AEF\u91CD\u5B9A\u5411\u7F3A\u5C11 Location");
+    if (!["GET", "HEAD"].includes(method)) throw new Error("\u5B58\u50A8\u5199\u5165\u8BF7\u6C42\u4E0D\u5141\u8BB8\u91CD\u5B9A\u5411");
+    if (redirectCount >= maxRedirects) throw new Error("\u8FDC\u7AEF\u91CD\u5B9A\u5411\u6B21\u6570\u8FC7\u591A");
+    current3 = new URL(location, current3);
+  }
+}
+async function assertPublicHttpUrl(rawUrl) {
+  return (await resolvePublicHttpUrl(rawUrl)).url;
+}
+async function assertStorageEndpoint(rawUrl, policy = {}) {
+  if (!policy.allowPrivateAddresses) {
+    const parsed2 = await assertPublicHttpUrl(rawUrl);
+    if (parsed2.protocol !== "https:" && !policy.allowInsecureHttp && process.env.ALLOW_INSECURE_STORAGE_ENDPOINTS !== "true") {
+      throw new Error("\u5B58\u50A8\u7AEF\u70B9\u4EC5\u5141\u8BB8 https\uFF1B\u5982\u786E\u9700 http\uFF0C\u8BF7\u663E\u5F0F\u8BBE\u7F6E ALLOW_INSECURE_STORAGE_ENDPOINTS=true");
+    }
+    return parsed2;
+  }
+  let parsed;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    throw new Error("\u94FE\u63A5\u683C\u5F0F\u65E0\u6548");
+  }
+  if (!["http:", "https:"].includes(parsed.protocol)) {
+    throw new Error("\u4EC5\u5141\u8BB8 http/https \u94FE\u63A5");
+  }
+  if (parsed.protocol !== "https:" && !policy.allowInsecureHttp && process.env.ALLOW_INSECURE_STORAGE_ENDPOINTS !== "true") {
+    throw new Error("\u5B58\u50A8\u7AEF\u70B9\u4EC5\u5141\u8BB8 https\uFF1B\u5982\u786E\u9700 http\uFF0C\u8BF7\u663E\u5F0F\u8BBE\u7F6E ALLOW_INSECURE_STORAGE_ENDPOINTS=true");
+  }
+  return parsed;
+}
+async function assertPublicStorageEndpoint(rawUrl) {
+  return assertStorageEndpoint(rawUrl);
+}
+var init_networkSecurity = __esm({
+  "src/utils/networkSecurity.ts"() {
+    "use strict";
+  }
+});
+
+// src/services/openListStorage.ts
+import fs4 from "node:fs";
+import os from "node:os";
+import crypto6 from "node:crypto";
+import path4 from "node:path";
+import { Readable } from "node:stream";
+function normalizeAddress(value) {
+  return value.trim().replace(/\/+$/g, "");
+}
+function normalizeRoot(value) {
+  const normalized = path4.posix.normalize(`/${String(value || "/").replace(/\\/g, "/")}`);
+  return normalized === "." ? "/" : normalized;
+}
+function joinRemotePath(root, folder, name) {
+  const segments = [root];
+  if (folder) segments.push(String(folder).replace(/\\/g, "/"));
+  if (name) segments.push(name);
+  return path4.posix.join(...segments);
+}
+function encodeFilePath(value) {
+  return encodeURIComponent(value);
+}
+function copyResponseMetadata(stream, response) {
+  const enriched = stream;
+  enriched.upstreamStatus = response.status;
+  enriched.upstreamHeaders = response.headers;
+  return enriched;
+}
+async function fetchResponseWithBodyTimeout(url, init, timeoutMs, fetchImpl = fetch) {
+  const controller = new AbortController();
+  let reader = null;
+  let finished = false;
+  let timedOut = false;
+  const timeoutError = new OpenListRequestError("OpenList \u6587\u4EF6\u8BFB\u53D6\u8D85\u65F6");
+  const clear = () => {
+    if (finished) return;
+    finished = true;
+    clearTimeout(timer);
+  };
+  const timer = setTimeout(() => {
+    if (finished) return;
+    timedOut = true;
+    controller.abort(timeoutError);
+    void reader?.cancel(timeoutError).catch(() => void 0);
+  }, timeoutMs);
+  try {
+    const response = await fetchImpl(url, { ...init, signal: controller.signal });
+    if (!response.body) {
+      clear();
+      return response;
+    }
+    reader = response.body.getReader();
+    const stream = new ReadableStream({
+      async pull(target) {
+        try {
+          const chunk = await reader.read();
+          if (timedOut) throw timeoutError;
+          if (chunk.done) {
+            clear();
+            target.close();
+          } else {
+            target.enqueue(chunk.value);
+          }
+        } catch (error) {
+          clear();
+          target.error(timedOut ? timeoutError : new OpenListRequestError("OpenList \u6587\u4EF6\u8BFB\u53D6\u5931\u8D25", { cause: error }));
+        }
+      },
+      async cancel(reason) {
+        clear();
+        controller.abort(reason);
+        await reader.cancel(reason).catch(() => void 0);
+      }
+    });
+    return new Response(stream, { status: response.status, statusText: response.statusText, headers: response.headers });
+  } catch (error) {
+    clear();
+    if (timedOut || controller.signal.aborted) throw timeoutError;
+    throw new OpenListRequestError("OpenList \u6587\u4EF6\u8BFB\u53D6\u5931\u8D25", { cause: error });
+  }
+}
+var OpenListRequestError, OpenListStorageProvider;
+var init_openListStorage = __esm({
+  "src/services/openListStorage.ts"() {
+    "use strict";
+    init_networkSecurity();
+    OpenListRequestError = class extends Error {
+      status;
+      statusCode;
+      code;
+      response;
+      cause;
+      constructor(message, options = {}) {
+        super(message);
+        this.name = "OpenListRequestError";
+        this.status = options.status;
+        this.statusCode = options.status;
+        this.code = options.code === void 0 ? void 0 : String(options.code);
+        this.response = options.status ? { status: options.status } : void 0;
+        this.cause = options.cause;
+      }
+    };
+    OpenListStorageProvider = class {
+      constructor(id, address, rootPath = "/", username, password, requestTimeoutMs = 5 * 60 * 1e3, uploadTimeoutMs = 6 * 60 * 60 * 1e3, probeTimeoutMs = 15e3, requestFetch = fetchPublicHttpUrl) {
+        this.id = id;
+        this.username = username;
+        this.password = password;
+        this.requestTimeoutMs = requestTimeoutMs;
+        this.uploadTimeoutMs = uploadTimeoutMs;
+        this.probeTimeoutMs = probeTimeoutMs;
+        this.requestFetch = requestFetch;
+        this.address = normalizeAddress(address);
+        this.rootPath = normalizeRoot(rootPath);
+      }
+      id;
+      username;
+      password;
+      requestTimeoutMs;
+      uploadTimeoutMs;
+      probeTimeoutMs;
+      requestFetch;
+      name = "openlist";
+      token = null;
+      address;
+      rootPath;
+      async login() {
+        const response = await this.fetchWithTimeout("/api/auth/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username: this.username, password: this.password })
+        }, this.probeTimeoutMs);
+        const envelope = await this.parseEnvelope(response);
+        const token = String(envelope.data?.token || "");
+        if (!token) throw new OpenListRequestError("OpenList \u767B\u5F55\u54CD\u5E94\u7F3A\u5C11 Token", { status: response.status, code: envelope.code });
+        this.token = token;
+        return token;
+      }
+      async getToken(force = false) {
+        if (!force && this.token) return this.token;
+        return this.login();
+      }
+      async fetchWithTimeout(relativeUrl, init, timeoutMs) {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(new Error("OpenList request timed out")), timeoutMs);
+        try {
+          return await this.requestFetch(`${this.address}${relativeUrl}`, { ...init, signal: controller.signal });
+        } catch (error) {
+          if (error?.name === "AbortError" || controller.signal.aborted) {
+            throw new OpenListRequestError("OpenList \u8BF7\u6C42\u8D85\u65F6", { cause: error });
+          }
+          throw new OpenListRequestError("OpenList \u7AEF\u70B9\u65E0\u6CD5\u8FDE\u63A5", { cause: error });
+        } finally {
+          clearTimeout(timer);
+        }
+      }
+      async parseEnvelope(response) {
+        let envelope;
+        try {
+          envelope = await response.json();
+        } catch (error) {
+          throw new OpenListRequestError("OpenList \u8FD4\u56DE\u4E86\u65E0\u6CD5\u89E3\u6790\u7684\u54CD\u5E94", { status: response.status, cause: error });
+        }
+        if (!response.ok || envelope.code !== 200) {
+          throw new OpenListRequestError(
+            envelope.message ? `OpenList \u8BF7\u6C42\u5931\u8D25\uFF1A${envelope.message}` : `OpenList \u8BF7\u6C42\u5931\u8D25\uFF08HTTP ${response.status}\uFF09`,
+            { status: response.ok ? envelope.code : response.status, code: envelope.code }
+          );
+        }
+        return envelope;
+      }
+      async api(relativeUrl, init, timeoutMs = this.requestTimeoutMs, retry = true) {
+        const token = await this.getToken();
+        const headers = new Headers(init.headers);
+        headers.set("Authorization", token);
+        const response = await this.fetchWithTimeout(relativeUrl, { ...init, headers }, timeoutMs);
+        try {
+          return await this.parseEnvelope(response);
+        } catch (error) {
+          const code = Number(error?.code || error?.status || 0);
+          if (retry && (code === 401 || code === 403)) {
+            await this.getToken(true);
+            return this.api(relativeUrl, init, timeoutMs, false);
+          }
+          throw error;
+        }
+      }
+      async getInfo(storedPath) {
+        const envelope = await this.api("/api/fs/get", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ path: storedPath })
+        });
+        if (!envelope.data) throw new OpenListRequestError("OpenList \u6587\u4EF6\u4FE1\u606F\u4E3A\u7A7A");
+        return envelope.data;
+      }
+      async ensureDirectory(remoteDirectory) {
+        const rootSegments = normalizeRoot(remoteDirectory).split("/").filter(Boolean);
+        let current3 = "";
+        for (const segment of rootSegments) {
+          current3 = `${current3}/${segment}`;
+          try {
+            const info = await this.getInfo(current3);
+            if (!info.is_dir) throw new OpenListRequestError(`OpenList \u76EE\u6807\u8DEF\u5F84\u4E0D\u662F\u76EE\u5F55\uFF1A${current3}`);
+          } catch (error) {
+            const message = String(error?.message || "");
+            if (!/not found|object not found|不存在/i.test(message)) throw error;
+            await this.api("/api/fs/mkdir", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ path: current3 })
+            });
+          }
+        }
+      }
+      async probe() {
+        await this.api("/api/fs/get", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ path: this.rootPath })
+        }, this.probeTimeoutMs);
+      }
+      async probeWritable(timeoutMs = this.probeTimeoutMs) {
+        const originalRequestTimeout = this.requestTimeoutMs;
+        const originalUploadTimeout = this.uploadTimeoutMs;
+        this.requestTimeoutMs = Math.min(originalRequestTimeout, timeoutMs);
+        this.uploadTimeoutMs = Math.min(originalUploadTimeout, timeoutMs);
+        const markerName = `.tgvault-probe-${crypto6.randomUUID()}.txt`;
+        const tempPath = path4.join(os.tmpdir(), markerName);
+        const expected = Buffer.from(`tg-vault-openlist-probe:${markerName}`, "utf8");
+        await fs4.promises.writeFile(tempPath, expected, { flag: "wx" });
+        let storedPath = null;
+        try {
+          storedPath = await this.saveFile(tempPath, markerName, "text/plain");
+          const stream = await this.getFileStream(storedPath);
+          const chunks = [];
+          for await (const chunk of stream) chunks.push(Buffer.from(chunk));
+          if (!Buffer.concat(chunks).equals(expected)) throw new OpenListRequestError("OpenList \u5199\u5165\u6D4B\u8BD5\u5185\u5BB9\u6821\u9A8C\u5931\u8D25");
+        } finally {
+          try {
+            if (storedPath) await this.deleteFile(storedPath).catch(() => void 0);
+            await fs4.promises.rm(tempPath, { force: true });
+          } finally {
+            this.requestTimeoutMs = originalRequestTimeout;
+            this.uploadTimeoutMs = originalUploadTimeout;
+          }
+        }
+      }
+      async saveFile(tempPath, fileName, mimeType, folder) {
+        const stats = await fs4.promises.stat(tempPath);
+        const remoteDirectory = joinRemotePath(this.rootPath, folder);
+        const storedPath = joinRemotePath(remoteDirectory, null, fileName);
+        await this.ensureDirectory(remoteDirectory);
+        const uploadOnce = async () => {
+          const token = await this.getToken();
+          const body = Readable.toWeb(fs4.createReadStream(tempPath));
+          const response = await this.fetchWithTimeout("/api/fs/put", {
+            method: "PUT",
+            headers: {
+              Authorization: token,
+              "File-Path": encodeFilePath(storedPath),
+              "Content-Type": mimeType || "application/octet-stream",
+              "Content-Length": String(stats.size),
+              "X-File-Size": String(stats.size),
+              "As-Task": "false",
+              Overwrite: "false"
+            },
+            body,
+            duplex: "half"
+          }, this.uploadTimeoutMs);
+          return this.parseEnvelope(response);
+        };
+        try {
+          await uploadOnce();
+        } catch (error) {
+          const code = Number(error?.code || error?.status || 0);
+          if (code === 401 || code === 403) {
+            await this.getToken(true);
+            await uploadOnce();
+          } else {
+            try {
+              const remote2 = await this.getInfo(storedPath);
+              if (!remote2.is_dir && Number(remote2.size) === stats.size) return storedPath;
+            } catch {
+            }
+            throw error;
+          }
+        }
+        const remote = await this.getInfo(storedPath);
+        if (remote.is_dir || Number(remote.size) !== stats.size) {
+          throw new OpenListRequestError("OpenList \u4E0A\u4F20\u540E\u6587\u4EF6\u5927\u5C0F\u6821\u9A8C\u5931\u8D25");
+        }
+        return storedPath;
+      }
+      async getFileStream(storedPath, options) {
+        const info = await this.getInfo(storedPath);
+        if (!info.raw_url) throw new OpenListRequestError("OpenList \u672A\u8FD4\u56DE\u53EF\u8BFB\u53D6\u7684\u6587\u4EF6\u5730\u5740");
+        let rawUrl;
+        try {
+          rawUrl = new URL(info.raw_url);
+        } catch (error) {
+          throw new OpenListRequestError("OpenList \u8FD4\u56DE\u4E86\u4E0D\u5B89\u5168\u7684\u6587\u4EF6\u5730\u5740", { cause: error });
+        }
+        const headers = new Headers();
+        if (options?.range) headers.set("Range", options.range);
+        const response = await this.fetchWithTimeoutAbsolute(rawUrl.toString(), { method: "GET", headers }, this.requestTimeoutMs);
+        if (!response.ok && response.status !== 206) {
+          response.body?.cancel().catch(() => void 0);
+          throw new OpenListRequestError(`OpenList \u6587\u4EF6\u8BFB\u53D6\u5931\u8D25\uFF08HTTP ${response.status}\uFF09`, { status: response.status });
+        }
+        if (!response.body) throw new OpenListRequestError("OpenList \u6587\u4EF6\u8BFB\u53D6\u54CD\u5E94\u4E3A\u7A7A");
+        return copyResponseMetadata(Readable.fromWeb(response.body), response);
+      }
+      async fetchWithTimeoutAbsolute(url, init, timeoutMs) {
+        return fetchResponseWithBodyTimeout(url, init, timeoutMs, this.requestFetch);
+      }
+      async getFileAvailability(storedPath) {
+        const info = await this.getInfo(storedPath);
+        if (info.is_dir) throw new OpenListRequestError("OpenList \u76EE\u6807\u4E0D\u662F\u6587\u4EF6");
+        return { available: true };
+      }
+      async getFileSize(storedPath) {
+        const info = await this.getInfo(storedPath);
+        if (info.is_dir) throw new OpenListRequestError("OpenList \u76EE\u6807\u4E0D\u662F\u6587\u4EF6");
+        const size = Number(info.size);
+        if (!Number.isFinite(size) || size < 0) throw new OpenListRequestError("OpenList \u8FD4\u56DE\u4E86\u65E0\u6548\u6587\u4EF6\u5927\u5C0F");
+        return size;
+      }
+      async getPreviewUrl(_storedPath) {
+        return "";
+      }
+      async deleteFile(storedPath) {
+        const normalized = normalizeRoot(storedPath);
+        if (normalized === "/" || normalized === this.rootPath) throw new OpenListRequestError("\u62D2\u7EDD\u5220\u9664 OpenList \u5B58\u50A8\u6839\u76EE\u5F55");
+        await this.api("/api/fs/remove", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ dir: path4.posix.dirname(normalized), names: [path4.posix.basename(normalized)] })
+        });
+      }
+    };
+  }
+});
+
 // src/services/storage.ts
 var storage_exports = {};
 __export(storage_exports, {
@@ -767,8 +1315,8 @@ __export(storage_exports, {
   isStorageQuotaCooldownError: () => isStorageQuotaCooldownError,
   storageManager: () => storageManager
 });
-import fs4 from "fs";
-import path4 from "path";
+import fs5 from "fs";
+import path5 from "path";
 import axios from "axios";
 import OSS from "ali-oss";
 import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand, HeadObjectCommand, ListObjectsV2Command } from "@aws-sdk/client-s3";
@@ -833,6 +1381,7 @@ var init_storage = __esm({
     init_storageCooldown();
     init_storageAccountLifecycle();
     init_storageTargetReadiness();
+    init_openListStorage();
     StorageQuotaCooldownError = class extends Error {
       provider;
       reason;
@@ -863,28 +1412,28 @@ var init_storage = __esm({
       name = "local";
       uploadDir;
       constructor(uploadDir = process.env.UPLOAD_DIR || "./data/uploads") {
-        this.uploadDir = path4.resolve(uploadDir);
-        if (!fs4.existsSync(this.uploadDir)) {
-          fs4.mkdirSync(this.uploadDir, { recursive: true });
+        this.uploadDir = path5.resolve(uploadDir);
+        if (!fs5.existsSync(this.uploadDir)) {
+          fs5.mkdirSync(this.uploadDir, { recursive: true });
         }
       }
       async probe() {
-        const stats = await fs4.promises.stat(this.uploadDir);
+        const stats = await fs5.promises.stat(this.uploadDir);
         if (!stats.isDirectory()) throw new StorageProbeError(this.name, "\u672C\u5730\u5B58\u50A8\u8DEF\u5F84\u4E0D\u662F\u76EE\u5F55");
-        await fs4.promises.access(this.uploadDir, fs4.constants.R_OK | fs4.constants.W_OK);
+        await fs5.promises.access(this.uploadDir, fs5.constants.R_OK | fs5.constants.W_OK);
       }
       async saveFile(tempPath, fileName, _mimeType, folder) {
         const destDir = folder ? safeJoin(this.uploadDir, folder) : this.uploadDir;
-        if (!fs4.existsSync(destDir)) {
-          fs4.mkdirSync(destDir, { recursive: true });
+        if (!fs5.existsSync(destDir)) {
+          fs5.mkdirSync(destDir, { recursive: true });
         }
         const destPath = safeJoin(destDir, fileName);
         try {
-          await fs4.promises.rename(tempPath, destPath);
+          await fs5.promises.rename(tempPath, destPath);
         } catch (error) {
           if (error.code === "EXDEV") {
-            await fs4.promises.copyFile(tempPath, destPath);
-            await fs4.promises.unlink(tempPath);
+            await fs5.promises.copyFile(tempPath, destPath);
+            await fs5.promises.unlink(tempPath);
           } else {
             throw error;
           }
@@ -892,25 +1441,25 @@ var init_storage = __esm({
         return destPath;
       }
       async getFileStream(storedPath) {
-        const safePath = safeJoin(this.uploadDir, path4.relative(this.uploadDir, storedPath));
-        if (safePath !== path4.resolve(storedPath)) {
+        const safePath = safeJoin(this.uploadDir, path5.relative(this.uploadDir, storedPath));
+        if (safePath !== path5.resolve(storedPath)) {
           throw new Error("Unsafe local file path");
         }
-        if (!fs4.existsSync(safePath)) {
+        if (!fs5.existsSync(safePath)) {
           throw new Error(`File not found: ${safePath}`);
         }
-        return fs4.createReadStream(safePath);
+        return fs5.createReadStream(safePath);
       }
       async getPreviewUrl(storedPath) {
         return "";
       }
       async deleteFile(storedPath) {
-        const safePath = safeJoin(this.uploadDir, path4.relative(this.uploadDir, storedPath));
-        if (safePath !== path4.resolve(storedPath)) {
+        const safePath = safeJoin(this.uploadDir, path5.relative(this.uploadDir, storedPath));
+        if (safePath !== path5.resolve(storedPath)) {
           throw new Error("Unsafe local file path");
         }
-        if (fs4.existsSync(safePath)) {
-          await fs4.promises.unlink(safePath);
+        if (fs5.existsSync(safePath)) {
+          await fs5.promises.unlink(safePath);
         }
       }
       async createShareLink(storedPath, password, expiration) {
@@ -1048,11 +1597,11 @@ var init_storage = __esm({
       async saveFile(tempPath, fileName, mimeType, folder) {
         try {
           const objectKey = folder ? `${folder}/${fileName}` : fileName;
-          const stats = await fs4.promises.stat(tempPath);
+          const stats = await fs5.promises.stat(tempPath);
           const command = new PutObjectCommand({
             Bucket: this.bucket,
             Key: objectKey,
-            Body: fs4.createReadStream(tempPath),
+            Body: fs5.createReadStream(tempPath),
             ContentType: mimeType,
             ContentLength: stats.size
           });
@@ -1185,7 +1734,7 @@ var init_storage = __esm({
             );
           }
           await this.withRequestTimeout(
-            (signal) => this.client.putFileContents(`/${remotePath}`, fs4.createReadStream(tempPath), { signal }),
+            (signal) => this.client.putFileContents(`/${remotePath}`, fs5.createReadStream(tempPath), { signal }),
             "WebDAV upload",
             this.uploadTimeoutMs
           );
@@ -1412,7 +1961,7 @@ var init_storage = __esm({
        */
       async saveFile(tempPath, fileName, mimeType, folder) {
         const token = await this.getAccessToken();
-        const stats = await fs4.promises.stat(tempPath);
+        const stats = await fs5.promises.stat(tempPath);
         const fileSize = stats.size;
         console.log(`[OneDrive] Uploading file: ${fileName}, size: ${fileSize} bytes, type: ${mimeType}`);
         const uploadFolder = await this.ensureFolderExists(token, folder);
@@ -1420,7 +1969,7 @@ var init_storage = __esm({
         try {
           if (fileSize < 4 * 1024 * 1024) {
             console.log("[OneDrive] Using simple upload for small file");
-            const fileBuffer = await fs4.promises.readFile(tempPath);
+            const fileBuffer = await fs5.promises.readFile(tempPath);
             const response = await axios.put(
               `https://graph.microsoft.com/v1.0/me/drive/root:/${this.encodeOneDrivePath(targetPath)}:/content`,
               fileBuffer,
@@ -1460,7 +2009,7 @@ var init_storage = __esm({
             const CHUNK_SIZE = 320 * 1024 * 10;
             let uploadedBytes = 0;
             let lastResponse = null;
-            const fd = await fs4.promises.open(tempPath, "r");
+            const fd = await fs5.promises.open(tempPath, "r");
             try {
               while (uploadedBytes < fileSize) {
                 const chunkSize = Math.min(CHUNK_SIZE, fileSize - uploadedBytes);
@@ -1834,7 +2383,7 @@ var init_storage = __esm({
         };
         const media = {
           mimeType,
-          body: fs4.createReadStream(tempPath)
+          body: fs5.createReadStream(tempPath)
         };
         try {
           const file = await this.drive.files.create(this.withSharedDriveSupport({
@@ -2094,6 +2643,15 @@ var init_storage = __esm({
                 config.password
               );
               this.providers.set(`webdav:${row.id}`, provider);
+            } else if (row.type === "openlist") {
+              provider = new OpenListStorageProvider(
+                row.id,
+                config.baseUrl,
+                config.rootPath || "/",
+                config.username,
+                config.password
+              );
+              this.providers.set(`openlist:${row.id}`, provider);
             } else if (row.type === "google_drive") {
               provider = new GoogleDriveStorageProvider(
                 row.id,
@@ -2368,6 +2926,21 @@ var init_storage = __esm({
         this.providers.set(`webdav:${targetId}`, webdav);
         return targetId;
       }
+      async addOpenListAccount(name, baseUrl, rootPath, username, password) {
+        const candidate = new OpenListStorageProvider("probe", baseUrl, rootPath, username, password);
+        await candidate.probeWritable();
+        const config = JSON.stringify(encryptStorageConfig({ baseUrl, rootPath, username, password }));
+        const res = await query(
+          `INSERT INTO storage_accounts (type, name, config, is_active, last_probe_status, last_probe_error, last_probed_at)
+             VALUES ($1, $2, $3, $4, 'available', NULL, NOW()) RETURNING id`,
+          ["openlist", name, config, false]
+        );
+        const targetId = res.rows[0].id;
+        console.log(`[StorageManager] Added new OpenList account: ${targetId}`);
+        const openList = new OpenListStorageProvider(targetId, baseUrl, rootPath, username, password);
+        this.providers.set(`openlist:${targetId}`, openList);
+        return targetId;
+      }
       async addGoogleDriveAccount(name, clientId, clientSecret, refreshToken, redirectUri, sharedDriveId) {
         const normalizedSharedDriveId = sharedDriveId?.trim() || void 0;
         const config = JSON.stringify(encryptStorageConfig({ clientId, clientSecret, refreshToken, redirectUri, sharedDriveId: normalizedSharedDriveId }));
@@ -2414,17 +2987,43 @@ var init_storage = __esm({
 });
 
 // src/utils/authSettings.ts
-import crypto6 from "crypto";
+var authSettings_exports = {};
+__export(authSettings_exports, {
+  TelegramPinChangeError: () => TelegramPinChangeError,
+  addTelegramAllowedUser: () => addTelegramAllowedUser,
+  changeTelegramPin: () => changeTelegramPin,
+  changeTelegramPinWithClient: () => changeTelegramPinWithClient,
+  changeWebPasswordAndRevokeSessions: () => changeWebPasswordAndRevokeSessions,
+  countAuthenticatedTelegramUsers: () => countAuthenticatedTelegramUsers,
+  createInitialAdminCredentials: () => createInitialAdminCredentials,
+  createInitialAdminCredentialsWithClient: () => createInitialAdminCredentialsWithClient,
+  ensureTelegramPinConfigured: () => ensureTelegramPinConfigured,
+  getConfiguredTelegramAllowedUsers: () => getConfiguredTelegramAllowedUsers,
+  getStoredTelegramAllowedUsers: () => getStoredTelegramAllowedUsers,
+  getStoredWebPasswordHash: () => getStoredWebPasswordHash,
+  isInitialSetupRequired: () => isInitialSetupRequired,
+  isTelegramPinConfigured: () => isTelegramPinConfigured,
+  parseTelegramAllowedUserIds: () => parseTelegramAllowedUserIds,
+  serializeTelegramAllowedUserIds: () => serializeTelegramAllowedUserIds,
+  setTelegramAllowedUsers: () => setTelegramAllowedUsers,
+  setTelegramAllowedUsersAndReconcile: () => setTelegramAllowedUsersAndReconcile,
+  shouldAutoAllowFirstTelegramUser: () => shouldAutoAllowFirstTelegramUser,
+  validateTelegramPin: () => validateTelegramPin,
+  validateWebPassword: () => validateWebPassword,
+  verifyTelegramPin: () => verifyTelegramPin,
+  verifyWebPassword: () => verifyWebPassword
+});
+import crypto7 from "crypto";
 function hashSecret(secret) {
-  const salt = crypto6.randomBytes(16).toString("base64url");
-  const derived = crypto6.scryptSync(secret, salt, 64).toString("base64url");
+  const salt = crypto7.randomBytes(16).toString("base64url");
+  const derived = crypto7.scryptSync(secret, salt, 64).toString("base64url");
   return `${SCRYPT_PREFIX}:${salt}:${derived}`;
 }
 function safeEqualText(a, b) {
   try {
     const left = Buffer.from(a);
     const right = Buffer.from(b);
-    return left.length === right.length && crypto6.timingSafeEqual(left, right);
+    return left.length === right.length && crypto7.timingSafeEqual(left, right);
   } catch {
     return false;
   }
@@ -2434,11 +3033,11 @@ function verifySecret(secret, stored) {
   if (stored.startsWith(`${SCRYPT_PREFIX}:`)) {
     const [, , salt, expected] = stored.split(":");
     if (!salt || !expected) return false;
-    const actual = crypto6.scryptSync(secret, salt, 64).toString("base64url");
+    const actual = crypto7.scryptSync(secret, salt, 64).toString("base64url");
     return safeEqualText(actual, expected);
   }
   if (/^[a-f0-9]{64}$/i.test(stored)) {
-    const actual = crypto6.createHash("sha256").update(secret).digest("hex");
+    const actual = crypto7.createHash("sha256").update(secret).digest("hex");
     return safeEqualText(actual, stored.toLowerCase());
   }
   return false;
@@ -2602,6 +3201,9 @@ async function changeWebPasswordAndRevokeSessions(currentPassword, newPassword) 
 function parseTelegramAllowedUserIds(value) {
   if (!value) return [];
   return [...new Set(String(value).split(/[\s,]+/).map((item) => Number(item.trim())).filter((item) => Number.isSafeInteger(item) && item > 0))].sort((a, b) => a - b);
+}
+function serializeTelegramAllowedUserIds(userIds) {
+  return parseTelegramAllowedUserIds(userIds.join(",")).join(",");
 }
 function shouldAutoAllowFirstTelegramUser(allowedUsers, authenticatedUserCount) {
   return allowedUsers.length === 0 && authenticatedUserCount === 0;
@@ -2874,8 +3476,8 @@ var init_telegramState = __esm({
 import express from "express";
 import cors from "cors";
 import dotenv3 from "dotenv";
-import path22 from "path";
-import fs18 from "fs";
+import path23 from "path";
+import fs19 from "fs";
 
 // src/routes/files.ts
 import { Router as Router2 } from "express";
@@ -2884,12 +3486,19 @@ import { Router as Router2 } from "express";
 function buildStorageCapabilities(provider) {
   switch (provider) {
     case "onedrive":
-      return { share: true, sharePassword: true, shareExpiration: true, quota: true };
+      return { share: true, sharePassword: true, shareExpiration: true, quota: true, userDelete: true };
     case "google_drive":
-      return { share: true, sharePassword: false, shareExpiration: false, quota: true };
+      return { share: true, sharePassword: false, shareExpiration: false, quota: true, userDelete: true };
+    case "openlist":
+      return { share: false, sharePassword: false, shareExpiration: false, quota: false, userDelete: false };
     default:
-      return { share: false, sharePassword: false, shareExpiration: false, quota: false };
+      return { share: false, sharePassword: false, shareExpiration: false, quota: false, userDelete: true };
   }
+}
+function buildStorageScopeForTarget(target) {
+  if (target.providerName === "local") return { clause: "source = 'local'", params: [] };
+  if (!target.accountId) throw new Error("\u4E91\u5B58\u50A8\u7EDF\u8BA1\u7F3A\u5C11\u6D3B\u52A8\u8D26\u6237");
+  return { clause: "storage_account_id = $1", params: [target.accountId] };
 }
 function buildStorageStatsPayload(input) {
   const temporaryUsedBytes = Math.max(0, input.disk.totalBytes - input.disk.freeBytes);
@@ -2912,11 +3521,11 @@ function buildStorageStatsPayload(input) {
 
 // src/routes/files.ts
 init_db();
-import fs12 from "fs";
-import path16 from "path";
+import fs13 from "fs";
+import path17 from "path";
 
 // src/middleware/signedUrl.ts
-import crypto20 from "crypto";
+import crypto21 from "crypto";
 
 // src/utils/config.ts
 init_secretStore();
@@ -3082,21 +3691,21 @@ import { TelegramClient as TelegramClient6, Api as Api8 } from "telegram";
 import { StringSession as StringSession3 } from "telegram/sessions/index.js";
 import { NewMessage } from "telegram/events/index.js";
 import { Raw } from "telegram/events/index.js";
-import fs11 from "fs";
-import path15 from "path";
-import crypto19 from "crypto";
+import fs12 from "fs";
+import path16 from "path";
+import crypto20 from "crypto";
 
 // src/services/telegramCommands.ts
 init_db();
 import { Api as Api7 } from "telegram";
 import { getPeerId as getPeerId2 } from "telegram/Utils.js";
 import checkDiskSpaceModule from "check-disk-space";
-import os2 from "os";
-import fs10 from "fs";
-import path14 from "path";
+import os3 from "os";
+import fs11 from "fs";
+import path15 from "path";
 
 // src/utils/telegramUtils.ts
-import path5 from "path";
+import path6 from "path";
 function formatBytes(bytes) {
   if (bytes === 0) return "0 B";
   const k = 1024;
@@ -3133,7 +3742,7 @@ function getFileType(mimeType) {
   return "other";
 }
 function getMimeTypeFromFilename(filename) {
-  const ext = path5.extname(filename).toLowerCase();
+  const ext = path6.extname(filename).toLowerCase();
   const mimeTypes = {
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
@@ -3191,7 +3800,7 @@ function getMimeTypeFromFilename(filename) {
 function sanitizeFilename(name) {
   if (!name) return "unknown";
   const firstLine = name.split("\n")[0].trim();
-  const originalExt = path5.extname(firstLine);
+  const originalExt = path6.extname(firstLine);
   const ext = originalExt && originalExt.length <= 15 ? originalExt : "";
   const withoutExt = ext ? firstLine.slice(0, -ext.length) : firstLine;
   let sanitized = withoutExt.replace(/[<>:"/\\|?*\x00-\x1f]/g, "_").replace(/\s+/g, " ").trim();
@@ -3851,24 +4460,24 @@ init_telegramState();
 // src/services/telegramUpload.ts
 init_db();
 import { Api as Api5 } from "telegram";
-import fs7 from "fs";
-import path10 from "path";
-import crypto13 from "crypto";
+import fs8 from "fs";
+import path11 from "path";
+import crypto14 from "crypto";
 import bigInt from "big-integer";
 
 // src/utils/thumbnail.ts
-import path6 from "path";
+import path7 from "path";
 import sharp from "sharp";
 import ffmpeg from "fluent-ffmpeg";
-import fs5 from "fs";
-import crypto7 from "crypto";
-var THUMBNAIL_DIR = path6.resolve(process.env.THUMBNAIL_DIR || "./data/thumbnails");
-if (!fs5.existsSync(THUMBNAIL_DIR)) {
-  fs5.mkdirSync(THUMBNAIL_DIR, { recursive: true });
+import fs6 from "fs";
+import crypto8 from "crypto";
+var THUMBNAIL_DIR = path7.resolve(process.env.THUMBNAIL_DIR || "./data/thumbnails");
+if (!fs6.existsSync(THUMBNAIL_DIR)) {
+  fs6.mkdirSync(THUMBNAIL_DIR, { recursive: true });
 }
-var PREVIEW_DIR = path6.resolve(process.env.PREVIEW_DIR || "./data/previews");
-if (!fs5.existsSync(PREVIEW_DIR)) {
-  fs5.mkdirSync(PREVIEW_DIR, { recursive: true });
+var PREVIEW_DIR = path7.resolve(process.env.PREVIEW_DIR || "./data/previews");
+if (!fs6.existsSync(PREVIEW_DIR)) {
+  fs6.mkdirSync(PREVIEW_DIR, { recursive: true });
 }
 function isMp4Like(mimeType, filePath) {
   const lower = filePath.toLowerCase();
@@ -3880,19 +4489,19 @@ function ffmpegRun(command, label) {
   });
 }
 async function generateMediaPreview(filePath, storedName, mimeType) {
-  const absFilePath = path6.resolve(filePath);
-  if (!fs5.existsSync(absFilePath)) return null;
+  const absFilePath = path7.resolve(filePath);
+  if (!fs6.existsSync(absFilePath)) return null;
   try {
     if (mimeType.startsWith("image/") && mimeType !== "image/gif") {
-      const previewName = `preview_${crypto7.randomUUID()}.webp`;
-      const previewPath = path6.join(PREVIEW_DIR, previewName);
+      const previewName = `preview_${crypto8.randomUUID()}.webp`;
+      const previewPath = path7.join(PREVIEW_DIR, previewName);
       await sharp(absFilePath).rotate().resize(2048, 2048, { fit: "inside", withoutEnlargement: true }).webp({ quality: 86, effort: 4 }).toFile(previewPath);
       console.log(`[Preview] \u2705 Image preview created: ${previewName}`);
       return previewPath;
     }
     if (mimeType.startsWith("video/")) {
-      const previewName = `preview_${crypto7.randomUUID()}.mp4`;
-      const previewPath = path6.join(PREVIEW_DIR, previewName);
+      const previewName = `preview_${crypto8.randomUUID()}.mp4`;
+      const previewPath = path7.join(PREVIEW_DIR, previewName);
       const mp4Like = isMp4Like(mimeType, storedName || absFilePath);
       if (mp4Like) {
         try {
@@ -3900,14 +4509,14 @@ async function generateMediaPreview(filePath, storedName, mimeType) {
             ffmpeg(absFilePath).outputOptions(["-c copy", "-movflags +faststart"]).output(previewPath),
             "Video faststart"
           );
-          if (fs5.existsSync(previewPath) && fs5.statSync(previewPath).size > 0) {
+          if (fs6.existsSync(previewPath) && fs6.statSync(previewPath).size > 0) {
             console.log(`[Preview] \u2705 Video faststart preview created: ${previewName}`);
             return previewPath;
           }
         } catch (copyError) {
           console.warn(`[Preview] \u26A0\uFE0F Faststart copy failed, fallback to transcode: ${copyError.message}`);
           try {
-            if (fs5.existsSync(previewPath)) fs5.unlinkSync(previewPath);
+            if (fs6.existsSync(previewPath)) fs6.unlinkSync(previewPath);
           } catch {
           }
         }
@@ -3924,7 +4533,7 @@ async function generateMediaPreview(filePath, storedName, mimeType) {
         ]).output(previewPath),
         "Video transcode"
       );
-      if (fs5.existsSync(previewPath) && fs5.statSync(previewPath).size > 0) {
+      if (fs6.existsSync(previewPath) && fs6.statSync(previewPath).size > 0) {
         console.log(`[Preview] \u2705 Video transcoded preview created: ${previewName}`);
         return previewPath;
       }
@@ -3935,14 +4544,14 @@ async function generateMediaPreview(filePath, storedName, mimeType) {
   return null;
 }
 async function generateThumbnail(filePath, storedName, mimeType) {
-  const absFilePath = path6.resolve(filePath);
-  const thumbName = `thumb_${crypto7.randomUUID()}.webp`;
-  const thumbPath = path6.join(THUMBNAIL_DIR, thumbName);
+  const absFilePath = path7.resolve(filePath);
+  const thumbName = `thumb_${crypto8.randomUUID()}.webp`;
+  const thumbPath = path7.join(THUMBNAIL_DIR, thumbName);
   console.log(`[Thumbnail] \u{1F680} Starting generation for: ${storedName}`);
   console.log(`[Thumbnail] Source: ${absFilePath}`);
   console.log(`[Thumbnail] Target: ${thumbPath}`);
   console.log(`[Thumbnail] MIME: ${mimeType}`);
-  if (!fs5.existsSync(absFilePath)) {
+  if (!fs6.existsSync(absFilePath)) {
     console.error(`[Thumbnail] \u274C Source file does not exist: ${absFilePath}`);
     return null;
   }
@@ -3968,7 +4577,7 @@ async function generateThumbnail(filePath, storedName, mimeType) {
             size: "400x300",
             timestamps: [timestamp]
           }).on("start", (cmd) => console.log(`[Thumbnail] FFmpeg CMD: ${cmd}`)).on("end", () => {
-            if (fs5.existsSync(thumbPath)) {
+            if (fs6.existsSync(thumbPath)) {
               console.log(`[Thumbnail] \u2705 Video thumbnail created at ${timestamp}`);
               resolve(true);
             } else {
@@ -3996,7 +4605,7 @@ async function generateThumbnail(filePath, storedName, mimeType) {
   return null;
 }
 async function getImageDimensions(filePath, mimeType) {
-  const absFilePath = path6.resolve(filePath);
+  const absFilePath = path7.resolve(filePath);
   console.log(`[Dimensions] \u{1F4CF} Getting dimensions for: ${absFilePath} (${mimeType})`);
   try {
     if (mimeType.startsWith("image/")) {
@@ -4113,7 +4722,7 @@ function isStorageCooldownError(error) {
 init_storageCooldown();
 
 // src/services/telegramUserClient.ts
-import fs6 from "node:fs";
+import fs7 from "node:fs";
 import { Api as Api2, TelegramClient as TelegramClient2 } from "telegram";
 import { StringSession as StringSession2 } from "telegram/sessions/index.js";
 
@@ -4365,7 +4974,7 @@ async function deleteTelegramBotConfig() {
 }
 
 // src/services/telegramUserWebLogin.ts
-import crypto8 from "node:crypto";
+import crypto9 from "node:crypto";
 var TelegramUserLoginFlowError = class extends Error {
   constructor(code, message) {
     super(message);
@@ -4404,7 +5013,7 @@ var TelegramUserWebLoginFlows = class {
     try {
       await client2.connect();
       const sent = await client2.sendCode(credentials, phone);
-      const flowId = crypto8.randomBytes(24).toString("base64url");
+      const flowId = crypto9.randomBytes(24).toString("base64url");
       const expiresAt = this.now() + this.ttlMs;
       this.flows.set(flowId, { id: flowId, owner, phone, phoneCodeHash: sent.phoneCodeHash, expiresAt, errors: 0, step: "code", client: client2 });
       return { flowId, delivery: sent.isCodeViaApp ? "app" : "sms", expiresAt: new Date(expiresAt).toISOString() };
@@ -4571,8 +5180,8 @@ async function migrateLegacyTelegramUserSession() {
   const stored = await getSetting(TELEGRAM_USER_SESSION_SETTING, "");
   if (stored) return stored;
   userSessionFilePath = getSessionFilePath();
-  if (!fs6.existsSync(userSessionFilePath)) return "";
-  const legacy = fs6.readFileSync(userSessionFilePath, "utf8").trim();
+  if (!fs7.existsSync(userSessionFilePath)) return "";
+  const legacy = fs7.readFileSync(userSessionFilePath, "utf8").trim();
   if (!legacy) return "";
   await setSetting(TELEGRAM_USER_SESSION_SETTING, legacy);
   return legacy;
@@ -4614,7 +5223,7 @@ async function initTelegramUserClient(credentials) {
     const me = await client2.getMe();
     recordTelegramUserClientReady({ userId: String(me?.id || ""), username: me?.username || null });
     const legacyPath = getSessionFilePath();
-    if (fs6.existsSync(legacyPath)) fs6.rmSync(legacyPath, { force: true });
+    if (fs7.existsSync(legacyPath)) fs7.rmSync(legacyPath, { force: true });
   } catch (error) {
     try {
       await client2.disconnect();
@@ -4714,7 +5323,7 @@ async function unlinkTelegramUserAccount() {
   await stopClient();
   await deleteSettings([TELEGRAM_USER_SESSION_SETTING, TELEGRAM_USER_ENABLED_SETTING, TELEGRAM_USER_ID_SETTING, TELEGRAM_USER_USERNAME_SETTING]);
   const legacyPath = getSessionFilePath();
-  if (fs6.existsSync(legacyPath)) fs6.rmSync(legacyPath, { force: true });
+  if (fs7.existsSync(legacyPath)) fs7.rmSync(legacyPath, { force: true });
   recordTelegramUserClientFailure("missing_session", "\u5C1A\u672A\u767B\u5F55 Telegram \u7528\u6237\u8D26\u53F7");
 }
 function getTelegramUserClient() {
@@ -4840,20 +5449,20 @@ function extractFileInfo(message) {
 }
 
 // src/utils/fileUtils.ts
-import path7 from "path";
-import crypto9 from "crypto";
+import path8 from "path";
+import crypto10 from "crypto";
 async function getUniqueStoredName(originalName, _folder = null, _storageAccountId = null) {
   const sanitizedName = sanitizeFilename(originalName);
-  const ext = path7.extname(sanitizedName);
+  const ext = path8.extname(sanitizedName);
   const rawBaseName = ext ? sanitizedName.slice(0, -ext.length) : sanitizedName;
-  const suffix = `--${crypto9.randomUUID()}`;
+  const suffix = `--${crypto10.randomUUID()}`;
   const maxBaseLength = Math.max(1, 255 - ext.length - suffix.length);
   const baseName = rawBaseName.slice(0, maxBaseLength) || "file";
   return `${baseName}${suffix}${ext}`;
 }
 
 // src/utils/storagePath.ts
-import path8 from "path";
+import path9 from "path";
 function shouldClassifyStoragePath() {
   return true;
 }
@@ -4872,7 +5481,7 @@ function hasAny(value, keywords) {
 }
 function getDetailedTypeFolder(mimeType, fileName) {
   const lowerMime = (mimeType || "").toLowerCase();
-  const ext = path8.extname(fileName || "").toLowerCase();
+  const ext = path9.extname(fileName || "").toLowerCase();
   const installerExts = /* @__PURE__ */ new Set([
     ".apk",
     ".apks",
@@ -5011,8 +5620,8 @@ async function getTelegramBatchFolderName(message, fallback) {
 }
 
 // src/utils/telegramNaming.ts
-import path9 from "path";
-import crypto10 from "crypto";
+import path10 from "path";
+import crypto11 from "crypto";
 function normalizeExtension(extension) {
   if (!extension) return "";
   const trimmed = extension.trim();
@@ -5052,25 +5661,25 @@ function firstCaptionLine(caption) {
 }
 function replaceCaptionExtension(fileName, extension) {
   if (!extension) return fileName;
-  const captionExtension = path9.extname(fileName);
+  const captionExtension = path10.extname(fileName);
   if (!captionExtension) return `${fileName}${extension}`;
   if (captionExtension.toLowerCase() === extension.toLowerCase()) return fileName;
   return `${fileName.slice(0, -captionExtension.length)}${extension}`;
 }
 function isGeneratedTelegramDisplayName(fileName, messageId) {
   if (messageId === void 0) return false;
-  const base = path9.basename(fileName).toLowerCase();
+  const base = path10.basename(fileName).toLowerCase();
   const escapedMessageId = String(messageId).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   return new RegExp(`^(?:image|video|audio|voice|file)_${escapedMessageId}(?:\\.[^.]+)?$`, "i").test(base);
 }
 function hasMeaningfulBaseName(fileName) {
-  const base = path9.extname(fileName) ? fileName.slice(0, -path9.extname(fileName).length) : fileName;
+  const base = path10.extname(fileName) ? fileName.slice(0, -path10.extname(fileName).length) : fileName;
   return /[\p{L}\p{N}]/u.test(base);
 }
 function appendSequenceNumber(fileName, sequenceNumber) {
   if (sequenceNumber === void 0) return fileName;
   const sequence = String(sequenceNumber).padStart(2, "0");
-  const existingExtension = path9.extname(fileName);
+  const existingExtension = path10.extname(fileName);
   const base = existingExtension ? fileName.slice(0, -existingExtension.length) : fileName;
   return `${base}_${sequence}${existingExtension}`;
 }
@@ -5084,7 +5693,7 @@ function buildTelegramGeneratedFileName(options) {
       return appendSequenceNumber(nameWithExtension, options.sequenceNumber);
     }
   }
-  const suffix = sanitizeFilename(options.randomSuffix || crypto10.randomBytes(4).toString("hex")).replace(/\s+/g, "_");
+  const suffix = sanitizeFilename(options.randomSuffix || crypto11.randomBytes(4).toString("hex")).replace(/\s+/g, "_");
   return appendSequenceNumber(`${fallbackPrefix(options.mimeType)}_${suffix}${ext}`, options.sequenceNumber);
 }
 function resolveTelegramGeneratedFileName(options) {
@@ -5094,7 +5703,7 @@ function resolveTelegramGeneratedFileName(options) {
   return buildTelegramGeneratedFileName({
     caption: firstCaptionLine(options.caption) || firstCaptionLine(options.sharedCaption),
     mimeType: options.mimeType,
-    extension: path9.extname(options.currentFileName) || extensionFromMimeType(options.mimeType),
+    extension: path10.extname(options.currentFileName) || extensionFromMimeType(options.mimeType),
     randomSuffix: options.messageId === void 0 ? options.randomSuffix : String(options.messageId),
     sequenceNumber: options.sequenceNumber
   });
@@ -6687,9 +7296,9 @@ async function saveAndIndexWithCompensation(provider, tempPath, storedName, mime
 
 // src/services/storageAccountLease.ts
 init_storageAccountLifecycle();
-import crypto11 from "node:crypto";
+import crypto12 from "node:crypto";
 async function acquireStorageAccountLease(client2, accountId, purpose, ttlMs = 30 * 60 * 1e3) {
-  const leaseId = crypto11.randomUUID();
+  const leaseId = crypto12.randomUUID();
   const expiresAt = new Date(Date.now() + ttlMs);
   const result = await client2.query(
     `INSERT INTO storage_account_leases (id, storage_account_id, purpose, expires_at)
@@ -6766,7 +7375,7 @@ async function acquireStorageAccountOperationLease(pool2, accountId, purpose, op
 init_storageAccountLifecycle();
 
 // src/services/telegramWriteReconciliation.ts
-import crypto12 from "node:crypto";
+import crypto13 from "node:crypto";
 async function ownsTelegramReconciliationLease(db, operationId, leaseToken) {
   const result = await db.query(
     `UPDATE telegram_write_reconciliations
@@ -6778,7 +7387,7 @@ async function ownsTelegramReconciliationLease(db, operationId, leaseToken) {
   return result.rowCount === 1;
 }
 async function beginTelegramWriteReconciliation(db, input) {
-  const operationId = crypto12.randomUUID();
+  const operationId = crypto13.randomUUID();
   const result = await db.query(
     `INSERT INTO telegram_write_reconciliations
          (operation_id, job_id, item_id, child_lease_token, provider, account_id,
@@ -6951,16 +7560,16 @@ function normalizeFileDownloadConcurrency(value) {
   const parsed = parseInt(String(value ?? process.env.TELEGRAM_FILE_DOWNLOAD_CONCURRENCY ?? "2"), 10);
   return [1, 2, 3, 4].includes(parsed) ? parsed : 2;
 }
-var TG_DEBUG_LOG_PATH = process.env.TG_STATUS_DEBUG_LOG || path10.join(process.cwd(), "data", "logs", "tg_silent_debug.log");
+var TG_DEBUG_LOG_PATH = process.env.TG_STATUS_DEBUG_LOG || path11.join(process.cwd(), "data", "logs", "tg_silent_debug.log");
 var TG_DEBUG_LOG_MAX_BYTES = Math.max(1024 * 1024, parseInt(process.env.TG_DEBUG_LOG_MAX_MB || "5", 10) * 1024 * 1024);
 function appendTelegramDebugLog(line) {
   if (process.env.TG_STATUS_DEBUG !== "1") return;
   try {
-    fs7.mkdirSync(path10.dirname(TG_DEBUG_LOG_PATH), { recursive: true });
-    if (fs7.existsSync(TG_DEBUG_LOG_PATH) && fs7.statSync(TG_DEBUG_LOG_PATH).size > TG_DEBUG_LOG_MAX_BYTES) {
-      fs7.renameSync(TG_DEBUG_LOG_PATH, `${TG_DEBUG_LOG_PATH}.${Date.now()}.old`);
+    fs8.mkdirSync(path11.dirname(TG_DEBUG_LOG_PATH), { recursive: true });
+    if (fs8.existsSync(TG_DEBUG_LOG_PATH) && fs8.statSync(TG_DEBUG_LOG_PATH).size > TG_DEBUG_LOG_MAX_BYTES) {
+      fs8.renameSync(TG_DEBUG_LOG_PATH, `${TG_DEBUG_LOG_PATH}.${Date.now()}.old`);
     }
-    fs7.appendFileSync(TG_DEBUG_LOG_PATH, line);
+    fs8.appendFileSync(TG_DEBUG_LOG_PATH, line);
   } catch {
   }
 }
@@ -7057,13 +7666,13 @@ async function getCanonicalTelegramFileName(message, currentFileName, mimeType, 
   return rebuildGeneratedTelegramDisplayName(message, currentFileName, mimeType, sharedCaption, sequenceNumber);
 }
 async function getDiskWatermarkState(requiredBytes = 0) {
-  const statfs = await fs7.promises.statfs(UPLOAD_DIR);
+  const statfs = await fs8.promises.statfs(UPLOAD_DIR);
   const availableBytes = Number(statfs.bavail) * Number(statfs.bsize);
   return { availableBytes, ok: availableBytes - requiredBytes >= TG_MIN_FREE_DISK_BYTES };
 }
 async function waitForDiskWatermark(requiredBytes = 0, signal) {
   const startedAt = Date.now();
-  const blockerId = crypto13.randomUUID();
+  const blockerId = crypto14.randomUUID();
   let announcedPause = false;
   try {
     while (true) {
@@ -7790,10 +8399,10 @@ function cancelDownloadTaskGroup(groupId, chatId, userId) {
   return downloadQueue.cancelGroup(groupId, { chatId, userId }, "\u7528\u6237\u901A\u8FC7\u4EFB\u52A1\u4E2D\u5FC3\u53D6\u6D88\u4EFB\u52A1");
 }
 function ordinaryGroupId(prefix, chatId, identity) {
-  return `${prefix}${crypto13.createHash("sha256").update(`${chatId}:${identity}`).digest("base64url").slice(0, 22)}`;
+  return `${prefix}${crypto14.createHash("sha256").update(`${chatId}:${identity}`).digest("base64url").slice(0, 22)}`;
 }
 function channelExecutionGroupId(key) {
-  return `j${crypto13.createHash("sha256").update(key).digest("base64url").slice(0, 22)}`;
+  return `j${crypto14.createHash("sha256").update(key).digest("base64url").slice(0, 22)}`;
 }
 function getChannelExecutionGroup(jobId) {
   return downloadQueue.getGroup(channelExecutionGroupId(jobId), {}, true);
@@ -7900,19 +8509,19 @@ var mediaGroupDebouncer = createTelegramMediaGroupDebouncer({
   onReady: (mediaGroupId) => processBatchUpload(void 0, mediaGroupId)
 });
 async function downloadAndSaveFile(client2, message, originalFileName, targetDir, onProgress, signal) {
-  const ext = path10.extname(originalFileName) || "";
-  const tempStoredName = `${crypto13.randomUUID()}${ext}`;
+  const ext = path11.extname(originalFileName) || "";
+  const tempStoredName = `${crypto14.randomUUID()}${ext}`;
   let saveDir = targetDir || UPLOAD_DIR;
-  if (!fs7.existsSync(saveDir)) {
+  if (!fs8.existsSync(saveDir)) {
     try {
-      fs7.mkdirSync(saveDir, { recursive: true });
+      fs8.mkdirSync(saveDir, { recursive: true });
     } catch (err) {
       console.error(`\u{1F916} \u521B\u5EFA\u4E0B\u8F7D\u76EE\u5F55\u5931\u8D25: ${saveDir}`, err);
       if (saveDir === UPLOAD_DIR) throw err;
       saveDir = UPLOAD_DIR;
     }
   }
-  const filePath = path10.join(saveDir, tempStoredName);
+  const filePath = path11.join(saveDir, tempStoredName);
   const totalSize = getEstimatedFileSize(message);
   let downloadedSize = 0;
   try {
@@ -7931,11 +8540,11 @@ async function downloadAndSaveFile(client2, message, originalFileName, targetDir
         outputFile: filePath,
         progressCallback: onProgress ? ((downloaded2, total) => onProgress(Number(downloaded2), Number(total))) : void 0
       });
-      if (!downloaded || !fs7.existsSync(filePath)) {
+      if (!downloaded || !fs8.existsSync(filePath)) {
         throw new Error("Telegram \u56FE\u7247\u4E0B\u8F7D\u672A\u751F\u6210\u6587\u4EF6");
       }
     } else if (workers > 1 && totalSize > 0) {
-      const fileHandle = await fs7.promises.open(filePath, "w");
+      const fileHandle = await fs8.promises.open(filePath, "w");
       try {
         await fileHandle.truncate(totalSize);
         await Promise.all(Array.from({ length: workers }, async (_, workerIndex) => {
@@ -7965,7 +8574,7 @@ async function downloadAndSaveFile(client2, message, originalFileName, targetDir
         await fileHandle.close();
       }
     } else {
-      const writeStream = fs7.createWriteStream(filePath);
+      const writeStream = fs8.createWriteStream(filePath);
       for await (const chunk of client2.iterDownload({
         file: media,
         requestSize: TELEGRAM_DOWNLOAD_PART_SIZE
@@ -7983,15 +8592,15 @@ async function downloadAndSaveFile(client2, message, originalFileName, targetDir
         writeStream.on("error", reject);
       });
     }
-    const stats = fs7.statSync(filePath);
+    const stats = fs8.statSync(filePath);
     if (totalSize > 0 && stats.size !== totalSize) {
       throw new Error(`\u4E0B\u8F7D\u6587\u4EF6\u5927\u5C0F\u4E0D\u4E00\u81F4: expected=${totalSize}, actual=${stats.size}`);
     }
     return { filePath, actualSize: stats.size, tempStoredName };
   } catch (error) {
     console.error("\u{1F916} \u4E0B\u8F7D\u6587\u4EF6\u5931\u8D25:", error);
-    if (fs7.existsSync(filePath)) {
-      fs7.unlinkSync(filePath);
+    if (fs8.existsSync(filePath)) {
+      fs8.unlinkSync(filePath);
     }
     return null;
   }
@@ -8088,7 +8697,7 @@ async function processFileUpload(client2, file, queue, groupId, getExecutionCont
             if (batchId) updateBatch(chatIdStr, batchId, { folderPath: storageFolder || void 0, providerName: storageManager.getProvider().name });
             rememberTransferDestination(chatIdStr, storageFolder, storageManager.getProvider().name);
           }
-          if (localFilePath && fs7.existsSync(localFilePath)) fs7.unlinkSync(localFilePath);
+          if (localFilePath && fs8.existsSync(localFilePath)) fs8.unlinkSync(localFilePath);
           return true;
         }
       }
@@ -8210,7 +8819,7 @@ async function processFileUpload(client2, file, queue, groupId, getExecutionCont
         } else {
           await leasedSave();
         }
-        if (fs7.existsSync(localFilePath)) fs7.unlinkSync(localFilePath);
+        if (fs8.existsSync(localFilePath)) fs8.unlinkSync(localFilePath);
         localFilePath = void 0;
         if (signal?.aborted && !file.leaseSettled) {
           const compensation = indexedFileId ? await compensateIndexedWriteAfterCancel({
@@ -8242,9 +8851,9 @@ async function processFileUpload(client2, file, queue, groupId, getExecutionCont
         await markStorageAccountCooldown(error.storageAccountId || file.storageTarget?.accountId, error.provider, error.reason, error.cooldownUntil, error.message);
         file.storageCooldownUntil = error.cooldownUntil;
         file.error = formatStorageCooldownNotice(error.cooldownUntil);
-        if (localFilePath && fs7.existsSync(localFilePath)) {
+        if (localFilePath && fs8.existsSync(localFilePath)) {
           try {
-            fs7.unlinkSync(localFilePath);
+            fs8.unlinkSync(localFilePath);
           } catch {
           }
         }
@@ -8252,9 +8861,9 @@ async function processFileUpload(client2, file, queue, groupId, getExecutionCont
       } else {
         file.error = error.message;
       }
-      if (localFilePath && fs7.existsSync(localFilePath)) {
+      if (localFilePath && fs8.existsSync(localFilePath)) {
         try {
-          fs7.unlinkSync(localFilePath);
+          fs8.unlinkSync(localFilePath);
           console.log(`\u{1F916} \u4E0A\u4F20\u5C1D\u8BD5\u5931\u8D25\uFF0C\u5DF2\u81EA\u52A8\u6E05\u7406\u672C\u5730\u5783\u573E\u7F13\u5B58: ${localFilePath}`);
         } catch (e) {
           console.error("\u{1F916} \u81EA\u52A8\u6E05\u7406\u5783\u573E\u7F13\u5B58\u5931\u8D25:", e);
@@ -8374,9 +8983,9 @@ async function processBatchUploadSnapshot(client2, queueKey, queue) {
     queuePending: 0
   });
   const sanitizedFolderName = sanitizeFilename(folderName);
-  const targetDir = path10.join(UPLOAD_DIR, sanitizedFolderName);
-  if (!fs7.existsSync(targetDir)) {
-    fs7.mkdirSync(targetDir, { recursive: true });
+  const targetDir = path11.join(UPLOAD_DIR, sanitizedFolderName);
+  if (!fs8.existsSync(targetDir)) {
+    fs8.mkdirSync(targetDir, { recursive: true });
   }
   queue.folderName = sanitizedFolderName;
   for (const file of queue.files) {
@@ -8496,8 +9105,8 @@ async function handleCleanupCallback(cleanupId) {
     return { success: false, message: "\u8BE5\u6E05\u7406\u4EFB\u52A1\u5DF2\u8FC7\u671F\u6216\u4E0D\u5B58\u5728" };
   }
   try {
-    if (cleanupInfo.localPath && fs7.existsSync(cleanupInfo.localPath)) {
-      fs7.unlinkSync(cleanupInfo.localPath);
+    if (cleanupInfo.localPath && fs8.existsSync(cleanupInfo.localPath)) {
+      fs8.unlinkSync(cleanupInfo.localPath);
     }
     pendingCleanups.delete(cleanupId);
     return {
@@ -9070,7 +9679,7 @@ async function handleFileUpload(client2, event) {
         if (duplicateMode === "skip") {
           const duplicate = await findDuplicateFile(finalFileName, storageFolder, actualSize, activeAccountId);
           if (duplicate) {
-            if (fs7.existsSync(localFilePath)) fs7.unlinkSync(localFilePath);
+            if (fs8.existsSync(localFilePath)) fs8.unlinkSync(localFilePath);
             lastLocalPath = void 0;
             updateUploadPhase(chatIdStr, uploadId, { phase: "success", size: actualSize, providerName: provider.name, fileType, folder: storageFolder });
             rememberTransferDestination(chatIdStr, storageFolder, provider.name);
@@ -9130,7 +9739,7 @@ async function handleFileUpload(client2, event) {
               indexedFileId = String(inserted.rows[0].id);
             })
           );
-          if (fs7.existsSync(localFilePath)) fs7.unlinkSync(localFilePath);
+          if (fs8.existsSync(localFilePath)) fs8.unlinkSync(localFilePath);
           lastLocalPath = void 0;
           localFilePath = void 0;
         } catch (err) {
@@ -9172,9 +9781,9 @@ async function handleFileUpload(client2, event) {
         } else {
           lastError = error instanceof Error ? error.message : "\u672A\u77E5\u9519\u8BEF";
         }
-        if (localFilePath && fs7.existsSync(localFilePath)) {
+        if (localFilePath && fs8.existsSync(localFilePath)) {
           try {
-            fs7.unlinkSync(localFilePath);
+            fs8.unlinkSync(localFilePath);
           } catch (e) {
           }
         }
@@ -9190,9 +9799,9 @@ async function handleFileUpload(client2, event) {
       let success = await attemptSingleUpload(signal, reportQueueProgress);
       if (!success && !signal.aborted && !storageCooldownUntil && retryCount < maxRetries) {
         retryCount++;
-        if (lastLocalPath && fs7.existsSync(lastLocalPath)) {
+        if (lastLocalPath && fs8.existsSync(lastLocalPath)) {
           try {
-            fs7.unlinkSync(lastLocalPath);
+            fs8.unlinkSync(lastLocalPath);
           } catch (e) {
           }
         }
@@ -9319,7 +9928,7 @@ init_storage();
 init_db();
 init_storage();
 import { Api as Api6 } from "telegram";
-import crypto14 from "node:crypto";
+import crypto15 from "node:crypto";
 import { getPeerId } from "telegram/Utils.js";
 
 // src/services/telegramChannelJobAdmission.ts
@@ -11411,7 +12020,7 @@ async function recoverInterruptedTelegramJobs(botClient) {
     const lockResult = await client2.query(`SELECT pg_try_advisory_lock(hashtext('tg-vault:telegram-job-recovery')) AS locked`);
     lockHeld = Boolean(lockResult.rows[0]?.locked);
     if (!lockHeld) return;
-    const reconciliationLease = crypto14.randomUUID();
+    const reconciliationLease = crypto15.randomUUID();
     const pendingWrites = await claimTelegramWriteReconciliations(pool, reconciliationLease, 100);
     for (const pendingWrite of pendingWrites) {
       const target = storageManager.getTarget(pendingWrite.provider, pendingWrite.accountId);
@@ -11518,17 +12127,17 @@ init_settings();
 // src/services/orphanCleanup.ts
 init_db();
 init_localPath();
-import fs8 from "fs";
-import path11 from "path";
-var UPLOAD_DIR2 = path11.resolve(process.env.UPLOAD_DIR || "./data/uploads");
-var THUMBNAIL_DIR2 = path11.resolve(process.env.THUMBNAIL_DIR || "./data/thumbnails");
-var YTDLP_WORK_DIR = path11.resolve(process.env.YTDLP_WORK_DIR || path11.join(UPLOAD_DIR2, "ytdlp"));
+import fs9 from "fs";
+import path12 from "path";
+var UPLOAD_DIR2 = path12.resolve(process.env.UPLOAD_DIR || "./data/uploads");
+var THUMBNAIL_DIR2 = path12.resolve(process.env.THUMBNAIL_DIR || "./data/thumbnails");
+var YTDLP_WORK_DIR = path12.resolve(process.env.YTDLP_WORK_DIR || path12.join(UPLOAD_DIR2, "ytdlp"));
 var ORPHAN_MIN_AGE_MS = Math.max(6e4, parseInt(process.env.ORPHAN_CLEANUP_MIN_AGE_MS || "600000", 10) || 6e5);
 function isReservedTransientUploadPath(filePath, reservedDirs = [YTDLP_WORK_DIR]) {
-  const resolvedPath = path11.resolve(filePath);
+  const resolvedPath = path12.resolve(filePath);
   return reservedDirs.some((directory) => {
-    const resolvedDirectory = path11.resolve(directory);
-    return resolvedPath === resolvedDirectory || resolvedPath.startsWith(`${resolvedDirectory}${path11.sep}`);
+    const resolvedDirectory = path12.resolve(directory);
+    return resolvedPath === resolvedDirectory || resolvedPath.startsWith(`${resolvedDirectory}${path12.sep}`);
   });
 }
 function isAutoCleanupEnabled() {
@@ -11545,15 +12154,15 @@ function getAllFiles(dirPath, arrayOfFiles = [], reservedDirs = [YTDLP_WORK_DIR]
   if (isReservedTransientUploadPath(dirPath, reservedDirs)) {
     return arrayOfFiles;
   }
-  if (!fs8.existsSync(dirPath)) {
+  if (!fs9.existsSync(dirPath)) {
     return arrayOfFiles;
   }
   try {
-    const files = fs8.readdirSync(dirPath);
+    const files = fs9.readdirSync(dirPath);
     for (const file of files) {
-      const fullPath = path11.join(dirPath, file);
+      const fullPath = path12.join(dirPath, file);
       try {
-        const stat = fs8.lstatSync(fullPath);
+        const stat = fs9.lstatSync(fullPath);
         if (stat.isSymbolicLink()) {
           continue;
         }
@@ -11578,14 +12187,14 @@ function getAllFiles(dirPath, arrayOfFiles = [], reservedDirs = [YTDLP_WORK_DIR]
   return arrayOfFiles;
 }
 function removeEmptyDirectories(dirPath) {
-  if (!fs8.existsSync(dirPath)) return;
+  if (!fs9.existsSync(dirPath)) return;
   try {
-    const files = fs8.readdirSync(dirPath);
+    const files = fs9.readdirSync(dirPath);
     for (const file of files) {
-      const fullPath = path11.join(dirPath, file);
+      const fullPath = path12.join(dirPath, file);
       try {
         if (isReservedTransientUploadPath(fullPath)) continue;
-        const stat = fs8.lstatSync(fullPath);
+        const stat = fs9.lstatSync(fullPath);
         if (stat.isSymbolicLink()) continue;
         if (stat.isDirectory()) {
           removeEmptyDirectories(fullPath);
@@ -11593,9 +12202,9 @@ function removeEmptyDirectories(dirPath) {
       } catch (e) {
       }
     }
-    const remainingFiles = fs8.readdirSync(dirPath);
+    const remainingFiles = fs9.readdirSync(dirPath);
     if (remainingFiles.length === 0 && dirPath !== UPLOAD_DIR2) {
-      fs8.rmdirSync(dirPath);
+      fs9.rmdirSync(dirPath);
       console.log(`\u{1F9F9} \u5220\u9664\u7A7A\u6587\u4EF6\u5939: ${dirPath}`);
     }
   } catch (e) {
@@ -11634,7 +12243,7 @@ async function cleanupOrphanFiles() {
     for (const file of diskFiles) {
       const relativePath = getRelativeStoragePath(UPLOAD_DIR2, file.path);
       if (relativePath && !dbFileSet.has(relativePath)) {
-        const ageMs = Date.now() - fs8.statSync(file.path).mtimeMs;
+        const ageMs = Date.now() - fs9.statSync(file.path).mtimeMs;
         if (ageMs < ORPHAN_MIN_AGE_MS) continue;
         try {
           await safeUnlink(file.path, UPLOAD_DIR2);
@@ -11696,11 +12305,11 @@ init_localPath();
 // src/utils/fileScope.ts
 init_db();
 init_localPath();
-import path12 from "path";
-var CLOUD_SOURCES = /* @__PURE__ */ new Set(["onedrive", "aliyun_oss", "s3", "webdav", "google_drive"]);
-var UPLOAD_DIR3 = path12.resolve(process.env.UPLOAD_DIR || "./data/uploads");
-var THUMBNAIL_DIR3 = path12.resolve(process.env.THUMBNAIL_DIR || "./data/thumbnails");
-var PREVIEW_DIR2 = path12.resolve(process.env.PREVIEW_DIR || "./data/previews");
+import path13 from "path";
+var CLOUD_SOURCES = /* @__PURE__ */ new Set(["onedrive", "aliyun_oss", "s3", "webdav", "openlist", "google_drive"]);
+var UPLOAD_DIR3 = path13.resolve(process.env.UPLOAD_DIR || "./data/uploads");
+var THUMBNAIL_DIR3 = path13.resolve(process.env.THUMBNAIL_DIR || "./data/thumbnails");
+var PREVIEW_DIR2 = path13.resolve(process.env.PREVIEW_DIR || "./data/previews");
 async function getCurrentStorageScope() {
   const { storageManager: storageManager2 } = await Promise.resolve().then(() => (init_storage(), storage_exports));
   const provider = storageManager2.getProvider();
@@ -11734,16 +12343,16 @@ async function removePhysicalFile(file) {
     const provider = storageManager2.getProvider(`${file.source}:${file.storage_account_id}`);
     await provider.deleteFile(resolvePhysicalDeletePath(file));
   } else {
-    const filePath = file.path || path12.join(UPLOAD_DIR3, file.stored_name);
+    const filePath = file.path || path13.join(UPLOAD_DIR3, file.stored_name);
     if (!isPathInside(UPLOAD_DIR3, filePath)) throw new Error("\u62D2\u7EDD\u5220\u9664\u5B58\u50A8\u76EE\u5F55\u4E4B\u5916\u7684\u6587\u4EF6");
     await safeUnlink(filePath, UPLOAD_DIR3);
   }
   if (file.thumbnail_path) {
-    const thumbPath = path12.join(THUMBNAIL_DIR3, path12.basename(file.thumbnail_path));
+    const thumbPath = path13.join(THUMBNAIL_DIR3, path13.basename(file.thumbnail_path));
     await safeUnlink(thumbPath, THUMBNAIL_DIR3);
   }
   if (file.preview_path) {
-    const previewPath = path12.join(PREVIEW_DIR2, path12.basename(file.preview_path));
+    const previewPath = path13.join(PREVIEW_DIR2, path13.basename(file.preview_path));
     await safeUnlink(previewPath, PREVIEW_DIR2);
   }
 }
@@ -12223,10 +12832,10 @@ function channelTaskCenterItem(row) {
 // src/services/ytDlpDownload.ts
 init_db();
 init_storage();
-import crypto15 from "node:crypto";
-import fs9 from "node:fs";
-import os from "node:os";
-import path13 from "node:path";
+import crypto16 from "node:crypto";
+import fs10 from "node:fs";
+import os2 from "node:os";
+import path14 from "node:path";
 import { spawn } from "node:child_process";
 
 // src/services/ytDlpPlaylistSelection.ts
@@ -12252,101 +12861,7 @@ function buildYtDlpPlaylistArgs(url, input) {
 // src/services/ytDlpDownload.ts
 init_storageCooldown();
 init_storageAccountLifecycle();
-
-// src/utils/networkSecurity.ts
-import dns from "dns/promises";
-import net from "net";
-function ipv4ToInt(ip) {
-  return ip.split(".").reduce((acc, part) => (acc << 8) + Number(part) >>> 0, 0);
-}
-function isPrivateIPv4(ip) {
-  const n = ipv4ToInt(ip);
-  const ranges = [
-    ["0.0.0.0", "0.255.255.255"],
-    ["10.0.0.0", "10.255.255.255"],
-    ["127.0.0.0", "127.255.255.255"],
-    ["169.254.0.0", "169.254.255.255"],
-    ["172.16.0.0", "172.31.255.255"],
-    ["192.168.0.0", "192.168.255.255"],
-    ["224.0.0.0", "239.255.255.255"],
-    ["240.0.0.0", "255.255.255.255"]
-  ];
-  return ranges.some(([start, end]) => n >= ipv4ToInt(start) && n <= ipv4ToInt(end));
-}
-function embeddedIPv4FromIPv6(ip) {
-  const normalized = ip.toLowerCase().split("%", 1)[0];
-  const dotted = normalized.match(/(?:^|:)(\d{1,3}(?:\.\d{1,3}){3})$/)?.[1];
-  if (dotted && net.isIP(dotted) === 4) return dotted;
-  const segments = normalized.split(":").filter(Boolean);
-  if (segments.length < 2) return null;
-  const high = Number.parseInt(segments.at(-2) || "", 16);
-  const low = Number.parseInt(segments.at(-1) || "", 16);
-  if (!Number.isInteger(high) || !Number.isInteger(low) || high < 0 || high > 65535 || low < 0 || low > 65535) return null;
-  return `${high >>> 8}.${high & 255}.${low >>> 8}.${low & 255}`;
-}
-function isPrivateIPv6(ip) {
-  const normalized = ip.toLowerCase();
-  if (normalized === "::1" || normalized === "::" || normalized.startsWith("fc") || normalized.startsWith("fd") || normalized.startsWith("fe80:")) return true;
-  const isMapped = normalized.startsWith("::ffff:");
-  const isNat64 = normalized.startsWith("64:ff9b::");
-  if (!isMapped && !isNat64) return false;
-  const embedded = embeddedIPv4FromIPv6(normalized);
-  return !embedded || isPrivateIPv4(embedded);
-}
-function isPrivateAddress(ip) {
-  const version2 = net.isIP(ip);
-  if (version2 === 4) return isPrivateIPv4(ip);
-  if (version2 === 6) return isPrivateIPv6(ip);
-  return true;
-}
-async function assertPublicHttpUrl(rawUrl) {
-  let parsed;
-  try {
-    parsed = new URL(rawUrl);
-  } catch {
-    throw new Error("\u94FE\u63A5\u683C\u5F0F\u65E0\u6548");
-  }
-  if (!["http:", "https:"].includes(parsed.protocol)) {
-    throw new Error("\u4EC5\u5141\u8BB8 http/https \u94FE\u63A5");
-  }
-  const hostname = parsed.hostname;
-  if (!hostname || ["localhost", "localhost.localdomain"].includes(hostname.toLowerCase())) {
-    throw new Error("\u4E0D\u5141\u8BB8\u8BBF\u95EE\u672C\u673A\u5730\u5740");
-  }
-  const directIpVersion = net.isIP(hostname);
-  const addresses = directIpVersion ? [{ address: hostname }] : await dns.lookup(hostname, { all: true, verbatim: true });
-  if (addresses.length === 0 || addresses.some((item) => isPrivateAddress(item.address))) {
-    throw new Error("\u4E0D\u5141\u8BB8\u8BBF\u95EE\u5185\u7F51\u3001\u56DE\u73AF\u6216\u4FDD\u7559\u5730\u5740");
-  }
-  return parsed;
-}
-async function assertStorageEndpoint(rawUrl, policy = {}) {
-  if (!policy.allowPrivateAddresses) {
-    const parsed2 = await assertPublicHttpUrl(rawUrl);
-    if (parsed2.protocol !== "https:" && !policy.allowInsecureHttp && process.env.ALLOW_INSECURE_STORAGE_ENDPOINTS !== "true") {
-      throw new Error("\u5B58\u50A8\u7AEF\u70B9\u4EC5\u5141\u8BB8 https\uFF1B\u5982\u786E\u9700 http\uFF0C\u8BF7\u663E\u5F0F\u8BBE\u7F6E ALLOW_INSECURE_STORAGE_ENDPOINTS=true");
-    }
-    return parsed2;
-  }
-  let parsed;
-  try {
-    parsed = new URL(rawUrl);
-  } catch {
-    throw new Error("\u94FE\u63A5\u683C\u5F0F\u65E0\u6548");
-  }
-  if (!["http:", "https:"].includes(parsed.protocol)) {
-    throw new Error("\u4EC5\u5141\u8BB8 http/https \u94FE\u63A5");
-  }
-  if (parsed.protocol !== "https:" && !policy.allowInsecureHttp && process.env.ALLOW_INSECURE_STORAGE_ENDPOINTS !== "true") {
-    throw new Error("\u5B58\u50A8\u7AEF\u70B9\u4EC5\u5141\u8BB8 https\uFF1B\u5982\u786E\u9700 http\uFF0C\u8BF7\u663E\u5F0F\u8BBE\u7F6E ALLOW_INSECURE_STORAGE_ENDPOINTS=true");
-  }
-  return parsed;
-}
-async function assertPublicStorageEndpoint(rawUrl) {
-  return assertStorageEndpoint(rawUrl);
-}
-
-// src/services/ytDlpDownload.ts
+init_networkSecurity();
 var YTDLP_BIN = process.env.YTDLP_BIN || "yt-dlp";
 var YTDLP_WORK_DIR2 = process.env.YTDLP_WORK_DIR || "./data/uploads/ytdlp";
 var YTDLP_MAX_CONCURRENT = Math.max(1, parseInt(process.env.YTDLP_MAX_CONCURRENT || "1", 10) || 1);
@@ -12357,10 +12872,10 @@ function setYtDlpNotifier(notifier) {
   taskNotifier = notifier;
 }
 function ensureDir(directory) {
-  if (!fs9.existsSync(directory)) fs9.mkdirSync(directory, { recursive: true });
+  if (!fs10.existsSync(directory)) fs10.mkdirSync(directory, { recursive: true });
 }
 async function safeRmDir(directory) {
-  await fs9.promises.rm(directory, { recursive: true, force: true }).catch(() => void 0);
+  await fs10.promises.rm(directory, { recursive: true, force: true }).catch(() => void 0);
 }
 function isYtDlpSidecarOrTemporaryFile(fileName) {
   const lower = fileName.toLowerCase();
@@ -12368,12 +12883,12 @@ function isYtDlpSidecarOrTemporaryFile(fileName) {
 }
 function selectPrimaryOutputFile(taskDir) {
   const collectFiles = (directory) => {
-    const entries = fs9.readdirSync(directory, { withFileTypes: true });
+    const entries = fs10.readdirSync(directory, { withFileTypes: true });
     return entries.flatMap((entry) => {
-      const fullPath = path13.join(directory, entry.name);
+      const fullPath = path14.join(directory, entry.name);
       if (entry.isDirectory()) return collectFiles(fullPath);
       if (!entry.isFile() || isYtDlpSidecarOrTemporaryFile(entry.name)) return [];
-      const size = fs9.existsSync(fullPath) ? fs9.statSync(fullPath).size : 0;
+      const size = fs10.existsSync(fullPath) ? fs10.statSync(fullPath).size : 0;
       return size > 0 ? [{ name: entry.name, fullPath, size }] : [];
     });
   };
@@ -12390,12 +12905,12 @@ function parseYtDlpProgress(line) {
 }
 async function runYtDlpDownload(url, taskDir, signal, onProgress, format = "best", playlist) {
   ensureDir(taskDir);
-  const outputTemplate = path13.join(taskDir, "%(title).200s-%(id)s.%(ext)s");
+  const outputTemplate = path14.join(taskDir, "%(title).200s-%(id)s.%(ext)s");
   const formatArgs = format === "audio" ? ["-x", "--audio-format", "mp3"] : ["--merge-output-format", "mp4"];
   const args = playlist ? [...buildYtDlpPlaylistArgs(url, playlist).slice(0, -2), "--newline", ...formatArgs, "-o", outputTemplate, "--", url] : ["--no-playlist", "--newline", ...formatArgs, "-o", outputTemplate, "--", url];
   await new Promise((resolve, reject) => {
     const binLower = YTDLP_BIN.toLowerCase();
-    const needsShell = os.platform() === "win32" && (binLower.endsWith(".cmd") || binLower.endsWith(".bat"));
+    const needsShell = os2.platform() === "win32" && (binLower.endsWith(".cmd") || binLower.endsWith(".bat"));
     const child = spawn(YTDLP_BIN, args, { windowsHide: true, shell: needsShell });
     let stderr = "";
     let lineBuffer = "";
@@ -12455,7 +12970,7 @@ async function uploadDownloadedFile(task, execution, localFilePath, originalFile
   const fileType = getFileType(mimeType);
   const folder = task.targetFolder || "ytdlp";
   const storedName = await getUniqueStoredName(safeName, folder, accountId);
-  const stats = await fs9.promises.stat(localFilePath);
+  const stats = await fs10.promises.stat(localFilePath);
   const size = stats.size;
   const duplicateMode = await getDuplicateMode();
   if (duplicateMode === "skip") {
@@ -12482,7 +12997,7 @@ async function uploadDownloadedFile(task, execution, localFilePath, originalFile
       thumbnailPath = null;
     }
   }
-  const operationId = crypto15.randomUUID();
+  const operationId = crypto16.randomUUID();
   await beginYtDlpWrite(pool, {
     operationId,
     taskId: task.id,
@@ -12550,7 +13065,7 @@ async function uploadDownloadedFile(task, execution, localFilePath, originalFile
     }).catch(() => void 0);
     throw error;
   }
-  await fs9.promises.rm(localFilePath, { force: true }).catch(() => void 0);
+  await fs10.promises.rm(localFilePath, { force: true }).catch(() => void 0);
   return { finalPath, providerName: provider.name, size, storedName, folder, operationId, fileId };
 }
 function classifyYtDlpError(error) {
@@ -12568,7 +13083,7 @@ async function notifyTask(task, message) {
   await taskNotifier(task, message).catch(() => void 0);
 }
 async function executeYtDlpTask(id) {
-  const leaseToken = crypto15.randomUUID();
+  const leaseToken = crypto16.randomUUID();
   const execution = await claimYtDlpExecution(pool, id, leaseToken);
   if (!execution) return;
   const task = await getTransferTask("ytdlp", id);
@@ -12580,8 +13095,8 @@ async function executeYtDlpTask(id) {
       if (!owned) controller.abort("execution_lease_lost");
     }).catch(() => controller.abort("execution_heartbeat_failed"));
   }, 3e4);
-  const workBaseDir = path13.isAbsolute(YTDLP_WORK_DIR2) ? YTDLP_WORK_DIR2 : path13.join(process.cwd(), YTDLP_WORK_DIR2);
-  const taskDir = path13.join(workBaseDir, id);
+  const workBaseDir = path14.isAbsolute(YTDLP_WORK_DIR2) ? YTDLP_WORK_DIR2 : path14.join(process.cwd(), YTDLP_WORK_DIR2);
+  const taskDir = path14.join(workBaseDir, id);
   await safeRmDir(taskDir);
   ensureDir(taskDir);
   let lastProgressPersistedAt = 0;
@@ -12747,7 +13262,7 @@ var ytDlpQueue = new PersistentYtDlpQueue();
 async function initializeYtDlpQueue() {
   if (initialized) return;
   initialized = true;
-  ensureDir(path13.isAbsolute(YTDLP_WORK_DIR2) ? YTDLP_WORK_DIR2 : path13.join(process.cwd(), YTDLP_WORK_DIR2));
+  ensureDir(path14.isAbsolute(YTDLP_WORK_DIR2) ? YTDLP_WORK_DIR2 : path14.join(process.cwd(), YTDLP_WORK_DIR2));
   const tasks = await listTransferTasks({ sourceType: "ytdlp", limit: 500 });
   for (const task of tasks) {
     if (task.status === "pending") ytDlpQueue.enqueue(task.id);
@@ -12760,8 +13275,8 @@ async function cancelYtDlpTask(id) {
   if (!cancelled) return null;
   activeControllers.get(id)?.abort("user_cancelled");
   if (!activeControllers.has(id)) {
-    const workBaseDir = path13.isAbsolute(YTDLP_WORK_DIR2) ? YTDLP_WORK_DIR2 : path13.join(process.cwd(), YTDLP_WORK_DIR2);
-    await safeRmDir(path13.join(workBaseDir, id));
+    const workBaseDir = path14.isAbsolute(YTDLP_WORK_DIR2) ? YTDLP_WORK_DIR2 : path14.join(process.cwd(), YTDLP_WORK_DIR2);
+    await safeRmDir(path14.join(workBaseDir, id));
   }
   return getTransferTask("ytdlp", id);
 }
@@ -12775,7 +13290,7 @@ async function retryYtDlpTask(id) {
 }
 async function createYtDlpTask(input) {
   await assertPublicHttpUrl(input.url);
-  const id = `yd-${crypto15.randomBytes(8).toString("hex")}`;
+  const id = `yd-${crypto16.randomBytes(8).toString("hex")}`;
   const target = input.target || storageManager.getActiveTarget();
   await assertStorageTargetWritable(target);
   const client2 = target.accountId ? await pool.connect() : null;
@@ -12847,7 +13362,7 @@ async function handleYtDlpCommand(message, url, explicitTarget, options = {}) {
 }
 
 // src/services/destructiveConfirmation.ts
-import crypto16 from "crypto";
+import crypto17 from "crypto";
 var DestructiveConfirmationStore = class {
   confirmations = /* @__PURE__ */ new Map();
   ttlMs;
@@ -12856,7 +13371,7 @@ var DestructiveConfirmationStore = class {
   constructor(options = {}) {
     this.ttlMs = options.ttlMs ?? 5 * 60 * 1e3;
     this.now = options.now ?? (() => Date.now());
-    this.tokenFactory = options.tokenFactory ?? (() => crypto16.randomBytes(18).toString("base64url"));
+    this.tokenFactory = options.tokenFactory ?? (() => crypto17.randomBytes(18).toString("base64url"));
   }
   issue(binding) {
     const token = this.tokenFactory();
@@ -12894,6 +13409,9 @@ var DestructiveConfirmationStore = class {
 init_db();
 
 // src/services/fileQuery.ts
+function normalizeNameSortValue(value) {
+  return value.toLowerCase();
+}
 var FILE_TYPES = /* @__PURE__ */ new Set(["image", "video", "audio", "document", "other", "media"]);
 var SORTS = /* @__PURE__ */ new Set(["date", "name"]);
 var DIRECTIONS = /* @__PURE__ */ new Set(["asc", "desc"]);
@@ -13024,7 +13542,7 @@ function buildFilePageQuery(scope, options) {
   const direction = options.direction.toUpperCase();
   if (cursor) {
     if (options.sort === "name") {
-      params.push(cursor.value.toLocaleLowerCase(), cursor.id);
+      params.push(cursor.value, cursor.id);
       where.push(`(LOWER(name), id) ${comparator} ($${params.length - 1}, $${params.length}::uuid)`);
     } else {
       params.push(cursor.value, cursor.id);
@@ -13036,7 +13554,8 @@ function buildFilePageQuery(scope, options) {
   return {
     text: `SELECT
     id, name, stored_name, type, mime_type, size, thumbnail_path, preview_path,
-    width, height, source, folder, storage_account_id, is_favorite, created_at, updated_at
+    width, height, source, folder, storage_account_id, is_favorite, created_at, updated_at,
+    LOWER(name) AS sort_value
 FROM files
 WHERE ${where.join(" AND ")}
 ORDER BY ${sortColumn} ${direction}, id ${direction}
@@ -13080,7 +13599,7 @@ ORDER BY ${order}`,
   };
 }
 function cursorForFile(file, sort, direction) {
-  const value = sort === "name" ? String(file.name || "").toLocaleLowerCase() : new Date(String(file.created_at)).toISOString();
+  const value = sort === "name" ? String(file.sort_value ?? normalizeNameSortValue(String(file.name || ""))) : new Date(String(file.created_at)).toISOString();
   return encodeFileQueryCursor({ sort, direction, value, id: String(file.id) });
 }
 
@@ -13187,7 +13706,7 @@ function buildTelegramStatusPanel(input) {
 }
 
 // src/services/telegramCommands.ts
-import crypto17 from "crypto";
+import crypto18 from "crypto";
 
 // src/utils/folderPath.ts
 var INVALID_SEGMENT_CHARACTERS = /[\\:*?"<>|\x00-\x1f\x7f]/;
@@ -13417,18 +13936,18 @@ async function editStorageSwitchMessage(client2, update, toast) {
   await client2.invoke(new Api7.messages.SetBotCallbackAnswer({ queryId: update.queryId, message: toast }));
 }
 async function scanLocalDownloadFiles() {
-  const baseDir = path14.resolve(UPLOAD_DIR4);
+  const baseDir = path15.resolve(UPLOAD_DIR4);
   const paths = [];
   let totalSize = 0;
-  if (!fs10.existsSync(baseDir)) return { count: 0, totalSize: 0, paths };
+  if (!fs11.existsSync(baseDir)) return { count: 0, totalSize: 0, paths };
   async function walk(dir) {
-    const entries = await fs10.promises.readdir(dir, { withFileTypes: true });
+    const entries = await fs11.promises.readdir(dir, { withFileTypes: true });
     for (const entry of entries) {
-      const fullPath = path14.join(dir, entry.name);
+      const fullPath = path15.join(dir, entry.name);
       if (entry.isDirectory()) {
         await walk(fullPath);
       } else if (entry.isFile()) {
-        const stat = await fs10.promises.stat(fullPath);
+        const stat = await fs11.promises.stat(fullPath);
         totalSize += stat.size;
         paths.push(fullPath);
       }
@@ -13437,12 +13956,12 @@ async function scanLocalDownloadFiles() {
   await walk(baseDir);
   return { count: paths.length, totalSize, paths };
 }
-async function pruneEmptyDirs(dir, baseDir = path14.resolve(UPLOAD_DIR4)) {
-  if (!fs10.existsSync(dir) || path14.resolve(dir) === baseDir) return;
-  const entries = await fs10.promises.readdir(dir);
+async function pruneEmptyDirs(dir, baseDir = path15.resolve(UPLOAD_DIR4)) {
+  if (!fs11.existsSync(dir) || path15.resolve(dir) === baseDir) return;
+  const entries = await fs11.promises.readdir(dir);
   if (entries.length === 0) {
-    await fs10.promises.rmdir(dir);
-    await pruneEmptyDirs(path14.dirname(dir), baseDir);
+    await fs11.promises.rmdir(dir);
+    await pruneEmptyDirs(path15.dirname(dir), baseDir);
   }
 }
 function buildDownloadWorkersText(current3) {
@@ -13638,12 +14157,12 @@ async function handleStatus(message) {
     await message.reply({ message: MSG.AUTH_REQUIRED });
     return;
   }
-  const requestId = `tg-${crypto17.randomBytes(6).toString("hex")}`;
+  const requestId = `tg-${crypto18.randomBytes(6).toString("hex")}`;
   try {
     const target = storageManager.getActiveTarget();
     const accounts = await storageManager.getAccounts();
     const account = target.accountId ? accounts.find((row) => row.id === target.accountId) : null;
-    const diskSpace = await checkDiskSpace(path14.resolve(UPLOAD_DIR4));
+    const diskSpace = await checkDiskSpace(path15.resolve(UPLOAD_DIR4));
     const queue = getDownloadQueueStats();
     const [subscriptionRows, reconciliation] = await Promise.all([
       query(`SELECT COUNT(*)::int AS enabled, MAX(last_scan_at) AS last_scan_at,
@@ -13683,7 +14202,7 @@ async function handleStatus(message) {
 async function handleStorage(message) {
   try {
     const scope = await getCurrentStorageScope();
-    const diskPath = os2.platform() === "win32" ? "C:" : "/";
+    const diskPath = os3.platform() === "win32" ? "C:" : "/";
     const diskSpace = await checkDiskSpace(diskPath);
     const result = await query(`
             SELECT COUNT(*) as file_count, COALESCE(SUM(size), 0) as total_size
@@ -13855,7 +14374,7 @@ async function handleStorageCleanupCallback(client2, update, data) {
     }
     if (data === "storage_clear_ask") {
       const indexed = await query(`SELECT id, path, stored_name FROM files WHERE source = 'local'`);
-      const indexedPaths = new Set(indexed.rows.map((file) => path14.resolve(file.path || path14.join(UPLOAD_DIR4, file.stored_name))));
+      const indexedPaths = new Set(indexed.rows.map((file) => path15.resolve(file.path || path15.join(UPLOAD_DIR4, file.stored_name))));
       const confirmationToken = destructiveConfirmations.issue({
         actorId: userId,
         chatId,
@@ -13864,7 +14383,7 @@ async function handleStorageCleanupCallback(client2, update, data) {
       });
       pendingStorageClearSnapshots.set(confirmationToken, {
         indexedIds: indexed.rows.map((file) => String(file.id)),
-        orphanPaths: stats.paths.map((filePath) => path14.resolve(filePath)).filter((filePath) => !indexedPaths.has(filePath))
+        orphanPaths: stats.paths.map((filePath) => path15.resolve(filePath)).filter((filePath) => !indexedPaths.has(filePath))
       });
       await client2.editMessage(update.peer, {
         message: Number(update.msgId),
@@ -13898,24 +14417,24 @@ async function handleStorageCleanupCallback(client2, update, data) {
       let deletedBytes = 0;
       const indexed = snapshot.indexedIds.length > 0 ? await query(`SELECT * FROM files WHERE source = 'local' AND id = ANY($1::uuid[])`, [snapshot.indexedIds]) : { rows: [] };
       for (const file of indexed.rows) {
-        const filePath = path14.resolve(file.path || path14.join(UPLOAD_DIR4, file.stored_name));
-        const size = fs10.existsSync(filePath) ? fs10.statSync(filePath).size : Number(file.size || 0);
+        const filePath = path15.resolve(file.path || path15.join(UPLOAD_DIR4, file.stored_name));
+        const size = fs11.existsSync(filePath) ? fs11.statSync(filePath).size : Number(file.size || 0);
         try {
           await removePhysicalFile(file);
           await query("DELETE FROM files WHERE id = $1", [file.id]);
           deletedCount += 1;
           deletedBytes += size;
-          await pruneEmptyDirs(path14.dirname(filePath));
+          await pruneEmptyDirs(path15.dirname(filePath));
         } catch (error) {
           console.warn(`\u{1F916} \u672C\u5730\u6587\u4EF6\u5220\u9664\u5931\u8D25\uFF0C\u4FDD\u7559\u7D22\u5F15\u7B49\u5F85\u91CD\u8BD5: ${file.id}`, error);
         }
       }
       for (const resolved of snapshot.orphanPaths) {
-        const size = fs10.existsSync(resolved) ? fs10.statSync(resolved).size : 0;
+        const size = fs11.existsSync(resolved) ? fs11.statSync(resolved).size : 0;
         if (await safeUnlink(resolved, UPLOAD_DIR4)) {
           deletedCount += 1;
           deletedBytes += size;
-          await pruneEmptyDirs(path14.dirname(resolved));
+          await pruneEmptyDirs(path15.dirname(resolved));
         }
       }
       const after = await scanLocalDownloadFiles();
@@ -14092,7 +14611,7 @@ async function applyPendingTelegramFileMutation(message, actorId, input) {
   } else {
     const name = input.trim();
     if (!name || /[\/\\:*?"<>|]/.test(name)) throw new Error("\u6587\u4EF6\u540D\u5305\u542B\u975E\u6CD5\u5B57\u7B26");
-    const extension = (value) => path14.extname(value).toLowerCase();
+    const extension = (value) => path15.extname(value).toLowerCase();
     if (extension(name) !== extension(String(file.name))) throw new Error("\u4E0D\u5141\u8BB8\u4FEE\u6539\u6587\u4EF6\u540E\u7F00");
     await updateScopedFileById(pending.fileId, "name = $1, updated_at = NOW()", [name]);
     await message.reply({ message: `\u2705 \u5DF2\u91CD\u547D\u540D\u4E3A\uFF1A${name}` });
@@ -14134,6 +14653,10 @@ async function handleDelete(message, args) {
       return;
     }
     const file = result.rows[0];
+    if (file.source === "openlist") {
+      await message.reply({ message: "OpenList \u5B58\u50A8\u4E0D\u63D0\u4F9B\u7528\u6237\u5220\u9664\u529F\u80FD\u3002" });
+      return;
+    }
     const sent = await message.reply({
       message: [
         "\u26A0\uFE0F **\u786E\u8BA4\u5220\u9664\u8FD9\u4E2A\u6587\u4EF6\uFF1F**",
@@ -14218,6 +14741,11 @@ async function handleDeleteConfirmCallback(client2, update, data) {
       pendingDeleteConfirmations.delete(confirmId);
       await client2.editMessage(update.peer, { message: Number(update.msgId), text: "\u274C \u6587\u4EF6\u5DF2\u4E0D\u5B58\u5728\u6216\u4E0D\u5728\u5F53\u524D\u5B58\u50A8\u8303\u56F4\u5185\u3002", buttons: new Api7.ReplyInlineMarkup({ rows: [] }) });
       await client2.invoke(new Api7.messages.SetBotCallbackAnswer({ queryId: update.queryId, message: "\u6587\u4EF6\u4E0D\u5B58\u5728", alert: true }));
+      return;
+    }
+    if (file.source === "openlist") {
+      await client2.editMessage(update.peer, { message: Number(update.msgId), text: "\u274C OpenList \u5B58\u50A8\u4E0D\u63D0\u4F9B\u7528\u6237\u5220\u9664\u529F\u80FD\u3002", buttons: new Api7.ReplyInlineMarkup({ rows: [] }) });
+      await client2.invoke(new Api7.messages.SetBotCallbackAnswer({ queryId: update.queryId, message: "\u5F53\u524D\u5B58\u50A8\u4E0D\u652F\u6301\u7528\u6237\u5220\u9664", alert: true }));
       return;
     }
     await removePhysicalFile(file);
@@ -15152,7 +15680,8 @@ async function handleFileConcurrencyCallback(client2, update, data) {
 }
 
 // src/services/ytDlpProbe.ts
-import os3 from "node:os";
+init_networkSecurity();
+import os4 from "node:os";
 import { spawn as spawn2 } from "node:child_process";
 var YTDLP_BIN2 = process.env.YTDLP_BIN || "yt-dlp";
 function buildYtDlpProbeArgs(url) {
@@ -15184,7 +15713,7 @@ async function runYtDlpProbe(url, options = {}) {
   const maxOutputBytes = Math.max(32, options.maxOutputBytes ?? 512 * 1024);
   const spawnProcess = options.spawnProcess || spawn2;
   const binLower = YTDLP_BIN2.toLowerCase();
-  const shell = os3.platform() === "win32" && (binLower.endsWith(".cmd") || binLower.endsWith(".bat"));
+  const shell = os4.platform() === "win32" && (binLower.endsWith(".cmd") || binLower.endsWith(".bat"));
   const child = spawnProcess(YTDLP_BIN2, buildYtDlpProbeArgs(url), { windowsHide: true, shell });
   return new Promise((resolve, reject) => {
     let stdout = Buffer.alloc(0);
@@ -15233,7 +15762,7 @@ async function runYtDlpProbe(url, options = {}) {
 }
 
 // src/services/ytDlpConfirmation.ts
-import crypto18 from "node:crypto";
+import crypto19 from "node:crypto";
 var YtDlpConfirmationStore = class {
   values = /* @__PURE__ */ new Map();
   ttlMs;
@@ -15244,7 +15773,7 @@ var YtDlpConfirmationStore = class {
     this.ttlMs = Math.max(1, options.ttlMs ?? 5 * 6e4);
     this.maxEntries = Math.max(1, options.maxEntries ?? 500);
     this.now = options.now ?? Date.now;
-    this.tokenFactory = options.tokenFactory ?? (() => crypto18.randomBytes(12).toString("base64url"));
+    this.tokenFactory = options.tokenFactory ?? (() => crypto19.randomBytes(12).toString("base64url"));
   }
   cleanup() {
     const now = this.now();
@@ -15278,6 +15807,7 @@ var YtDlpConfirmationStore = class {
 // src/services/telegramBot.ts
 init_db();
 init_authSettings();
+init_networkSecurity();
 
 // src/services/telegramCommandDispatcher.ts
 var CATEGORY_LABELS = {
@@ -16151,7 +16681,7 @@ function buildSubscriptionCancelConfirm(target, token) {
   };
 }
 async function sendSubscriptionCancelConfirmation(message, userId, target, page) {
-  const token = crypto19.randomBytes(12).toString("base64url");
+  const token = crypto20.randomBytes(12).toString("base64url");
   const confirm = buildSubscriptionCancelConfirm(target, token);
   const sent = await message.reply({ message: confirm.text, buttons: confirm.buttons });
   const messageId = Number(sent.id);
@@ -16165,7 +16695,7 @@ async function sendSubscriptionCancelConfirmation(message, userId, target, page)
   });
 }
 async function editSubscriptionCancelConfirmation(update, userId, target, page) {
-  const token = crypto19.randomBytes(12).toString("base64url");
+  const token = crypto20.randomBytes(12).toString("base64url");
   pendingSubscriptionCancels.set(token, {
     userId,
     peerKey: telegramSubscriptionPeerKey(update.peer),
@@ -16739,13 +17269,13 @@ async function initTelegramBot(credentialsOverride) {
     console.error("\u{1F916} Telegram Bot \u540C\u6B65\u5B58\u50A8\u914D\u7F6E\u5931\u8D25:", e);
   }
   try {
-    const sessionDir = path15.dirname(SESSION_FILE);
-    if (!fs11.existsSync(sessionDir)) {
-      fs11.mkdirSync(sessionDir, { recursive: true, mode: 448 });
+    const sessionDir = path16.dirname(SESSION_FILE);
+    if (!fs12.existsSync(sessionDir)) {
+      fs12.mkdirSync(sessionDir, { recursive: true, mode: 448 });
     }
     let sessionString = "";
-    if (fs11.existsSync(SESSION_FILE)) {
-      sessionString = fs11.readFileSync(SESSION_FILE, "utf-8").trim();
+    if (fs12.existsSync(SESSION_FILE)) {
+      sessionString = fs12.readFileSync(SESSION_FILE, "utf-8").trim();
     }
     const session = new StringSession3(sessionString);
     client = new TelegramClient6(session, apiId, apiHash, {
@@ -16762,9 +17292,9 @@ async function initTelegramBot(credentialsOverride) {
       botAuthToken: botToken
     });
     const newSession = client.session.save();
-    fs11.writeFileSync(SESSION_FILE, newSession, { mode: 384 });
+    fs12.writeFileSync(SESSION_FILE, newSession, { mode: 384 });
     try {
-      fs11.chmodSync(SESSION_FILE, 384);
+      fs12.chmodSync(SESSION_FILE, 384);
     } catch (e) {
       console.warn("\u{1F916} \u4FEE\u6B63 Telegram Bot session \u6587\u4EF6\u6743\u9650\u5931\u8D25:", e);
     }
@@ -16867,9 +17397,9 @@ async function initTelegramBot(credentialsOverride) {
         text = normalizeBotCommandText(text);
         const chatId = message.chatId;
         if (!chatId) return;
-        const rateLimit5 = consumeTelegramRateLimit(senderId, text);
-        if (rateLimit5.limited) {
-          await message.reply({ message: `\u23F3 \u64CD\u4F5C\u8FC7\u4E8E\u9891\u7E41\uFF0C\u8BF7 ${rateLimit5.retryAfterSeconds} \u79D2\u540E\u518D\u8BD5\u3002` });
+        const rateLimit6 = consumeTelegramRateLimit(senderId, text);
+        if (rateLimit6.limited) {
+          await message.reply({ message: `\u23F3 \u64CD\u4F5C\u8FC7\u4E8E\u9891\u7E41\uFF0C\u8BF7 ${rateLimit6.retryAfterSeconds} \u79D2\u540E\u518D\u8BD5\u3002` });
           return;
         }
         const commandName = text.trim().split(/\s+/, 1)[0].replace(/@\w+$/, "") || "text";
@@ -16893,8 +17423,8 @@ async function initTelegramBot(credentialsOverride) {
             const qrDataUrl = await generateOTPAuthUrl();
             const base64Data = qrDataUrl.replace(/^data:image\/png;base64,/, "");
             const buffer = Buffer.from(base64Data, "base64");
-            const tempPath = path15.join(process.cwd(), `temp_qr_${senderId}_${Date.now()}_${Math.random().toString(36).slice(2)}.png`);
-            fs11.writeFileSync(tempPath, buffer);
+            const tempPath = path16.join(process.cwd(), `temp_qr_${senderId}_${Date.now()}_${Math.random().toString(36).slice(2)}.png`);
+            fs12.writeFileSync(tempPath, buffer);
             const qrMessage = await client.sendFile(chatId, {
               file: tempPath,
               caption: build2FASetupCaption()
@@ -16903,7 +17433,7 @@ async function initTelegramBot(credentialsOverride) {
               state: "WAITING_2FA_SETUP" /* WAITING_2FA_SETUP */,
               qrMessageId: qrMessage.id
             });
-            fs11.unlinkSync(tempPath);
+            fs12.unlinkSync(tempPath);
           } catch (e) {
             console.error("\u751F\u6210 2FA \u4E8C\u7EF4\u7801\u5931\u8D25:", e);
             await client.sendMessage(chatId, { message: MSG.AUTH_2FA_QR_FAIL });
@@ -17500,6 +18030,12 @@ function withTelegramBotLifecycle(operation) {
   botLifecycle = result.then(() => void 0, () => void 0);
   return result;
 }
+async function sendUpdateNotificationToUser(userId, message) {
+  if (!client || !client.connected || getTelegramBotStatus().status !== "ready") {
+    throw new Error("Telegram Bot \u5F53\u524D\u79BB\u7EBF");
+  }
+  await client.sendMessage(userId, { message });
+}
 async function sendSecurityNotification(message) {
   if (!client || !client.connected) {
     console.warn("\u26A0\uFE0F Telegram Client \u672A\u8FDE\u63A5\uFF0C\u65E0\u6CD5\u53D1\u9001\u5B89\u5168\u901A\u77E5");
@@ -17860,7 +18396,7 @@ function generateSignature(fileId, typeOrExpires, expires) {
     throw new Error("Missing signed URL expiration timestamp");
   }
   const data = `${fileId}:${type}:${expiresTimestamp}`;
-  return crypto20.createHmac("sha256", SESSION_SECRET).update(data).digest("hex");
+  return crypto21.createHmac("sha256", SESSION_SECRET).update(data).digest("hex");
 }
 function getSignedUrl(fileId, type, expiresIn = 24 * 60 * 60) {
   const expires = Date.now() + expiresIn * 1e3;
@@ -17888,7 +18424,7 @@ function verifySignedUrl(req) {
   try {
     const received = Buffer.from(sign, "hex");
     const expected = Buffer.from(expectedSign, "hex");
-    if (received.length !== expected.length || !crypto20.timingSafeEqual(received, expected)) {
+    if (received.length !== expected.length || !crypto21.timingSafeEqual(received, expected)) {
       console.log("[SignedURL] Signature mismatch:", { id, type });
       return false;
     }
@@ -17946,9 +18482,9 @@ function createFileDeletionService(dependencies) {
 }
 
 // src/services/webDestructiveConfirmation.ts
-import crypto21 from "node:crypto";
+import crypto22 from "node:crypto";
 function hash(value) {
-  return crypto21.createHash("sha256").update(value).digest("hex");
+  return crypto22.createHash("sha256").update(value).digest("hex");
 }
 var WebDestructiveConfirmationStore = class {
   constructor(ttlMs = 5 * 60 * 1e3, now = () => Date.now()) {
@@ -17959,7 +18495,7 @@ var WebDestructiveConfirmationStore = class {
   now;
   values = /* @__PURE__ */ new Map();
   issue(input) {
-    const token = crypto21.randomBytes(24).toString("base64url");
+    const token = crypto22.randomBytes(24).toString("base64url");
     const expiresAt = this.now() + this.ttlMs;
     this.values.set(token, { action: input.action, objectId: input.objectId, context: input.context ?? null, authTokenHash: hash(input.authToken), expiresAt });
     return { confirmationToken: token, expiresAt };
@@ -18009,26 +18545,26 @@ function buildCloudMediaResponse(input) {
 // src/routes/files.ts
 import { pipeline } from "node:stream/promises";
 var router2 = Router2();
-var UPLOAD_DIR5 = path16.resolve(process.env.UPLOAD_DIR || "./data/uploads");
-var THUMBNAIL_DIR5 = path16.resolve(process.env.THUMBNAIL_DIR || "./data/thumbnails");
-var PREVIEW_DIR3 = path16.resolve(process.env.PREVIEW_DIR || "./data/previews");
+var UPLOAD_DIR5 = path17.resolve(process.env.UPLOAD_DIR || "./data/uploads");
+var THUMBNAIL_DIR5 = path17.resolve(process.env.THUMBNAIL_DIR || "./data/thumbnails");
+var PREVIEW_DIR3 = path17.resolve(process.env.PREVIEW_DIR || "./data/previews");
 async function getSafeLocalFilePath(file) {
-  const candidate = file.path || path16.join(UPLOAD_DIR5, file.stored_name);
-  const resolved = path16.resolve(candidate);
+  const candidate = file.path || path17.join(UPLOAD_DIR5, file.stored_name);
+  const resolved = path17.resolve(candidate);
   if (!isPathInside(UPLOAD_DIR5, resolved)) {
     throw new Error("Unsafe local file path");
   }
-  if (!fs12.existsSync(resolved)) {
+  if (!fs13.existsSync(resolved)) {
     return resolved;
   }
-  const real = await fs12.promises.realpath(resolved);
+  const real = await fs13.promises.realpath(resolved);
   if (!isPathInside(UPLOAD_DIR5, real)) {
     throw new Error("Unsafe local file path");
   }
   return real;
 }
 async function serveLocalPathWithRange(req, res, filePath, mimeType, cacheControl, etag) {
-  const stat = fs12.statSync(filePath);
+  const stat = fs13.statSync(filePath);
   res.set({
     "Content-Type": mimeType || "application/octet-stream",
     "Cache-Control": cacheControl,
@@ -18054,13 +18590,13 @@ async function serveLocalPathWithRange(req, res, filePath, mimeType, cacheContro
       "Content-Range": `bytes ${start}-${end}/${stat.size}`,
       "Content-Length": String(chunkSize)
     });
-    const stream2 = fs12.createReadStream(filePath, { start, end });
+    const stream2 = fs13.createReadStream(filePath, { start, end });
     req.once("aborted", () => stream2.destroy());
     await pipeline(stream2, res);
     return;
   }
   res.set("Content-Length", String(stat.size));
-  const stream = fs12.createReadStream(filePath);
+  const stream = fs13.createReadStream(filePath);
   req.once("aborted", () => stream.destroy());
   await pipeline(stream, res);
 }
@@ -18339,14 +18875,14 @@ router2.get("/:id([0-9a-fA-F-]{36})/media-status", async (req, res) => {
     const file = await getScopedFileById(req.params.id);
     if (!file) return res.status(404).json({ code: "FILE_NOT_FOUND", error: "\u6587\u4EF6\u8BB0\u5F55\u4E0D\u5B58\u5728" });
     if (file.preview_path && (file.type === "image" || file.type === "video")) {
-      const localPreviewPath = path16.join(PREVIEW_DIR3, path16.basename(file.preview_path));
-      if (fs12.existsSync(localPreviewPath)) {
+      const localPreviewPath = path17.join(PREVIEW_DIR3, path17.basename(file.preview_path));
+      if (fs13.existsSync(localPreviewPath)) {
         return res.json({ available: true, source: "local_preview" });
       }
     }
     if (file.source === "local" || file.source === "web") {
       const filePath = await getSafeLocalFilePath(file);
-      return fs12.existsSync(filePath) ? res.json({ available: true, source: "local" }) : res.status(410).json({ code: "MEDIA_SOURCE_MISSING", error: "\u670D\u52A1\u5668\u4E2D\u7684\u6E90\u6587\u4EF6\u5DF2\u4E0D\u5B58\u5728\u3002", reason: "not_found" });
+      return fs13.existsSync(filePath) ? res.json({ available: true, source: "local" }) : res.status(410).json({ code: "MEDIA_SOURCE_MISSING", error: "\u670D\u52A1\u5668\u4E2D\u7684\u6E90\u6587\u4EF6\u5DF2\u4E0D\u5B58\u5728\u3002", reason: "not_found" });
     }
     const { storageManager: storageManager2 } = await Promise.resolve().then(() => (init_storage(), storage_exports));
     const provider = storageManager2.getProvider(`${file.source}:${file.storage_account_id}`);
@@ -18371,8 +18907,8 @@ router2.get("/:id([0-9a-fA-F-]{36})/preview", async (req, res) => {
     if (!file) {
       return res.status(404).json({ error: "\u6587\u4EF6\u4E0D\u5B58\u5728" });
     }
-    const localPreviewPath = file.preview_path && (file.type === "image" || file.type === "video") ? path16.join(PREVIEW_DIR3, path16.basename(file.preview_path)) : null;
-    if (localPreviewPath && fs12.existsSync(localPreviewPath)) {
+    const localPreviewPath = file.preview_path && (file.type === "image" || file.type === "video") ? path17.join(PREVIEW_DIR3, path17.basename(file.preview_path)) : null;
+    if (localPreviewPath && fs13.existsSync(localPreviewPath)) {
       await serveLocalPathWithRange(
         req,
         res,
@@ -18383,7 +18919,7 @@ router2.get("/:id([0-9a-fA-F-]{36})/preview", async (req, res) => {
       );
       return;
     }
-    if (file.source === "onedrive" || file.source === "aliyun_oss" || file.source === "s3" || file.source === "webdav" || file.source === "google_drive") {
+    if (CLOUD_SOURCES.has(file.source)) {
       try {
         const { storageManager: storageManager2 } = await Promise.resolve().then(() => (init_storage(), storage_exports));
         const provider = storageManager2.getProvider(`${file.source}:${file.storage_account_id}`);
@@ -18408,31 +18944,31 @@ router2.get("/:id([0-9a-fA-F-]{36})/preview", async (req, res) => {
       }
     }
     const filePath = await getSafeLocalFilePath(file);
-    if (!fs12.existsSync(filePath)) {
+    if (!fs13.existsSync(filePath)) {
       return res.status(404).json({ error: "\u6587\u4EF6\u4E0D\u5B58\u5728\u4E8E\u670D\u52A1\u5668" });
     }
     let previewPath = file.preview_path;
-    let preferredPreviewPath = previewPath && (file.type === "image" || file.type === "video") ? path16.join(PREVIEW_DIR3, path16.basename(previewPath)) : null;
-    if (file.type === "image" && (!preferredPreviewPath || !fs12.existsSync(preferredPreviewPath))) {
+    let preferredPreviewPath = previewPath && (file.type === "image" || file.type === "video") ? path17.join(PREVIEW_DIR3, path17.basename(previewPath)) : null;
+    if (file.type === "image" && (!preferredPreviewPath || !fs13.existsSync(preferredPreviewPath))) {
       try {
         const generatedPreview = await generateMediaPreview(filePath, file.stored_name || file.name, file.mime_type || "application/octet-stream");
         if (generatedPreview) {
-          previewPath = path16.basename(generatedPreview);
-          preferredPreviewPath = path16.join(PREVIEW_DIR3, previewPath);
+          previewPath = path17.basename(generatedPreview);
+          preferredPreviewPath = path17.join(PREVIEW_DIR3, previewPath);
           await query("UPDATE files SET preview_path = $1, updated_at = NOW() WHERE id = $2", [previewPath, file.id]);
         }
       } catch (previewError) {
         console.error("\u61D2\u751F\u6210\u56FE\u7247\u9884\u89C8\u5931\u8D25:", previewError);
       }
-    } else if (file.type === "video" && (!preferredPreviewPath || !fs12.existsSync(preferredPreviewPath))) {
+    } else if (file.type === "video" && (!preferredPreviewPath || !fs13.existsSync(preferredPreviewPath))) {
       void generateMediaPreview(filePath, file.stored_name || file.name, file.mime_type || "application/octet-stream").then(async (generatedPreview) => {
         if (!generatedPreview) return;
-        const generatedPreviewName = path16.basename(generatedPreview);
+        const generatedPreviewName = path17.basename(generatedPreview);
         await query("UPDATE files SET preview_path = $1, updated_at = NOW() WHERE id = $2", [generatedPreviewName, file.id]);
         console.log(`[Preview] \u{1F39E}\uFE0F Lazy video preview cached for ${file.id}: ${generatedPreviewName}`);
       }).catch((previewError) => console.error("\u61D2\u751F\u6210\u89C6\u9891\u9884\u89C8\u5931\u8D25:", previewError));
     }
-    const servedPath = preferredPreviewPath && fs12.existsSync(preferredPreviewPath) ? preferredPreviewPath : filePath;
+    const servedPath = preferredPreviewPath && fs13.existsSync(preferredPreviewPath) ? preferredPreviewPath : filePath;
     const servedMime = preferredPreviewPath && servedPath === preferredPreviewPath ? file.type === "video" ? "video/mp4" : "image/webp" : file.mime_type || "application/octet-stream";
     await serveLocalPathWithRange(
       req,
@@ -18452,7 +18988,7 @@ router2.get("/:id([0-9a-fA-F-]{36})/original", async (req, res) => {
     const { id } = req.params;
     const file = await getScopedFileById(id);
     if (!file) return res.status(404).json({ error: "\u6587\u4EF6\u4E0D\u5B58\u5728" });
-    if (file.source === "onedrive" || file.source === "aliyun_oss" || file.source === "s3" || file.source === "webdav" || file.source === "google_drive") {
+    if (CLOUD_SOURCES.has(file.source)) {
       try {
         const { storageManager: storageManager2 } = await Promise.resolve().then(() => (init_storage(), storage_exports));
         const provider = storageManager2.getProvider(`${file.source}:${file.storage_account_id}`);
@@ -18477,7 +19013,7 @@ router2.get("/:id([0-9a-fA-F-]{36})/original", async (req, res) => {
       }
     }
     const filePath = await getSafeLocalFilePath(file);
-    if (!fs12.existsSync(filePath)) return res.status(404).json({ error: "\u6587\u4EF6\u4E0D\u5B58\u5728\u4E8E\u670D\u52A1\u5668" });
+    if (!fs13.existsSync(filePath)) return res.status(404).json({ error: "\u6587\u4EF6\u4E0D\u5B58\u5728\u4E8E\u670D\u52A1\u5668" });
     await serveLocalPathWithRange(req, res, filePath, file.mime_type || "application/octet-stream", "public, max-age=86400", `"${file.id}-${file.updated_at}-original"`);
   } catch (error) {
     console.error("\u83B7\u53D6\u539F\u59CB\u6587\u4EF6\u5931\u8D25:", error);
@@ -18491,7 +19027,7 @@ router2.get("/:id([0-9a-fA-F-]{36})/download-url", async (req, res) => {
     if (!file) {
       return res.status(404).json({ error: "\u6587\u4EF6\u4E0D\u5B58\u5728" });
     }
-    if (file.source === "onedrive" || file.source === "aliyun_oss" || file.source === "s3" || file.source === "webdav" || file.source === "google_drive") {
+    if (CLOUD_SOURCES.has(file.source)) {
       try {
         const { storageManager: storageManager2 } = await Promise.resolve().then(() => (init_storage(), storage_exports));
         const provider = storageManager2.getProvider(`${file.source}:${file.storage_account_id}`);
@@ -18522,7 +19058,7 @@ router2.get("/:id([0-9a-fA-F-]{36})/download", async (req, res) => {
     if (!file) {
       return res.status(404).json({ error: "\u6587\u4EF6\u4E0D\u5B58\u5728" });
     }
-    if (file.source === "onedrive" || file.source === "aliyun_oss" || file.source === "s3" || file.source === "webdav" || file.source === "google_drive") {
+    if (CLOUD_SOURCES.has(file.source)) {
       try {
         const { storageManager: storageManager2 } = await Promise.resolve().then(() => (init_storage(), storage_exports));
         const provider = storageManager2.getProvider(`${file.source}:${file.storage_account_id}`);
@@ -18543,7 +19079,7 @@ router2.get("/:id([0-9a-fA-F-]{36})/download", async (req, res) => {
     }
     const filePath = await getSafeLocalFilePath(file);
     console.log(`[Download] Serving local file: ${filePath}`);
-    if (!fs12.existsSync(filePath)) {
+    if (!fs13.existsSync(filePath)) {
       console.log(`[Download] File system path not found: ${filePath}`);
       return res.status(404).json({ error: "\u6587\u4EF6\u4E0D\u5B58\u5728\u4E8E\u670D\u52A1\u5668" });
     }
@@ -18567,8 +19103,8 @@ router2.get("/:id([0-9a-fA-F-]{36})/thumbnail", async (req, res) => {
     if (!file.thumbnail_path) {
       return res.status(404).json({ error: "\u65E0\u7F29\u7565\u56FE" });
     }
-    const thumbPath = path16.join(THUMBNAIL_DIR5, path16.basename(file.thumbnail_path));
-    if (!fs12.existsSync(thumbPath)) {
+    const thumbPath = path17.join(THUMBNAIL_DIR5, path17.basename(file.thumbnail_path));
+    if (!fs13.existsSync(thumbPath)) {
       return res.status(404).json({ error: "\u7F29\u7565\u56FE\u6587\u4EF6\u4E0D\u5B58\u5728" });
     }
     await serveLocalPathWithRange(req, res, thumbPath, "image/webp", "public, max-age=604800");
@@ -18581,6 +19117,7 @@ router2.get("/:id([0-9a-fA-F-]{36})/thumbnail", async (req, res) => {
 router2.post("/:id([0-9a-fA-F-]{36})/delete-confirmation", async (req, res) => {
   const file = await getScopedFileById(req.params.id);
   if (!file) return res.status(404).json({ error: "\u6587\u4EF6\u4E0D\u5B58\u5728" });
+  if (file.source === "openlist") return res.status(403).json({ error: "OpenList \u5B58\u50A8\u4E0D\u63D0\u4F9B\u7528\u6237\u5220\u9664\u529F\u80FD", code: "USER_DELETE_UNSUPPORTED" });
   const authToken = getAuthToken(req);
   if (!authToken) return res.status(401).json({ error: "\u672A\u8BA4\u8BC1" });
   res.json(webDestructiveConfirmationStore.issue({ authToken, action: "delete_file", objectId: req.params.id }));
@@ -18596,6 +19133,9 @@ router2.delete("/:id([0-9a-fA-F-]{36})", async (req, res) => {
     const file = await getScopedFileById(id);
     if (!file) {
       return res.status(404).json({ error: "\u6587\u4EF6\u4E0D\u5B58\u5728" });
+    }
+    if (file.source === "openlist") {
+      return res.status(403).json({ error: "OpenList \u5B58\u50A8\u4E0D\u63D0\u4F9B\u7528\u6237\u5220\u9664\u529F\u80FD", code: "USER_DELETE_UNSUPPORTED" });
     }
     const deletionService2 = createFileDeletionService({
       removePhysicalFile,
@@ -18802,9 +19342,9 @@ function logOperationalEvent(event, requestId, data) {
 }
 
 // src/services/batchDeleteConfirmation.ts
-import crypto22 from "node:crypto";
+import crypto23 from "node:crypto";
 function hashAuthToken(token) {
-  return crypto22.createHash("sha256").update(token).digest("hex");
+  return crypto23.createHash("sha256").update(token).digest("hex");
 }
 function normalizeFileIds(fileIds) {
   return [...new Set(fileIds)].sort();
@@ -18817,7 +19357,7 @@ var BatchDeleteConfirmationStore = class {
   constructor(options = {}) {
     this.ttlMs = options.ttlMs ?? 5 * 60 * 1e3;
     this.now = options.now ?? (() => Date.now());
-    this.tokenFactory = options.tokenFactory ?? (() => crypto22.randomBytes(24).toString("base64url"));
+    this.tokenFactory = options.tokenFactory ?? (() => crypto23.randomBytes(24).toString("base64url"));
   }
   issue(input) {
     const confirmationToken = this.tokenFactory();
@@ -18969,6 +19509,10 @@ router3.post("/batch-delete/preview", requireAuth, async (req, res) => {
     const immutableFileIds = row.file_ids || [];
     if (immutableFileIds.length === 0) {
       return res.status(404).json({ error: "\u5F53\u524D\u5B58\u50A8\u8303\u56F4\u5185\u6CA1\u6709\u627E\u5230\u5F85\u5220\u9664\u9879\u76EE" });
+    }
+    const openListCount = await query("SELECT COUNT(*)::int AS count FROM files WHERE id = ANY($1::uuid[]) AND source = $2", [immutableFileIds, "openlist"]);
+    if (Number(openListCount.rows[0]?.count || 0) > 0) {
+      return res.status(403).json({ error: "OpenList \u5B58\u50A8\u4E0D\u63D0\u4F9B\u7528\u6237\u5220\u9664\u529F\u80FD", code: "USER_DELETE_UNSUPPORTED" });
     }
     const issued = batchDeleteConfirmationStore.issue({
       authToken: getAuthenticatedSessionToken(req),
@@ -19156,8 +19700,8 @@ init_db();
 import { Router as Router4 } from "express";
 import multer from "multer";
 import { v4 as uuidv4 } from "uuid";
-import path17 from "path";
-import fs13 from "fs";
+import path18 from "path";
+import fs14 from "fs";
 
 // src/middleware/apiKey.ts
 init_db();
@@ -19278,16 +19822,16 @@ function decodeFilename(filename) {
   }
   return filename;
 }
-var TEMP_DIR = path17.join(process.cwd(), "data", "temp");
-if (!fs13.existsSync(TEMP_DIR)) {
-  fs13.mkdirSync(TEMP_DIR, { recursive: true });
+var TEMP_DIR = path18.join(process.cwd(), "data", "temp");
+if (!fs14.existsSync(TEMP_DIR)) {
+  fs14.mkdirSync(TEMP_DIR, { recursive: true });
 }
 var storage = multer.diskStorage({
   destination: (_req, _file, cb) => {
     cb(null, TEMP_DIR);
   },
   filename: (_req, file, cb) => {
-    const ext = path17.extname(file.originalname);
+    const ext = path18.extname(file.originalname);
     const storedName = `${uuidv4()}${ext}`;
     cb(null, storedName);
   }
@@ -19307,7 +19851,7 @@ var handleUpload = async (req, res, source = "web") => {
   const originalName = decodeFilename(file.originalname);
   const mimeType = file.mimetype;
   const size = file.size;
-  const tempPath = path17.resolve(file.path);
+  const tempPath = path18.resolve(file.path);
   let storageLease = null;
   let target;
   try {
@@ -19333,7 +19877,7 @@ var handleUpload = async (req, res, source = "web") => {
       target = storageManager.getActiveTarget();
     }
   } catch (error) {
-    if (fs13.existsSync(tempPath)) fs13.unlinkSync(tempPath);
+    if (fs14.existsSync(tempPath)) fs14.unlinkSync(tempPath);
     return res.status(409).json({ error: error instanceof Error ? error.message : "\u4E0A\u4F20\u76EE\u6807\u65E0\u6548" });
   }
   const { provider, accountId: activeAccountId } = target;
@@ -19341,7 +19885,7 @@ var handleUpload = async (req, res, source = "web") => {
   try {
     requestedFolder = folder ? normalizeFolderPath(folder) : null;
   } catch (error) {
-    if (fs13.existsSync(tempPath)) fs13.unlinkSync(tempPath);
+    if (fs14.existsSync(tempPath)) fs14.unlinkSync(tempPath);
     return res.status(400).json({ error: error instanceof Error ? error.message : "\u6587\u4EF6\u5939\u8DEF\u5F84\u65E0\u6548" });
   }
   const storageRules = await getStoragePathRules();
@@ -19361,7 +19905,7 @@ var handleUpload = async (req, res, source = "web") => {
     if (duplicateMode === "skip") {
       const duplicate = await findDuplicateFile(originalName, storageFolder, size, activeAccountId);
       if (duplicate) {
-        if (fs13.existsSync(tempPath)) fs13.unlinkSync(tempPath);
+        if (fs14.existsSync(tempPath)) fs14.unlinkSync(tempPath);
         return res.json({
           success: true,
           skipped: true,
@@ -19380,7 +19924,7 @@ var handleUpload = async (req, res, source = "web") => {
       try {
         const thumbResult = await generateThumbnail(tempPath, storedName, mimeType);
         if (thumbResult) {
-          thumbnailPath = path17.basename(thumbResult);
+          thumbnailPath = path18.basename(thumbResult);
           console.log(`[Upload] \u2728 Thumbnail generated: ${thumbnailPath}`);
           const dims = await getImageDimensions(tempPath, mimeType);
           width = dims.width;
@@ -19396,7 +19940,7 @@ var handleUpload = async (req, res, source = "web") => {
       try {
         const previewResult = await generateMediaPreview(tempPath, storedName, mimeType);
         if (previewResult) {
-          previewPath = path17.basename(previewResult);
+          previewPath = path18.basename(previewResult);
           console.log(`[Upload] \u{1F39E}\uFE0F Image preview generated: ${previewPath}`);
         }
       } catch (error) {
@@ -19423,14 +19967,14 @@ var handleUpload = async (req, res, source = "web") => {
       const previewSource = provider.name === "local" ? storedPath : tempPath;
       void generateMediaPreview(previewSource, storedName, mimeType).then(async (previewResult) => {
         if (!previewResult) return;
-        const generatedPreviewName = path17.basename(previewResult);
+        const generatedPreviewName = path18.basename(previewResult);
         await query("UPDATE files SET preview_path = $1, updated_at = NOW() WHERE id = $2", [generatedPreviewName, newFile.id]);
         console.log(`[Upload] \u{1F39E}\uFE0F Video preview generated async: ${generatedPreviewName}`);
       }).catch((error) => console.error("\u5F02\u6B65\u751F\u6210\u89C6\u9891\u9884\u89C8\u5931\u8D25:", error)).finally(() => {
-        if (provider.name !== "local" && fs13.existsSync(tempPath)) fs13.unlinkSync(tempPath);
+        if (provider.name !== "local" && fs14.existsSync(tempPath)) fs14.unlinkSync(tempPath);
       });
-    } else if (fs13.existsSync(tempPath)) {
-      fs13.unlinkSync(tempPath);
+    } else if (fs14.existsSync(tempPath)) {
+      fs14.unlinkSync(tempPath);
     }
     res.json({
       success: true,
@@ -19450,7 +19994,7 @@ var handleUpload = async (req, res, source = "web") => {
     });
   } catch (error) {
     console.error("\u4E0A\u4F20\u5904\u7406\u5931\u8D25:", error);
-    if (fs13.existsSync(tempPath)) fs13.unlinkSync(tempPath);
+    if (fs14.existsSync(tempPath)) fs14.unlinkSync(tempPath);
     if (isStorageCooldownError(error)) {
       return sendStorageCooldownHttpError(res, error);
     }
@@ -19476,17 +20020,18 @@ import { Router as Router5 } from "express";
 import checkDiskSpaceModule2 from "check-disk-space";
 init_settings();
 init_authSettings();
-import os4 from "os";
-import path18 from "path";
-import fs14 from "fs";
+import os5 from "os";
+import path19 from "path";
+import fs15 from "fs";
 import axios3 from "axios";
-import crypto24 from "crypto";
+import crypto25 from "crypto";
 import { rateLimit as rateLimit3 } from "express-rate-limit";
+init_networkSecurity();
 
 // src/services/oauthFlowStore.ts
 init_db();
 init_credentialCrypto();
-import crypto23 from "node:crypto";
+import crypto24 from "node:crypto";
 var OAuthFlowError = class extends Error {
   code = "OAUTH_FLOW_INVALID";
   constructor() {
@@ -19495,7 +20040,7 @@ var OAuthFlowError = class extends Error {
   }
 };
 function sha256(value) {
-  return crypto23.createHash("sha256").update(value).digest("hex");
+  return crypto24.createHash("sha256").update(value).digest("hex");
 }
 function parsePendingConfig(value) {
   const parsed = typeof value === "string" ? JSON.parse(value) : value;
@@ -19512,8 +20057,8 @@ var OAuthFlowStore = class {
     this.db = options.db ?? pool;
     this.ttlMs = options.ttlMs ?? 10 * 60 * 1e3;
     this.now = options.now ?? (() => Date.now());
-    this.stateFactory = options.stateFactory ?? (() => crypto23.randomBytes(32).toString("base64url"));
-    this.nonceFactory = options.nonceFactory ?? (() => crypto23.randomBytes(24).toString("base64url"));
+    this.stateFactory = options.stateFactory ?? (() => crypto24.randomBytes(32).toString("base64url"));
+    this.nonceFactory = options.nonceFactory ?? (() => crypto24.randomBytes(24).toString("base64url"));
   }
   async ensureSchema() {
     if (!this.schemaPromise) {
@@ -19531,6 +20076,13 @@ var OAuthFlowStore = class {
                     )
                 `);
         await this.db.query("CREATE INDEX IF NOT EXISTS idx_oauth_pending_flows_expiry ON oauth_pending_flows(expires_at)");
+        await this.db.query(`
+                    DELETE FROM oauth_pending_flows older
+                    USING oauth_pending_flows newer
+                    WHERE older.auth_session_hash = newer.auth_session_hash
+                      AND (older.created_at, older.state_hash) < (newer.created_at, newer.state_hash)
+                `);
+        await this.db.query("CREATE UNIQUE INDEX IF NOT EXISTS idx_oauth_pending_flows_session ON oauth_pending_flows(auth_session_hash)");
       })().catch((error) => {
         this.schemaPromise = null;
         throw error;
@@ -19548,7 +20100,15 @@ var OAuthFlowStore = class {
     await this.db.query(
       `INSERT INTO oauth_pending_flows
                 (state_hash, provider, auth_session_hash, redirect_uri, pending_config, flow_nonce, expires_at)
-             VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7)`,
+             VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7)
+             ON CONFLICT (auth_session_hash) DO UPDATE SET
+                state_hash = EXCLUDED.state_hash,
+                provider = EXCLUDED.provider,
+                redirect_uri = EXCLUDED.redirect_uri,
+                pending_config = EXCLUDED.pending_config,
+                flow_nonce = EXCLUDED.flow_nonce,
+                expires_at = EXCLUDED.expires_at,
+                created_at = NOW()`,
       [
         sha256(state),
         input.provider,
@@ -19653,6 +20213,38 @@ function renderOAuthSuccessPage(input) {
                         document.getElementById('close-window')?.addEventListener('click', closeWindow);
                         notifyParent();
                         setTimeout(closeWindow, 1200);
+                    </script>
+                </div>
+            </body>
+        </html>
+    `;
+}
+function renderOAuthFailurePage(input) {
+  const message = JSON.stringify({
+    type: "oauth_failure",
+    provider: input.provider,
+    flowNonce: input.flowNonce,
+    error: input.error
+  }).replace(/</g, "\\u003c");
+  const targetOrigin = JSON.stringify(input.frontendOrigin);
+  const providerName = escapeHtml(input.providerName);
+  const error = escapeHtml(input.error);
+  const nonce = escapeHtml(input.scriptNonce);
+  return `
+        <!doctype html>
+        <html lang="zh-CN">
+            <head><meta charset="utf-8" /><title>${providerName} \u6388\u6743\u5931\u8D25</title></head>
+            <body style="font-family: sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0;">
+                <div style="max-width: 520px; text-align: center; padding: 36px; border-radius: 20px; background: #fef2f2; border: 1px solid #fecaca;">
+                    <h2 style="color: #dc2626;">\u6388\u6743\u5931\u8D25</h2>
+                    <p style="color: #991b1b;">${error}</p>
+                    <button id="close-window" type="button">\u5173\u95ED\u7A97\u53E3</button>
+                    <script nonce="${nonce}">
+                        const targetOrigin = ${targetOrigin};
+                        const message = ${message};
+                        const notifyParent = () => { if (window.opener && !window.opener.closed) window.opener.postMessage(message, targetOrigin); };
+                        document.getElementById('close-window')?.addEventListener('click', () => { notifyParent(); window.close(); });
+                        notifyParent();
                     </script>
                 </div>
             </body>
@@ -19800,7 +20392,7 @@ var telegramUserLoginLimiter = rateLimit3({ windowMs: 15 * 60 * 1e3, max: 10, me
 function getTelegramUserLoginSessionKey(req) {
   const token = getAuthToken(req);
   if (!token) throw new Error("UNAUTHORIZED");
-  return crypto24.createHash("sha256").update(token).digest("base64url");
+  return crypto25.createHash("sha256").update(token).digest("base64url");
 }
 function sendTelegramUserLoginError(res, error) {
   const candidate = error;
@@ -19834,7 +20426,7 @@ function sendStorageEndpointValidationError(res, error) {
   res.status(400).json({ error: safeMessages.includes(message) ? message : "\u65E0\u6CD5\u89E3\u6790\u5B58\u50A8\u7AEF\u70B9\u5730\u5740" });
 }
 function sendOAuthSuccessPage(res, input) {
-  const nonce = crypto24.randomBytes(16).toString("base64");
+  const nonce = crypto25.randomBytes(16).toString("base64");
   res.setHeader("Content-Security-Policy", [
     "default-src 'self'",
     "style-src 'unsafe-inline'",
@@ -19845,6 +20437,19 @@ function sendOAuthSuccessPage(res, input) {
   ].join("; "));
   res.setHeader("Cross-Origin-Opener-Policy", "unsafe-none");
   res.type("html").send(renderOAuthSuccessPage({ ...input, scriptNonce: nonce }));
+}
+function sendOAuthFailurePage(res, input) {
+  const nonce = crypto25.randomBytes(16).toString("base64");
+  res.setHeader("Content-Security-Policy", [
+    "default-src 'self'",
+    "style-src 'unsafe-inline'",
+    `script-src 'nonce-${nonce}'`,
+    "script-src-attr 'none'",
+    "base-uri 'none'",
+    "object-src 'none'"
+  ].join("; "));
+  res.setHeader("Cross-Origin-Opener-Policy", "unsafe-none");
+  res.status(400).type("html").send(renderOAuthFailurePage({ ...input, scriptNonce: nonce }));
 }
 function getOAuthSessionToken(req) {
   const token = getAuthToken(req);
@@ -19860,16 +20465,17 @@ function sendOAuthFlowError(res, error) {
 }
 router5.get("/stats", requireAuth, async (_req, res) => {
   try {
-    const diskPath = os4.platform() === "win32" ? "C:" : path18.resolve(UPLOAD_DIR6);
+    const { storageManager: storageManager2 } = await Promise.resolve().then(() => (init_storage(), storage_exports));
+    const target = storageManager2.getActiveTarget();
+    const provider = target.provider;
+    const activeAccountId = target.accountId;
+    const scope = buildStorageScopeForTarget({ providerName: provider.name, accountId: activeAccountId });
+    const diskPath = os5.platform() === "win32" ? "C:" : path19.resolve(UPLOAD_DIR6);
     const diskSpace = await checkDiskSpace2(diskPath);
-    const scope = await getCurrentStorageScope();
     const result = await query(`
             SELECT COUNT(*) as file_count, COALESCE(SUM(size), 0) as total_size
             FROM files WHERE ${scope.clause}
         `, scope.params);
-    const { storageManager: storageManager2 } = await Promise.resolve().then(() => (init_storage(), storage_exports));
-    const provider = storageManager2.getProvider();
-    const activeAccountId = storageManager2.getActiveAccountId();
     const account = activeAccountId ? (await query(`SELECT last_probe_status, last_probed_at FROM storage_accounts WHERE id = $1`, [activeAccountId])).rows[0] : null;
     const cooldown = activeAccountId ? (await query(`SELECT reason, cooldown_until FROM storage_account_cooldowns
                             WHERE storage_account_id = $1 AND cooldown_until > NOW()
@@ -20172,7 +20778,7 @@ router5.delete("/config/telegram-bot", requireAuth, async (req, res) => {
       await controls.stop();
       await deleteTelegramBotConfig();
       const sessionPath = process.env.TELEGRAM_SESSION_FILE || "./data/telegram_session.txt";
-      if (fs14.existsSync(sessionPath)) fs14.rmSync(sessionPath, { force: true });
+      if (fs15.existsSync(sessionPath)) fs15.rmSync(sessionPath, { force: true });
       const effective = await applyEffectiveTelegramBotConfig();
       if (effective.source === "environment" && effective.enabled && effective.credentials) await controls.restart(effective.credentials);
     });
@@ -20325,64 +20931,76 @@ router5.post("/config/onedrive/auth-url", requireAuth, async (req, res) => {
 router5.get("/onedrive/callback", async (req, res) => {
   try {
     const { code, state, error, error_description } = req.query;
-    if (error) return res.type("text/plain").send(`\u6388\u6743\u5931\u8D25: ${String(error_description || error)}`);
-    if (!code || typeof code !== "string") return res.status(400).send("\u7F3A\u5C11\u6388\u6743\u7801 (code)");
     if (!state || typeof state !== "string") return res.status(400).send("\u7F3A\u5C11 OAuth state");
     const flow = await oauthFlowStore.consume({
       state,
       provider: "onedrive",
       authSessionToken: getOAuthSessionToken(req)
     });
-    const { clientId, clientSecret = "", tenantId = "common", name = "" } = flow.config;
-    if (typeof clientId !== "string" || !clientId) return res.status(400).send("OAuth \u914D\u7F6E\u4FE1\u606F\u4E0D\u5B8C\u6574");
-    const { storageManager: storageManager2, OneDriveStorageProvider: OneDriveStorageProvider2 } = await Promise.resolve().then(() => (init_storage(), storage_exports));
-    let tokens;
-    try {
-      tokens = await OneDriveStorageProvider2.exchangeCodeForToken(
-        clientId,
-        typeof clientSecret === "string" ? clientSecret : "",
-        typeof tenantId === "string" ? tenantId : "common",
-        flow.redirectUri,
-        code
-      );
-    } catch (err) {
-      const msError = err.response?.data;
-      const errorCode = Array.isArray(msError?.error_codes) ? msError.error_codes[0] : void 0;
-      const errorDescription = msError?.error_description || err.message || "\u672A\u77E5\u9519\u8BEF";
-      if (errorCode === 7000215 || /invalid client secret|AADSTS7000215/i.test(errorDescription)) {
-        return res.status(400).send("\u6388\u6743\u5931\u8D25\uFF1AMicrosoft \u8FD4\u56DE AADSTS7000215\uFF0CClient Secret \u65E0\u6548\u3002\u8BF7\u590D\u5236\u5BA2\u6237\u7AEF\u5BC6\u7801\u7684\u503C Value\u3002");
-      }
-      return res.status(err.response?.status || 400).type("text/plain").send(`\u6388\u6743\u5931\u8D25\uFF1A${String(errorDescription)}`);
-    }
-    let accountName = "OneDrive Account";
-    try {
-      const profileRes = await axios3.get("https://graph.microsoft.com/v1.0/me", {
-        headers: { "Authorization": `Bearer ${tokens.access_token}` }
-      });
-      accountName = profileRes.data.mail || profileRes.data.userPrincipalName || accountName;
-    } catch {
-    }
-    const accountId = await storageManager2.addOneDriveAccount(
-      typeof name === "string" && name ? name : accountName,
-      clientId,
-      typeof clientSecret === "string" ? clientSecret : "",
-      tokens.refresh_token,
-      typeof tenantId === "string" ? tenantId : "common"
-    );
-    await storageManager2.switchAccount(accountId);
     const routeConfig = getOAuthRouteConfig("onedrive");
-    sendOAuthSuccessPage(res, {
+    const fail = (message) => sendOAuthFailurePage(res, {
       provider: "onedrive",
       providerName: "OneDrive",
       frontendOrigin: routeConfig.frontendOrigin,
       flowNonce: flow.flowNonce,
-      accountId
+      error: message
     });
+    if (error) return fail(`\u6388\u6743\u5931\u8D25\uFF1A${String(error_description || error)}`);
+    if (!code || typeof code !== "string") return fail("\u6388\u6743\u5931\u8D25\uFF1A\u672A\u6536\u5230\u6388\u6743\u7801");
+    const { clientId, clientSecret = "", tenantId = "common", name = "" } = flow.config;
+    if (typeof clientId !== "string" || !clientId) return fail("OAuth \u914D\u7F6E\u4FE1\u606F\u4E0D\u5B8C\u6574");
+    try {
+      const { storageManager: storageManager2, OneDriveStorageProvider: OneDriveStorageProvider2 } = await Promise.resolve().then(() => (init_storage(), storage_exports));
+      let tokens;
+      try {
+        tokens = await OneDriveStorageProvider2.exchangeCodeForToken(
+          clientId,
+          typeof clientSecret === "string" ? clientSecret : "",
+          typeof tenantId === "string" ? tenantId : "common",
+          flow.redirectUri,
+          code
+        );
+      } catch (err) {
+        const msError = err.response?.data;
+        const errorCode = Array.isArray(msError?.error_codes) ? msError.error_codes[0] : void 0;
+        const description = String(msError?.error_description || err.message || "\u672A\u77E5\u9519\u8BEF");
+        if (errorCode === 7000215 || /invalid client secret|AADSTS7000215/i.test(description)) {
+          return fail("Microsoft \u8FD4\u56DE AADSTS7000215\uFF0CClient Secret \u65E0\u6548\u3002\u8BF7\u590D\u5236\u5BA2\u6237\u7AEF\u5BC6\u7801\u7684\u503C Value\u3002");
+        }
+        return fail(`\u6388\u6743\u5931\u8D25\uFF1A${description}`);
+      }
+      let accountName = "OneDrive Account";
+      try {
+        const profileRes = await axios3.get("https://graph.microsoft.com/v1.0/me", {
+          headers: { "Authorization": `Bearer ${tokens.access_token}` }
+        });
+        accountName = profileRes.data.mail || profileRes.data.userPrincipalName || accountName;
+      } catch {
+      }
+      const accountId = await storageManager2.addOneDriveAccount(
+        typeof name === "string" && name ? name : accountName,
+        clientId,
+        typeof clientSecret === "string" ? clientSecret : "",
+        tokens.refresh_token,
+        typeof tenantId === "string" ? tenantId : "common"
+      );
+      await storageManager2.switchAccount(accountId);
+      return sendOAuthSuccessPage(res, {
+        provider: "onedrive",
+        providerName: "OneDrive",
+        frontendOrigin: routeConfig.frontendOrigin,
+        flowNonce: flow.flowNonce,
+        accountId
+      });
+    } catch (unexpected) {
+      console.error("OneDrive \u56DE\u8C03\u5904\u7406\u5931\u8D25:", unexpected);
+      return fail("\u6388\u6743\u5904\u7406\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5\u914D\u7F6E\u540E\u91CD\u8BD5");
+    }
   } catch (error) {
     try {
       sendOAuthFlowError(res, error);
     } catch (unexpected) {
-      console.error("OneDrive \u56DE\u8C03\u5904\u7406\u5931\u8D25:", unexpected);
+      console.error("OneDrive OAuth \u6D41\u7A0B\u6821\u9A8C\u5931\u8D25:", unexpected);
       res.status(500).send("\u6388\u6743\u5904\u7406\u51FA\u9519\uFF0C\u8BF7\u68C0\u67E5\u540E\u7AEF\u65E5\u5FD7\u3002");
     }
   }
@@ -20419,47 +21037,63 @@ router5.post("/config/google-drive/auth-url", requireAuth, async (req, res) => {
   }
 });
 router5.get("/google-drive/callback", async (req, res) => {
+  const fail = async (message, flow) => {
+    if (flow) {
+      const routeConfig = getOAuthRouteConfig("google_drive");
+      return sendOAuthFailurePage(res, {
+        provider: "google_drive",
+        providerName: "Google Drive",
+        frontendOrigin: routeConfig.frontendOrigin,
+        flowNonce: flow.flowNonce,
+        error: message
+      });
+    }
+    return res.status(400).type("text/plain").send(message);
+  };
   try {
     const { code, state, error } = req.query;
-    if (error) return res.type("text/plain").send(`\u6388\u6743\u5931\u8D25: ${String(error)}`);
-    if (!code || typeof code !== "string") return res.status(400).send("\u7F3A\u5C11\u6388\u6743\u7801 (code)");
-    if (!state || typeof state !== "string") return res.status(400).send("\u7F3A\u5C11 OAuth state");
+    if (!state || typeof state !== "string") return fail("\u7F3A\u5C11 OAuth state");
     const flow = await oauthFlowStore.consume({
       state,
       provider: "google_drive",
       authSessionToken: getOAuthSessionToken(req)
     });
+    if (error) return fail(`\u6388\u6743\u5931\u8D25\uFF1A${String(error)}`, flow);
+    if (!code || typeof code !== "string") return fail("\u6388\u6743\u5931\u8D25\uFF1A\u672A\u6536\u5230\u6388\u6743\u7801", flow);
     const { clientId, clientSecret, name = "", sharedDriveId = "" } = flow.config;
     if (typeof clientId !== "string" || !clientId || typeof clientSecret !== "string" || !clientSecret) {
-      return res.status(400).send("OAuth \u914D\u7F6E\u4FE1\u606F\u4E0D\u5B8C\u6574");
+      return fail("OAuth \u914D\u7F6E\u4FE1\u606F\u4E0D\u5B8C\u6574", flow);
     }
-    const { storageManager: storageManager2, GoogleDriveStorageProvider: GoogleDriveStorageProvider2 } = await Promise.resolve().then(() => (init_storage(), storage_exports));
-    const tokens = await GoogleDriveStorageProvider2.exchangeCodeForToken(clientId, clientSecret, flow.redirectUri, code);
-    if (!tokens.refresh_token) {
-      return res.status(400).send("\u6388\u6743\u5931\u8D25\uFF1A\u672A\u83B7\u5F97 Refresh Token\u3002\u8BF7\u5728 Google \u63A7\u5236\u53F0\u4E2D\u64A4\u9500\u6743\u9650\u540E\u91CD\u8BD5\u3002");
+    try {
+      const { storageManager: storageManager2, GoogleDriveStorageProvider: GoogleDriveStorageProvider2 } = await Promise.resolve().then(() => (init_storage(), storage_exports));
+      const tokens = await GoogleDriveStorageProvider2.exchangeCodeForToken(clientId, clientSecret, flow.redirectUri, code);
+      if (!tokens.refresh_token) return fail("\u6388\u6743\u5931\u8D25\uFF1A\u672A\u83B7\u5F97 Refresh Token\u3002\u8BF7\u5728 Google \u63A7\u5236\u53F0\u4E2D\u64A4\u9500\u6743\u9650\u540E\u91CD\u8BD5\u3002", flow);
+      const accountId = await storageManager2.addGoogleDriveAccount(
+        typeof name === "string" && name ? name : "Google Drive Account",
+        clientId,
+        clientSecret,
+        tokens.refresh_token,
+        flow.redirectUri,
+        typeof sharedDriveId === "string" ? sharedDriveId : ""
+      );
+      await storageManager2.switchAccount(accountId);
+      const routeConfig = getOAuthRouteConfig("google_drive");
+      return sendOAuthSuccessPage(res, {
+        provider: "google_drive",
+        providerName: "Google Drive",
+        frontendOrigin: routeConfig.frontendOrigin,
+        flowNonce: flow.flowNonce,
+        accountId
+      });
+    } catch (unexpected) {
+      console.error("Google Drive \u56DE\u8C03\u5904\u7406\u5931\u8D25:", unexpected);
+      return fail("\u6388\u6743\u5904\u7406\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5\u914D\u7F6E\u540E\u91CD\u8BD5", flow);
     }
-    const accountId = await storageManager2.addGoogleDriveAccount(
-      typeof name === "string" && name ? name : "Google Drive Account",
-      clientId,
-      clientSecret,
-      tokens.refresh_token,
-      flow.redirectUri,
-      typeof sharedDriveId === "string" ? sharedDriveId : ""
-    );
-    await storageManager2.switchAccount(accountId);
-    const routeConfig = getOAuthRouteConfig("google_drive");
-    sendOAuthSuccessPage(res, {
-      provider: "google_drive",
-      providerName: "Google Drive",
-      frontendOrigin: routeConfig.frontendOrigin,
-      flowNonce: flow.flowNonce,
-      accountId
-    });
   } catch (error) {
     try {
       sendOAuthFlowError(res, error);
     } catch (unexpected) {
-      console.error("Google Drive \u56DE\u8C03\u5904\u7406\u5931\u8D25:", unexpected);
+      console.error("Google Drive OAuth \u6D41\u7A0B\u6821\u9A8C\u5931\u8D25:", unexpected);
       res.status(500).send("\u6388\u6743\u5904\u7406\u51FA\u9519\uFF0C\u8BF7\u68C0\u67E5\u540E\u7AEF\u65E5\u5FD7\u3002");
     }
   }
@@ -20534,6 +21168,38 @@ router5.post("/config/webdav", requireAuth, async (req, res) => {
     sendStorageOperationError(res, error, "\u6DFB\u52A0 WebDAV \u914D\u7F6E\u5931\u8D25");
   }
 });
+router5.post("/config/openlist", requireAuth, async (req, res) => {
+  try {
+    const { name, baseUrl, rootPath = "/", username, password } = req.body || {};
+    if (!name || !baseUrl || !username || !password) {
+      return res.status(400).json({ error: "\u7F3A\u5C11\u5FC5\u8981\u53C2\u6570\uFF08\u540D\u79F0\u3001\u5730\u5740\u3001\u7528\u6237\u540D\u548C\u5BC6\u7801\uFF09" });
+    }
+    try {
+      await assertPublicStorageEndpoint(baseUrl);
+    } catch (error) {
+      return sendStorageEndpointValidationError(res, error);
+    }
+    const normalizedRoot = `/${String(rootPath || "/").replace(/\\/g, "/").replace(/^\/+|\/+$/g, "")}`.replace(/\/$/, "") || "/";
+    if (normalizedRoot.includes("..")) return res.status(400).json({ error: "\u6839\u76EE\u5F55\u4E0D\u80FD\u5305\u542B .." });
+    const { storageManager: storageManager2 } = await Promise.resolve().then(() => (init_storage(), storage_exports));
+    const accountId = await storageManager2.addOpenListAccount(
+      String(name).trim(),
+      String(baseUrl).trim(),
+      normalizedRoot,
+      String(username),
+      String(password)
+    );
+    res.json({ success: true, message: "OpenList \u539F\u751F\u5B58\u50A8\u8D26\u6237\u5DF2\u6DFB\u52A0", accountId });
+  } catch (error) {
+    const message = String(error?.message || "");
+    if (/OpenList 请求失败|OpenList 请求超时|OpenList 端点无法连接|OpenList 上传后文件大小校验失败|OpenList 写入测试|OpenList 未返回|OpenList 文件读取/.test(message)) {
+      res.status(422).json({ error: message, code: "STORAGE_PROBE_FAILED", provider: "openlist", retryable: true });
+      return;
+    }
+    console.error("\u6DFB\u52A0 OpenList \u914D\u7F6E\u5931\u8D25:", error);
+    res.status(500).json({ error: "\u6DFB\u52A0 OpenList \u914D\u7F6E\u5931\u8D25" });
+  }
+});
 router5.post("/switch", requireAuth, async (req, res) => {
   try {
     const { provider, accountId } = req.body;
@@ -20541,7 +21207,7 @@ router5.post("/switch", requireAuth, async (req, res) => {
     if (provider === "local") {
       await storageManager2.switchToLocal();
       return res.json({ success: true, message: "\u5DF2\u5207\u6362\u5230\u672C\u5730\u5B58\u50A8\u3002\u8BE5\u7CFB\u7EDF\u9ED8\u8BA4\u503C\u53EA\u5F71\u54CD\u540E\u7EED\u65B0\u4EFB\u52A1\uFF0C\u5DF2\u63D0\u4EA4\u4EFB\u52A1\u76EE\u6807\u4FDD\u6301\u4E0D\u53D8\u3002", scope: "global_default", inFlightTargetsPreserved: true });
-    } else if (provider === "onedrive" || provider === "aliyun_oss" || provider === "s3" || provider === "webdav" || provider === "google_drive") {
+    } else if (provider === "onedrive" || provider === "aliyun_oss" || provider === "s3" || provider === "webdav" || provider === "openlist" || provider === "google_drive") {
       if (accountId) {
         await storageManager2.switchAccount(accountId);
         return res.json({ success: true, message: `\u5DF2\u5207\u6362 ${provider} \u8D26\u6237\u3002\u8BE5\u7CFB\u7EDF\u9ED8\u8BA4\u503C\u53EA\u5F71\u54CD\u540E\u7EED\u65B0\u4EFB\u52A1\uFF0C\u5DF2\u63D0\u4EA4\u4EFB\u52A1\u76EE\u6807\u4FDD\u6301\u4E0D\u53D8\u3002`, scope: "global_default", inFlightTargetsPreserved: true });
@@ -20678,10 +21344,10 @@ var storage_default = router5;
 // src/routes/chunkedUpload.ts
 init_db();
 import { Router as Router6 } from "express";
-import crypto27 from "node:crypto";
-import fs16 from "node:fs";
+import crypto28 from "node:crypto";
+import fs17 from "node:fs";
 import fsPromises2 from "node:fs/promises";
-import path20 from "node:path";
+import path21 from "node:path";
 import { pipeline as pipeline3 } from "node:stream/promises";
 import { rateLimit as rateLimit4 } from "express-rate-limit";
 import checkDiskSpaceModule3 from "check-disk-space";
@@ -20689,7 +21355,7 @@ init_storage();
 init_storageAccountLifecycle();
 
 // src/services/chunkUploadReconciliation.ts
-import crypto25 from "node:crypto";
+import crypto26 from "node:crypto";
 async function ownsChunkReconciliationLease(db, operationId, leaseToken) {
   const result = await db.query(
     `UPDATE chunk_upload_reconciliations
@@ -20788,7 +21454,7 @@ async function resolveClaimedChunkReconciliation(input) {
   return resolved ? "resolved" : "pending";
 }
 async function beginChunkCompletionReconciliation(db, input) {
-  const operationId = crypto25.randomUUID();
+  const operationId = crypto26.randomUUID();
   const result = await db.query(
     `INSERT INTO chunk_upload_reconciliations
          (operation_id, upload_id, completion_token, provider, account_id, object_state, index_state, reason, status, created_at, updated_at)
@@ -20878,10 +21544,10 @@ async function compensateChunkCompletionFailure(input) {
 }
 
 // src/services/chunkUploadSessions.ts
-import crypto26 from "node:crypto";
-import fs15 from "node:fs";
+import crypto27 from "node:crypto";
+import fs16 from "node:fs";
 import fsPromises from "node:fs/promises";
-import path19 from "node:path";
+import path20 from "node:path";
 import { pipeline as pipeline2 } from "node:stream/promises";
 var ChunkUploadProtocolError = class extends Error {
   constructor(name, message) {
@@ -20890,8 +21556,8 @@ var ChunkUploadProtocolError = class extends Error {
   }
 };
 async function writeChunkAtomically(input) {
-  await fsPromises.mkdir(path19.dirname(input.finalPath), { recursive: true });
-  const committedPath = `${input.finalPath}.${crypto26.randomUUID()}.chunk`;
+  await fsPromises.mkdir(path20.dirname(input.finalPath), { recursive: true });
+  const committedPath = `${input.finalPath}.${crypto27.randomUUID()}.chunk`;
   const temporaryPath = `${committedPath}.part`;
   const lockPath = `${input.finalPath}.lock`;
   let lockHandle;
@@ -20901,7 +21567,7 @@ async function writeChunkAtomically(input) {
     if (error?.code === "EEXIST") throw new ChunkUploadProtocolError("ChunkWriteBusyError", "\u540C\u4E00\u5206\u5757\u6B63\u5728\u5199\u5165\uFF0C\u8BF7\u7A0D\u540E\u91CD\u8BD5");
     throw error;
   }
-  const hash2 = crypto26.createHash("sha256");
+  const hash2 = crypto27.createHash("sha256");
   let size = 0;
   const counter = new (await import("node:stream")).Transform({
     transform(chunk, _encoding, callback) {
@@ -20912,7 +21578,7 @@ async function writeChunkAtomically(input) {
     }
   });
   try {
-    await pipeline2(input.stream, counter, fs15.createWriteStream(temporaryPath, { flags: "wx" }));
+    await pipeline2(input.stream, counter, fs16.createWriteStream(temporaryPath, { flags: "wx" }));
     if (size !== input.expectedSize) throw new ChunkUploadProtocolError("ChunkSizeMismatchError", "\u5206\u5757\u5927\u5C0F\u4E0D\u5339\u914D");
     const sha2562 = hash2.digest("hex");
     if (sha2562 !== input.expectedSha256.toLowerCase()) throw new ChunkUploadProtocolError("ChunkHashMismatchError", "\u5206\u5757\u54C8\u5E0C\u4E0D\u5339\u914D");
@@ -20927,15 +21593,15 @@ async function writeChunkAtomically(input) {
   }
 }
 async function verifyChunkIntegrity(chunk, expectedDirectory, maxChunkBytes) {
-  const chunkPath = path19.resolve(chunk.path);
-  const directory = path19.resolve(expectedDirectory);
-  if (path19.dirname(chunkPath) !== directory) throw new ChunkUploadProtocolError("ChunkPathError", `\u5206\u5757 ${chunk.index} \u8DEF\u5F84\u65E0\u6548`);
+  const chunkPath = path20.resolve(chunk.path);
+  const directory = path20.resolve(expectedDirectory);
+  if (path20.dirname(chunkPath) !== directory) throw new ChunkUploadProtocolError("ChunkPathError", `\u5206\u5757 ${chunk.index} \u8DEF\u5F84\u65E0\u6548`);
   const stat = await fsPromises.stat(chunkPath);
   if (stat.size !== chunk.size || stat.size < 1 || stat.size > maxChunkBytes) {
     throw new ChunkUploadProtocolError("ChunkSizeMismatchError", `\u5206\u5757 ${chunk.index} \u5927\u5C0F\u65E0\u6548`);
   }
-  const hash2 = crypto26.createHash("sha256");
-  await pipeline2(fs15.createReadStream(chunkPath), new (await import("node:stream")).Writable({
+  const hash2 = crypto27.createHash("sha256");
+  await pipeline2(fs16.createReadStream(chunkPath), new (await import("node:stream")).Writable({
     write(buffer, _encoding, callback) {
       hash2.update(buffer);
       callback();
@@ -21431,16 +22097,16 @@ var DISK_RESERVE_BYTES = Math.max(1024 ** 3, (parseInt(process.env.CHUNK_DISK_RE
 var MAX_TOTAL_CHUNKS = Math.max(1, parseInt(process.env.MAX_TOTAL_CHUNKS || "50000", 10) || 5e4);
 var SESSION_TTL_MS = Math.max(60 * 60 * 1e3, parseInt(process.env.CHUNK_SESSION_TTL_MS || String(24 * 60 * 60 * 1e3), 10));
 var COMPLETION_LEASE_MS = Math.max(6e4, parseInt(process.env.CHUNK_COMPLETION_LEASE_MS || String(30 * 60 * 1e3), 10));
-[UPLOAD_DIR7, THUMBNAIL_DIR6, CHUNK_DIR].forEach((dir) => fs16.mkdirSync(dir, { recursive: true }));
+[UPLOAD_DIR7, THUMBNAIL_DIR6, CHUNK_DIR].forEach((dir) => fs17.mkdirSync(dir, { recursive: true }));
 var chunkRepository = new PostgresChunkUploadSessionRepository(pool);
 var chunkStore = new ChunkUploadSessionStore(chunkRepository, {
   maxTotalBytes: MAX_TOTAL_BYTES,
   globalBudgetBytes: GLOBAL_BUDGET_BYTES,
   diskReserveBytes: DISK_RESERVE_BYTES,
-  getDiskFreeBytes: async () => (await checkDiskSpace3(path20.resolve(CHUNK_DIR))).free
+  getDiskFreeBytes: async () => (await checkDiskSpace3(path21.resolve(CHUNK_DIR))).free
 });
 var runChunkMaintenance = async () => {
-  const reconciliationLease = crypto27.randomUUID();
+  const reconciliationLease = crypto28.randomUUID();
   const pending = await claimChunkReconciliations(pool, reconciliationLease, 100);
   for (const row of pending) {
     const target = storageManager.getTarget(row.provider, row.accountId);
@@ -21453,7 +22119,7 @@ var runChunkMaintenance = async () => {
   }
   const expiredIds = await chunkRepository.deleteExpiredSessions(100);
   await Promise.all(expiredIds.map(
-    (uploadId) => fsPromises2.rm(path20.join(CHUNK_DIR, uploadId), { recursive: true, force: true }).catch((error) => console.error(`\u6E05\u7406\u8FC7\u671F\u5206\u5757\u76EE\u5F55\u5931\u8D25: ${uploadId}`, error))
+    (uploadId) => fsPromises2.rm(path21.join(CHUNK_DIR, uploadId), { recursive: true, force: true }).catch((error) => console.error(`\u6E05\u7406\u8FC7\u671F\u5206\u5757\u76EE\u5F55\u5931\u8D25: ${uploadId}`, error))
   ));
   await chunkRepository.recoverExpiredCompletions(100);
 };
@@ -21474,7 +22140,7 @@ function ownerId(req) {
   return stableWebAdminPrincipalId();
 }
 function stableWebAdminPrincipalId() {
-  return crypto27.createHash("sha256").update("tg-vault:web-admin:v1").digest("hex");
+  return crypto28.createHash("sha256").update("tg-vault:web-admin:v1").digest("hex");
 }
 function decodeFilename2(filename) {
   try {
@@ -21490,7 +22156,7 @@ function decodeFilename2(filename) {
   return filename;
 }
 function safeChunkPath(uploadId, chunkIndex) {
-  return path20.join(path20.resolve(CHUNK_DIR), uploadId, `chunk_${chunkIndex}`);
+  return path21.join(path21.resolve(CHUNK_DIR), uploadId, `chunk_${chunkIndex}`);
 }
 function getFileType2(mimeType) {
   if (mimeType.startsWith("image/")) return "image";
@@ -21550,7 +22216,7 @@ router6.post("/init", async (req, res) => {
     }
     const now = /* @__PURE__ */ new Date();
     const session = {
-      uploadId: crypto27.randomUUID(),
+      uploadId: crypto28.randomUUID(),
       ownerId: ownerId(req),
       filename: decodeFilename2(filename).slice(0, 255),
       mimeType: mimeType.slice(0, 100),
@@ -21569,7 +22235,7 @@ router6.post("/init", async (req, res) => {
       createdAt: now,
       updatedAt: now
     };
-    uploadDirectory = path20.join(CHUNK_DIR, session.uploadId);
+    uploadDirectory = path21.join(CHUNK_DIR, session.uploadId);
     await fsPromises2.mkdir(uploadDirectory, { recursive: true });
     await chunkStore.reserve(session);
     res.json({
@@ -21638,17 +22304,17 @@ router6.post("/chunk", async (req, res) => {
   }
 });
 async function mergeChunks(uploadId, chunks, targetPath, expectedBytes) {
-  const temporary = `${targetPath}.${crypto27.randomUUID()}.part`;
-  await fsPromises2.mkdir(path20.dirname(targetPath), { recursive: true });
-  const output = fs16.createWriteStream(temporary, { flags: "wx" });
+  const temporary = `${targetPath}.${crypto28.randomUUID()}.part`;
+  await fsPromises2.mkdir(path21.dirname(targetPath), { recursive: true });
+  const output = fs17.createWriteStream(temporary, { flags: "wx" });
   try {
     if (chunks.length === 0) throw new Error("\u5206\u5757\u4E0D\u5B8C\u6574");
     for (let index = 0; index < chunks.length; index++) {
       const chunk = chunks[index];
-      const expectedDirectory = path20.dirname(path20.resolve(safeChunkPath(uploadId, index)));
+      const expectedDirectory = path21.dirname(path21.resolve(safeChunkPath(uploadId, index)));
       if (chunk.index !== index) throw new Error(`\u5206\u5757 ${index} \u5143\u6570\u636E\u65E0\u6548`);
       const verifiedPath = await verifyChunkIntegrity(chunk, expectedDirectory, MAX_CHUNK_BYTES);
-      await pipeline3(fs16.createReadStream(verifiedPath), output, { end: false });
+      await pipeline3(fs17.createReadStream(verifiedPath), output, { end: false });
     }
     await new Promise((resolve, reject) => {
       output.end(resolve);
@@ -21697,7 +22363,7 @@ router6.post("/complete", async (req, res) => {
     if (current3.status === "failed") {
       return res.status(409).json({ error: "\u4E0A\u6B21\u5B8C\u6210\u5931\u8D25\uFF0C\u8BF7\u5148\u91CD\u8BD5\u4E0A\u4F20\u4F1A\u8BDD", retryable: true, lastError: current3.lastError });
     }
-    token = crypto27.randomUUID();
+    token = crypto28.randomUUID();
     const claim = await chunkStore.claimCompletion(uploadId, owner, token, new Date(Date.now() + COMPLETION_LEASE_MS));
     if (!claim) return res.status(409).json({ error: "\u4E0A\u4F20\u672A\u5B8C\u6574\u3001\u5DF2\u7531\u5176\u4ED6\u8BF7\u6C42\u5904\u7406\u6216\u72B6\u6001\u4E0D\u53EF\u5B8C\u6210" });
     completionHeartbeat = setInterval(() => {
@@ -21719,13 +22385,13 @@ router6.post("/complete", async (req, res) => {
       fileName: session.filename
     }, await getStoragePathRules());
     const storedName = await getUniqueStoredName(session.filename, storageFolder, session.targetAccountId);
-    tempMergedPath = path20.join(path20.resolve(UPLOAD_DIR7), `${uploadId}-${storedName}`);
+    tempMergedPath = path21.join(path21.resolve(UPLOAD_DIR7), `${uploadId}-${storedName}`);
     await mergeChunks(uploadId, claim.chunks, tempMergedPath, session.totalSize);
     const duplicate = await getDuplicateMode() === "skip" ? await findDuplicateFile(session.filename, storageFolder, session.totalSize, session.targetAccountId) : null;
     if (duplicate) {
       await fsPromises2.rm(tempMergedPath, { force: true });
       if (!await chunkStore.complete(uploadId, owner, token, duplicate.id)) throw new Error("\u5B8C\u6210\u79DF\u7EA6\u5DF2\u5931\u6548");
-      await fsPromises2.rm(path20.join(CHUNK_DIR, uploadId), { recursive: true, force: true }).catch((error) => console.error("\u6E05\u7406\u5DF2\u5B8C\u6210\u91CD\u590D\u4E0A\u4F20\u7684\u5206\u5757\u5931\u8D25:", error));
+      await fsPromises2.rm(path21.join(CHUNK_DIR, uploadId), { recursive: true, force: true }).catch((error) => console.error("\u6E05\u7406\u5DF2\u5B8C\u6210\u91CD\u590D\u4E0A\u4F20\u7684\u5206\u5757\u5931\u8D25:", error));
       return res.json({
         success: true,
         skipped: true,
@@ -21745,14 +22411,14 @@ router6.post("/complete", async (req, res) => {
     let height = null;
     if (session.mimeType.startsWith("image/") || session.mimeType.startsWith("video/")) {
       const thumbnail = await generateThumbnail(tempMergedPath, storedName, session.mimeType).catch(() => null);
-      thumbnailPath = thumbnail ? path20.basename(thumbnail) : null;
+      thumbnailPath = thumbnail ? path21.basename(thumbnail) : null;
       const dimensions = await getImageDimensions(tempMergedPath, session.mimeType).catch(() => ({ width: null, height: null }));
       width = dimensions.width;
       height = dimensions.height;
     }
     if (session.mimeType.startsWith("image/")) {
       const preview = await generateMediaPreview(tempMergedPath, storedName, session.mimeType).catch(() => null);
-      previewPath = preview ? path20.basename(preview) : null;
+      previewPath = preview ? path21.basename(preview) : null;
     }
     const type = getFileType2(session.mimeType);
     const operationId = await beginChunkCompletionReconciliation(pool, {
@@ -21832,11 +22498,11 @@ router6.post("/complete", async (req, res) => {
       await compensateAfterCompletionFailure(completionError);
       throw completionError;
     }
-    await fsPromises2.rm(path20.join(CHUNK_DIR, uploadId), { recursive: true, force: true }).catch((error) => console.error("\u6E05\u7406\u5DF2\u5B8C\u6210\u4E0A\u4F20\u7684\u5206\u5757\u5931\u8D25:", error));
+    await fsPromises2.rm(path21.join(CHUNK_DIR, uploadId), { recursive: true, force: true }).catch((error) => console.error("\u6E05\u7406\u5DF2\u5B8C\u6210\u4E0A\u4F20\u7684\u5206\u5757\u5931\u8D25:", error));
     if (type === "video") {
       const previewSource = target.provider.name === "local" ? storedPath : tempMergedPath;
       void generateMediaPreview(previewSource, storedName, session.mimeType).then(async (preview) => {
-        if (preview) await query("UPDATE files SET preview_path = $1 WHERE id = $2", [path20.basename(preview), file.id]);
+        if (preview) await query("UPDATE files SET preview_path = $1 WHERE id = $2", [path21.basename(preview), file.id]);
       }).catch((error) => console.error("\u5F02\u6B65\u751F\u6210\u89C6\u9891\u9884\u89C8\u5931\u8D25:", error)).finally(async () => {
         if (target.provider.name !== "local") {
           await fsPromises2.rm(tempMergedPath, { force: true }).catch((error) => console.error("\u6E05\u7406\u5408\u5E76\u4E34\u65F6\u6587\u4EF6\u5931\u8D25:", error));
@@ -21916,7 +22582,7 @@ router6.delete("/:uploadId", async (req, res) => {
   try {
     const result = await chunkStore.cancel(req.params.uploadId, ownerId(req));
     if (result === "busy") return res.status(409).json({ error: "\u4E0A\u4F20\u6B63\u5728\u5B8C\u6210\uFF0C\u6682\u65F6\u4E0D\u80FD\u53D6\u6D88", status: result });
-    if (result === "cancelled") await fsPromises2.rm(path20.join(CHUNK_DIR, req.params.uploadId), { recursive: true, force: true });
+    if (result === "cancelled") await fsPromises2.rm(path21.join(CHUNK_DIR, req.params.uploadId), { recursive: true, force: true });
     res.status(result === "not_found" ? 404 : 200).json({ success: result !== "not_found", status: result });
   } catch (error) {
     sendProtocolError(res, error);
@@ -21950,8 +22616,8 @@ var chunkedUpload_default = router6;
 // src/routes/tasks.ts
 init_db();
 import { Router as Router7 } from "express";
-import fs17 from "node:fs/promises";
-import path21 from "node:path";
+import fs18 from "node:fs/promises";
+import path22 from "node:path";
 
 // src/services/taskCenterDismissals.ts
 init_db();
@@ -21983,7 +22649,7 @@ async function saveTaskCenterDismissals(items) {
 }
 
 // src/routes/tasks.ts
-import crypto28 from "node:crypto";
+import crypto29 from "node:crypto";
 var router7 = Router7();
 var CHUNK_DIR2 = process.env.CHUNK_DIR || "./data/chunks";
 async function collectUnifiedTasks(limit, accountId) {
@@ -22167,13 +22833,17 @@ router7.post("/dismissals/prepare", requireAuth, async (req, res) => {
     if (!authToken) return res.status(401).json({ error: "\u672A\u8BA4\u8BC1" });
     const source = String(req.body?.source || "").trim();
     const status = String(req.body?.status || "").trim();
+    const accountId = String(req.body?.accountId || "").trim();
+    if (accountId && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(accountId)) {
+      return res.status(400).json({ error: "\u65E0\u6548\u7684\u5B58\u50A8\u8D26\u6237 ID" });
+    }
     const requested = Array.isArray(req.body?.tasks) ? req.body.tasks : [];
     const requestedKeys = new Set(requested.map((item) => `${String(item.sourceType)}:${String(item.id)}`));
-    const all = filterDismissedTasks(await collectUnifiedTasks(500), await loadTaskCenterDismissals());
+    const all = filterDismissedTasks(await collectUnifiedTasks(500, accountId || void 0), await loadTaskCenterDismissals());
     const selected = all.filter((task) => isTaskDismissible(task)).filter((task) => requestedKeys.size > 0 ? requestedKeys.has(`${task.sourceType}:${task.id}`) : (!source || task.sourceType === source) && (!status || task.status === status)).map((task) => ({ sourceType: task.sourceType, id: task.id, status: task.status, title: task.title, updatedAt: task.updatedAt }));
     if (selected.length === 0) return res.status(409).json({ error: "\u5F53\u524D\u8303\u56F4\u6CA1\u6709\u53EF\u5220\u9664\u7684\u7EC8\u6001\u8BB0\u5F55" });
     const context = JSON.stringify(selected);
-    const snapshotId = crypto28.createHash("sha256").update(context).digest("hex");
+    const snapshotId = crypto29.createHash("sha256").update(context).digest("hex");
     const bySource = Object.fromEntries([...new Set(selected.map((item) => item.sourceType))].map((key) => [key, selected.filter((item) => item.sourceType === key).length]));
     const byStatus = Object.fromEntries([...new Set(selected.map((item) => item.status))].map((key) => [key, selected.filter((item) => item.status === key).length]));
     res.json({
@@ -22328,7 +22998,7 @@ router7.post("/:sourceType/:id/:action", requireAuth, async (req, res) => {
         [id]
       );
       if ((result.rowCount || 0) === 0) return res.status(409).json({ error: "\u4E0A\u4F20\u6B63\u5728\u5B8C\u6210\u6216\u5DF2\u7ED3\u675F\uFF0C\u4E0D\u80FD\u53D6\u6D88" });
-      await fs17.rm(path21.join(CHUNK_DIR2, id), { recursive: true, force: true });
+      await fs18.rm(path22.join(CHUNK_DIR2, id), { recursive: true, force: true });
       return res.json({ success: true });
     }
     return res.status(400).json({ error: "\u8BE5\u4EFB\u52A1\u7C7B\u578B\u6682\u4E0D\u652F\u6301\u63A7\u5236" });
@@ -22339,11 +23009,45 @@ router7.post("/:sourceType/:id/:action", requireAuth, async (req, res) => {
 });
 var tasks_default = router7;
 
+// src/routes/system.ts
+import { Router as Router8 } from "express";
+import { rateLimit as rateLimit5 } from "express-rate-limit";
+function createSystemRouter(checker) {
+  const router8 = Router8();
+  const manualCheckLimiter = rateLimit5({
+    windowMs: 6e4,
+    max: 3,
+    message: { error: "\u7248\u672C\u68C0\u67E5\u8BF7\u6C42\u8FC7\u4E8E\u9891\u7E41\uFF0C\u8BF7\u7A0D\u540E\u518D\u8BD5" },
+    standardHeaders: true,
+    legacyHeaders: false
+  });
+  const noStore2 = (res) => res.setHeader("Cache-Control", "no-store");
+  router8.get("/update-status", requireAuth, async (_req, res) => {
+    noStore2(res);
+    try {
+      res.json(await checker.getStatus());
+    } catch (error) {
+      console.error("\u8BFB\u53D6\u7248\u672C\u72B6\u6001\u5931\u8D25:", error);
+      res.status(500).json({ error: "\u8BFB\u53D6\u7248\u672C\u72B6\u6001\u5931\u8D25" });
+    }
+  });
+  router8.post("/update-check", requireAuth, manualCheckLimiter, async (_req, res) => {
+    noStore2(res);
+    try {
+      res.json(await checker.checkNow());
+    } catch (error) {
+      console.error("\u624B\u52A8\u68C0\u67E5\u7248\u672C\u5931\u8D25:", error);
+      res.status(500).json({ error: "\u68C0\u67E5\u7248\u672C\u5931\u8D25" });
+    }
+  });
+  return router8;
+}
+
 // src/index.ts
 init_authSettings();
 init_db();
 import helmet from "helmet";
-import crypto29 from "node:crypto";
+import crypto30 from "node:crypto";
 
 // src/utils/runtimeConfig.ts
 var NUMBER_SPECS = [
@@ -22502,6 +23206,287 @@ function logRuntimeConfigSummary(summary) {
   console.log(`[config] effective=${JSON.stringify(summary)}`);
 }
 
+// package.json
+var package_default = {
+  name: "tg-vault-backend",
+  version: "2.1.1",
+  type: "module",
+  scripts: {
+    dev: "tsx watch src/index.ts",
+    test: "tsx --test src/**/*.test.ts",
+    "test:queue": "tsx --test src/services/downloadTaskQueue.test.ts",
+    typecheck: "tsc --noEmit --pretty false",
+    build: "esbuild src/index.ts --bundle --platform=node --format=esm --outfile=dist/index.js --packages=external && esbuild src/scripts/login_telegram_user.ts --bundle --platform=node --format=esm --outfile=dist/scripts/login_telegram_user.js --packages=external && node scripts/sync_dist_schema.mjs && node scripts/sync_dist_schema.mjs --check",
+    start: "node dist/index.js",
+    "login:telegram-user": "node dist/scripts/login_telegram_user.js",
+    "schema:generate-init": "python3 scripts/generate_init_sql.py",
+    "schema:check": "python3 scripts/generate_init_sql.py --check",
+    "schema:check-dist": "node scripts/sync_dist_schema.mjs --check"
+  },
+  dependencies: {
+    "@aws-sdk/client-s3": "^3.1075.0",
+    "@aws-sdk/s3-request-presigner": "^3.1075.0",
+    "ali-oss": "^6.23.0",
+    axios: "^1.18.1",
+    "check-disk-space": "^3.4.0",
+    cors: "^2.8.5",
+    dotenv: "^16.4.7",
+    express: "^4.22.2",
+    "express-rate-limit": "^8.5.2",
+    "fluent-ffmpeg": "^2.1.3",
+    googleapis: "^171.4.0",
+    helmet: "^8.2.0",
+    input: "^1.0.1",
+    multer: "^1.4.5-lts.1",
+    otplib: "^13.4.1",
+    pg: "^8.22.0",
+    qrcode: "^1.5.4",
+    sharp: "^0.35.3",
+    telegram: "^2.26.22",
+    "ua-parser-js": "^2.0.10",
+    undici: "^7.29.0",
+    uuid: "^11.1.1",
+    webdav: "^5.10.0"
+  },
+  devDependencies: {
+    "@types/ali-oss": "^6.23.3",
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.25",
+    "@types/fluent-ffmpeg": "^2.1.27",
+    "@types/multer": "^1.4.12",
+    "@types/node": "^22.10.5",
+    "@types/pg": "^8.11.10",
+    "@types/qrcode": "^1.5.6",
+    "@types/ua-parser-js": "^0.7.39",
+    "@types/uuid": "^10.0.0",
+    esbuild: "^0.28.1",
+    tsx: "^4.22.4",
+    typescript: "^6.0.3"
+  }
+};
+
+// src/services/updateChecker.ts
+init_db();
+var DEFAULT_UPDATE_REPOSITORY = "hicocos/tg-vault";
+var UPDATE_STATE_KEY = "update_checker_state_v1";
+var MAX_RELEASE_NOTES_LENGTH = 600;
+var REQUEST_TIMEOUT_MS = 5e3;
+function normalizeVersion(input) {
+  const match = String(input || "").trim().match(/^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/);
+  return match ? `${match[1]}.${match[2]}.${match[3]}` : null;
+}
+function compareVersions(left, right) {
+  const a = normalizeVersion(left);
+  const b = normalizeVersion(right);
+  if (!a || !b) throw new Error("invalid stable semantic version");
+  const leftParts = a.split(".").map(Number);
+  const rightParts = b.split(".").map(Number);
+  for (let index = 0; index < 3; index += 1) {
+    if (leftParts[index] > rightParts[index]) return 1;
+    if (leftParts[index] < rightParts[index]) return -1;
+  }
+  return 0;
+}
+function createPostgresUpdateCheckStore(runQuery = query) {
+  return {
+    async loadState() {
+      const result = await runQuery("SELECT value FROM system_settings WHERE key = $1", [UPDATE_STATE_KEY]);
+      if (!result.rows[0]?.value) return null;
+      try {
+        const parsed = JSON.parse(String(result.rows[0].value));
+        return {
+          etag: typeof parsed.etag === "string" ? parsed.etag : null,
+          checkedAt: typeof parsed.checkedAt === "string" ? parsed.checkedAt : null,
+          release: parsed.release && typeof parsed.release === "object" ? parsed.release : null
+        };
+      } catch {
+        return null;
+      }
+    },
+    async saveState(state) {
+      await runQuery(
+        `INSERT INTO system_settings (key, value) VALUES ($1, $2)
+                 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+        [UPDATE_STATE_KEY, JSON.stringify(state)]
+      );
+    },
+    async listEligibleRecipients() {
+      const { getConfiguredTelegramAllowedUsers: getConfiguredTelegramAllowedUsers2 } = await Promise.resolve().then(() => (init_authSettings(), authSettings_exports));
+      const allowed = await getConfiguredTelegramAllowedUsers2();
+      if (allowed.length === 0) return [];
+      const result = await runQuery(
+        `SELECT user_id FROM telegram_auth
+                 WHERE user_id = ANY($1::bigint[])
+                 ORDER BY user_id`,
+        [allowed]
+      );
+      return result.rows.map((row) => Number(row.user_id)).filter((id) => Number.isSafeInteger(id) && id > 0);
+    },
+    async claimDelivery(version2, recipientId) {
+      const result = await runQuery(
+        `INSERT INTO update_notification_deliveries (version, channel, recipient_id, status, attempt_count, last_attempt_at, last_error)
+                 VALUES ($1, 'telegram', $2, 'sending', 1, NOW(), NULL)
+                 ON CONFLICT (version, channel, recipient_id) DO UPDATE SET
+                    status = 'sending', attempt_count = update_notification_deliveries.attempt_count + 1,
+                    last_attempt_at = NOW(), last_error = NULL
+                 WHERE update_notification_deliveries.status = 'failed'
+                    OR (update_notification_deliveries.status = 'sending' AND update_notification_deliveries.last_attempt_at < NOW() - INTERVAL '10 minutes')
+                 RETURNING recipient_id`,
+        [version2, String(recipientId)]
+      );
+      return Boolean(result.rowCount);
+    },
+    async markDeliverySucceeded(version2, recipientId) {
+      await runQuery(
+        `UPDATE update_notification_deliveries
+                 SET status = 'delivered', delivered_at = NOW(), last_error = NULL
+                 WHERE version = $1 AND channel = 'telegram' AND recipient_id = $2`,
+        [version2, String(recipientId)]
+      );
+    },
+    async markDeliveryFailed(version2, recipientId, error) {
+      await runQuery(
+        `UPDATE update_notification_deliveries
+                 SET status = 'failed', last_error = $3
+                 WHERE version = $1 AND channel = 'telegram' AND recipient_id = $2`,
+        [version2, String(recipientId), error.slice(0, 500)]
+      );
+    }
+  };
+}
+function buildStatus(currentVersion, enabled, state, stale, error) {
+  const release = state?.release || null;
+  return {
+    enabled,
+    currentVersion,
+    latestVersion: release?.version || null,
+    updateAvailable: Boolean(release && compareVersions(release.version, currentVersion) > 0),
+    releaseName: release?.name || null,
+    releaseUrl: release?.url || null,
+    publishedAt: release?.publishedAt || null,
+    checkedAt: state?.checkedAt || null,
+    stale,
+    error
+  };
+}
+function parseRelease(payload) {
+  if (!payload || payload.draft === true || payload.prerelease === true) return null;
+  const version2 = normalizeVersion(payload.tag_name);
+  const url = typeof payload.html_url === "string" && /^https:\/\/github\.com\//.test(payload.html_url) ? payload.html_url : null;
+  if (!version2 || !url) return null;
+  return {
+    version: version2,
+    tag: String(payload.tag_name),
+    name: typeof payload.name === "string" && payload.name.trim() ? payload.name.trim().slice(0, 160) : `TG Vault v${version2}`,
+    url,
+    publishedAt: typeof payload.published_at === "string" ? payload.published_at : null,
+    notes: typeof payload.body === "string" && payload.body.trim() ? payload.body.trim().slice(0, MAX_RELEASE_NOTES_LENGTH) : null
+  };
+}
+function botMessage(currentVersion, release) {
+  const published = release.publishedAt ? `
+\u53D1\u5E03\u65F6\u95F4\uFF1A${release.publishedAt.slice(0, 10)}` : "";
+  const notes = release.notes ? `
+
+${release.notes}` : "";
+  return `\u{1F195} **TG Vault \u65B0\u7248\u672C\u5DF2\u53D1\u5E03**
+
+\u5F53\u524D\u7248\u672C\uFF1Av${currentVersion}
+\u6700\u65B0\u7248\u672C\uFF1Av${release.version}${published}${notes}
+
+\u67E5\u770B\u53D1\u5E03\u8BF4\u660E\uFF1A
+${release.url}`;
+}
+function createUpdateChecker(options) {
+  const currentVersion = normalizeVersion(options.currentVersion);
+  if (!currentVersion) throw new Error(`invalid current version: ${options.currentVersion}`);
+  const repository = options.repository || DEFAULT_UPDATE_REPOSITORY;
+  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) throw new Error("invalid GitHub repository");
+  const enabled = options.enabled ?? true;
+  const store = options.store || createPostgresUpdateCheckStore();
+  const request = options.fetch || globalThis.fetch;
+  const now = options.now || (() => /* @__PURE__ */ new Date());
+  let transientError = null;
+  let inFlight = null;
+  const getStatus = async () => buildStatus(currentVersion, enabled, await store.loadState(), Boolean(transientError), transientError);
+  const deliverPendingBotNotifications = async () => {
+    if (!enabled || !options.sendBotMessage) return 0;
+    const state = await store.loadState();
+    if (!state?.release || compareVersions(state.release.version, currentVersion) <= 0) return 0;
+    let delivered = 0;
+    for (const recipient of await store.listEligibleRecipients()) {
+      if (!await store.claimDelivery(state.release.version, String(recipient))) continue;
+      try {
+        await options.sendBotMessage(recipient, botMessage(currentVersion, state.release));
+        await store.markDeliverySucceeded(state.release.version, String(recipient));
+        delivered += 1;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        await store.markDeliveryFailed(state.release.version, String(recipient), message);
+      }
+    }
+    return delivered;
+  };
+  const runCheck = async () => {
+    if (!enabled) return getStatus();
+    const previous = await store.loadState();
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+      timeout.unref?.();
+      let response;
+      try {
+        response = await request(`https://api.github.com/repos/${repository}/releases/latest`, {
+          signal: controller.signal,
+          headers: {
+            Accept: "application/vnd.github+json",
+            "User-Agent": `tg-vault/${currentVersion}`,
+            ...previous?.etag ? { "If-None-Match": previous.etag } : {}
+          }
+        });
+      } finally {
+        clearTimeout(timeout);
+      }
+      const checkedAt = now().toISOString();
+      let stateAfterCheck;
+      if (response.status === 304 && previous?.release) {
+        stateAfterCheck = { ...previous, checkedAt };
+      } else {
+        if (!response.ok) throw new Error(`GitHub returned ${response.status}`);
+        const release = parseRelease(await response.json());
+        if (!release) throw new Error("latest release is not a valid stable release");
+        stateAfterCheck = { etag: response.headers.get("etag"), checkedAt, release };
+      }
+      await store.saveState(stateAfterCheck);
+      transientError = null;
+      const status = buildStatus(currentVersion, enabled, stateAfterCheck, false, null);
+      await deliverPendingBotNotifications().catch((error) => {
+        console.warn("\u7248\u672C\u901A\u77E5\u6295\u9012\u5931\u8D25:", error instanceof Error ? error.message : String(error));
+      });
+      return status;
+    } catch (error) {
+      console.warn("\u7248\u672C\u68C0\u67E5\u5931\u8D25:", error instanceof Error ? error.message : String(error));
+      transientError = "\u6682\u65F6\u65E0\u6CD5\u68C0\u67E5\u65B0\u7248\u672C\uFF0C\u7EE7\u7EED\u663E\u793A\u4E0A\u6B21\u6210\u529F\u7ED3\u679C";
+      return getStatus();
+    }
+  };
+  return {
+    getStatus,
+    checkNow() {
+      if (!inFlight) inFlight = runCheck().finally(() => {
+        inFlight = null;
+      });
+      return inFlight;
+    },
+    deliverPendingBotNotifications
+  };
+}
+
+// src/services/appVersion.ts
+var packageVersion = normalizeVersion(package_default.version);
+if (!packageVersion) throw new Error(`backend/package.json contains an invalid release version: ${package_default.version}`);
+var APP_VERSION = packageVersion;
+
 // src/index.ts
 dotenv3.config();
 var runtimeConfigSummary = validateRuntimeConfig();
@@ -22509,24 +23494,32 @@ logRuntimeConfigSummary(runtimeConfigSummary);
 var app = express();
 app.set("trust proxy", process.env.TRUST_PROXY || "loopback");
 var PORT = process.env.PORT || 51947;
+var updateCheckEnabled = !/^(0|false|no|off)$/i.test(process.env.UPDATE_CHECK_ENABLED || "true");
+var updateChecker = createUpdateChecker({
+  currentVersion: APP_VERSION,
+  repository: process.env.UPDATE_CHECK_REPOSITORY || "hicocos/tg-vault",
+  enabled: updateCheckEnabled,
+  sendBotMessage: sendUpdateNotificationToUser
+});
+var updateCheckTimer = null;
 var UPLOAD_DIR8 = process.env.UPLOAD_DIR || "./data/uploads";
 var THUMBNAIL_DIR7 = process.env.THUMBNAIL_DIR || "./data/thumbnails";
 var PREVIEW_DIR4 = process.env.PREVIEW_DIR || "./data/previews";
 var CHUNK_DIR3 = process.env.CHUNK_DIR || "./data/chunks";
-if (!fs18.existsSync(UPLOAD_DIR8)) {
-  fs18.mkdirSync(UPLOAD_DIR8, { recursive: true });
+if (!fs19.existsSync(UPLOAD_DIR8)) {
+  fs19.mkdirSync(UPLOAD_DIR8, { recursive: true });
   console.log(`\u{1F4C1} \u521B\u5EFA\u4E0A\u4F20\u76EE\u5F55: ${UPLOAD_DIR8}`);
 }
-if (!fs18.existsSync(THUMBNAIL_DIR7)) {
-  fs18.mkdirSync(THUMBNAIL_DIR7, { recursive: true });
+if (!fs19.existsSync(THUMBNAIL_DIR7)) {
+  fs19.mkdirSync(THUMBNAIL_DIR7, { recursive: true });
   console.log(`\u{1F4C1} \u521B\u5EFA\u7F29\u7565\u56FE\u76EE\u5F55: ${THUMBNAIL_DIR7}`);
 }
-if (!fs18.existsSync(PREVIEW_DIR4)) {
-  fs18.mkdirSync(PREVIEW_DIR4, { recursive: true });
+if (!fs19.existsSync(PREVIEW_DIR4)) {
+  fs19.mkdirSync(PREVIEW_DIR4, { recursive: true });
   console.log(`\u{1F39E}\uFE0F \u521B\u5EFA\u9884\u89C8\u76EE\u5F55: ${PREVIEW_DIR4}`);
 }
-if (!fs18.existsSync(CHUNK_DIR3)) {
-  fs18.mkdirSync(CHUNK_DIR3, { recursive: true });
+if (!fs19.existsSync(CHUNK_DIR3)) {
+  fs19.mkdirSync(CHUNK_DIR3, { recursive: true });
   console.log(`\u{1F4C1} \u521B\u5EFA\u5206\u5757\u76EE\u5F55: ${CHUNK_DIR3}`);
 }
 var configuredCorsOrigin = process.env.CORS_ORIGIN || "";
@@ -22546,7 +23539,7 @@ app.use(cors({
 app.use(express.json({ limit: process.env.JSON_BODY_LIMIT || "2mb" }));
 app.use((req, res, next) => {
   const provided = normalizeRequestId(req.headers["x-request-id"]);
-  const requestId = provided || crypto29.randomUUID();
+  const requestId = provided || crypto30.randomUUID();
   res.locals.requestId = requestId;
   res.setHeader("X-Request-Id", requestId);
   next();
@@ -22591,6 +23584,7 @@ app.use("/api/v1/upload", apiRouter);
 app.use("/api/chunked", requireAuth, chunkedUpload_default);
 app.use("/api/tasks", tasks_default);
 app.use("/api/storage", storage_default);
+app.use("/api/system", createSystemRouter(updateChecker));
 var applicationReady = false;
 var readinessError = null;
 app.get("/livez", (_req, res) => {
@@ -22649,6 +23643,20 @@ async function initializeApplication() {
   await initializeYtDlpQueue();
   applicationReady = true;
   readinessError = null;
+  if (updateCheckEnabled) {
+    const configuredInitialDelayMs = Number(process.env.UPDATE_CHECK_INITIAL_DELAY_MS || 3e4);
+    const configuredIntervalMs = Number(process.env.UPDATE_CHECK_INTERVAL_MS || 6 * 60 * 60 * 1e3);
+    const initialDelayMs = Number.isFinite(configuredInitialDelayMs) ? Math.max(5e3, configuredInitialDelayMs) : 3e4;
+    const intervalMs = Number.isFinite(configuredIntervalMs) ? Math.max(60 * 60 * 1e3, configuredIntervalMs) : 6 * 60 * 60 * 1e3;
+    const initialTimer = setTimeout(() => {
+      void updateChecker.checkNow();
+    }, initialDelayMs);
+    initialTimer.unref?.();
+    updateCheckTimer = setInterval(() => {
+      void updateChecker.checkNow();
+    }, intervalMs);
+    updateCheckTimer.unref?.();
+  }
 }
 async function startApplication() {
   await initializeApplication();
@@ -22658,10 +23666,11 @@ async function startApplication() {
     const initialSetupRequired = await isInitialSetupRequired();
     console.log(`
 \u{1F680} TG Vault \u540E\u7AEF\u670D\u52A1\u5DF2\u542F\u52A8
+\u{1F3F7}\uFE0F  \u7248\u672C: v${APP_VERSION}
 \u{1F4CD} \u7AEF\u53E3: ${PORT}
-\u{1F4C1} \u4E0A\u4F20\u76EE\u5F55: ${path22.resolve(UPLOAD_DIR8)}
-\u{1F5BC}\uFE0F  \u7F29\u7565\u56FE\u76EE\u5F55: ${path22.resolve(THUMBNAIL_DIR7)}
-\u{1F39E}\uFE0F  \u9884\u89C8\u76EE\u5F55: ${path22.resolve(PREVIEW_DIR4)}
+\u{1F4C1} \u4E0A\u4F20\u76EE\u5F55: ${path23.resolve(UPLOAD_DIR8)}
+\u{1F5BC}\uFE0F  \u7F29\u7565\u56FE\u76EE\u5F55: ${path23.resolve(THUMBNAIL_DIR7)}
+\u{1F39E}\uFE0F  \u9884\u89C8\u76EE\u5F55: ${path23.resolve(PREVIEW_DIR4)}
 \u{1F510} \u5BC6\u7801\u4FDD\u62A4: ${initialSetupRequired ? "\u5F85\u9996\u6B21\u521D\u59CB\u5316" : "\u5DF2\u542F\u7528"}
 \u{1F916} Telegram Bot: ${telegramEnabled ? "\u5DF2\u542F\u7528 (\u6700\u5927 2GB\uFF0C\u8D26\u53F7\u7EA7\u4E0B\u8F7D\u5668\u4E0D\u53D7\u6B64\u9650\u5236)" : "\u672A\u542F\u7528"}
 \u{1F464} Telegram User Download: ${isTelegramUserClientReady() ? "\u5DF2\u542F\u7528" : "\u672A\u542F\u7528"}
@@ -22680,6 +23689,8 @@ async function shutdown(signal) {
   shuttingDown = true;
   applicationReady = false;
   readinessError = `\u6B63\u5728\u56E0 ${signal} \u505C\u673A`;
+  if (updateCheckTimer) clearInterval(updateCheckTimer);
+  updateCheckTimer = null;
   const forceTimer = setTimeout(() => process.exit(1), 3e4);
   forceTimer.unref();
   if (server) {

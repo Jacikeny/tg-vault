@@ -7,11 +7,12 @@
         "test": "tsx --test src/**/*.test.ts",
         "test:queue": "tsx --test src/services/downloadTaskQueue.test.ts",
         "typecheck": "tsc --noEmit --pretty false",
-        "build": "esbuild src/index.ts --bundle --platform=node --format=esm --outfile=dist/index.js --packages=external && esbuild src/scripts/login_telegram_user.ts --bundle --platform=node --format=esm --outfile=dist/scripts/login_telegram_user.js --packages=external",
+        "build": "esbuild src/index.ts --bundle --platform=node --format=esm --outfile=dist/index.js --packages=external && esbuild src/scripts/login_telegram_user.ts --bundle --platform=node --format=esm --outfile=dist/scripts/login_telegram_user.js --packages=external && node scripts/sync_dist_schema.mjs && node scripts/sync_dist_schema.mjs --check",
         "start": "node dist/index.js",
         "login:telegram-user": "node dist/scripts/login_telegram_user.js",
         "schema:generate-init": "python3 scripts/generate_init_sql.py",
-        "schema:check": "python3 scripts/generate_init_sql.py --check"
+        "schema:check": "python3 scripts/generate_init_sql.py --check",
+        "schema:check-dist": "node scripts/sync_dist_schema.mjs --check"
     },
     "dependencies": {
         "@aws-sdk/client-s3": "^3.1075.0",
@@ -34,6 +35,7 @@
         "sharp": "^0.35.3",
         "telegram": "^2.26.22",
         "ua-parser-js": "^2.0.10",
+        "undici": "^7.29.0",
         "uuid": "^11.1.1",
         "webdav": "^5.10.0"
     },

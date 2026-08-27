@@ -174,6 +174,10 @@ router.post('/batch-delete/preview', requireAuth, async (req: Request, res: Resp
         if (immutableFileIds.length === 0) {
             return res.status(404).json({ error: '当前存储范围内没有找到待删除项目' });
         }
+        const openListCount = await query('SELECT COUNT(*)::int AS count FROM files WHERE id = ANY($1::uuid[]) AND source = $2', [immutableFileIds, 'openlist']);
+        if (Number(openListCount.rows[0]?.count || 0) > 0) {
+            return res.status(403).json({ error: 'OpenList 存储不提供用户删除功能', code: 'USER_DELETE_UNSUPPORTED' });
+        }
 
         const issued = batchDeleteConfirmationStore.issue({
             authToken: getAuthenticatedSessionToken(req),

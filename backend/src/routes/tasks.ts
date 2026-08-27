@@ -204,9 +204,13 @@ router.post('/dismissals/prepare', requireAuth, async (req: Request, res: Respon
         if (!authToken) return res.status(401).json({ error: '未认证' });
         const source = String(req.body?.source || '').trim();
         const status = String(req.body?.status || '').trim();
+        const accountId = String(req.body?.accountId || '').trim();
+        if (accountId && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(accountId)) {
+            return res.status(400).json({ error: '无效的存储账户 ID' });
+        }
         const requested = Array.isArray(req.body?.tasks) ? req.body.tasks : [];
         const requestedKeys = new Set(requested.map((item: any) => `${String(item.sourceType)}:${String(item.id)}`));
-        const all = filterDismissedTasks(await collectUnifiedTasks(500), await loadTaskCenterDismissals());
+        const all = filterDismissedTasks(await collectUnifiedTasks(500, accountId || undefined), await loadTaskCenterDismissals());
         const selected = all
             .filter(task => isTaskDismissible(task))
             .filter(task => requestedKeys.size > 0 ? requestedKeys.has(`${task.sourceType}:${task.id}`) : (!source || task.sourceType === source) && (!status || task.status === status))

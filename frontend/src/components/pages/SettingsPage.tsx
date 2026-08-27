@@ -2,12 +2,14 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { motion, AnimatePresence } from "framer-motion";
 import { createPortal } from "react-dom";
-import { HardDrive, ChevronRight, Palette, Globe, Cloud, Server, Database, CheckCircle, Trash2, Network, Shield, ShieldAlert, ShieldCheck, ExternalLink, BookOpen, KeyRound, LogOut, UserX, CircleHelp, XCircle, RefreshCw, Gauge, Copy, X } from "lucide-react";
+import { HardDrive, ChevronRight, Palette, Globe, Cloud, Server, Database, CheckCircle, Trash2, Network, Shield, ShieldAlert, ShieldCheck, ExternalLink, BookOpen, KeyRound, LogOut, UserX, CircleHelp, XCircle, RefreshCw, Gauge, Copy, X, PackageCheck } from "lucide-react";
 import { Button } from "../ui/Button";
 import { LanguageToggle } from "../ui/LanguageToggle";
 import { cn } from "../../lib/utils";
-import { fileApi, type AdvancedTaskSettings, type StorageAccount, type StorageConfig, type StorageStats, type TelegramBotPublicConfig } from "../../services/api";
+import { fileApi, type AdvancedTaskSettings, type StorageAccount, type StorageConfig, type StorageStats, type TelegramBotPublicConfig, type UpdateStatus } from "../../services/api";
 import { isTrustedOAuthPopupMessage } from "../../services/oauthPopupMessage";
+import { monitorOAuthPopup } from "../../services/oauthPopupFlow";
+import { synchronizeStorageConfig } from "../../services/storageConfigSynchronization";
 import { authService } from "../../services/auth";
 import { SETTINGS_SECTIONS, type SettingsSectionId } from "./settingsSections";
 import { useRuntimeUiLocalization } from "./useRuntimeUiLocalization";
@@ -17,6 +19,8 @@ interface SettingsPageProps {
     storageStats?: StorageStats | null;
     onSignedOut?: () => void;
     onOpenTasksForAccount?: (accountId: string) => void;
+    onStorageConfigChanged?: (config: StorageConfig) => void;
+    onStorageStatsRefresh?: (accountId: string | null) => Promise<void>;
     activeSection: SettingsSectionId;
     onSectionChange: (section: SettingsSectionId) => void;
 }
@@ -90,9 +94,10 @@ interface ActionDialogState {
 interface ProbeFeedbackState { accountId: string; tone: 'success' | 'error'; message: string; sequence: number; }
 
 const StorageProbeStatus = ({ account, busy, feedback, onProbe }: { account: StorageAccount; busy: boolean; feedback: ProbeFeedbackState | null; onProbe: () => void }) => {
+    const { t, i18n } = useTranslation();
     const status = account.last_probe_status;
     const Icon = status === 'available' ? CheckCircle : status === 'failed' ? XCircle : CircleHelp;
-    const label = status === 'available' ? '连接可用' : status === 'failed' ? '连接失败' : '尚未测试';
+    const label = status === 'available' ? t('settings.probe.available') : status === 'failed' ? t('settings.probe.failed') : t('settings.probe.notTested');
     return (
         <div className="mt-2 flex min-w-0 flex-wrap items-center gap-2 text-xs">
             <span className={cn(
@@ -104,10 +109,10 @@ const StorageProbeStatus = ({ account, busy, feedback, onProbe }: { account: Sto
                 <Icon className="h-3.5 w-3.5" />
                 {label}
             </span>
-            {account.last_probed_at && <span className="text-muted-foreground break-words">{new Date(account.last_probed_at).toLocaleString('zh-CN', { hour12: false })}</span>}
+            {account.last_probed_at && <span className="text-muted-foreground break-words">{new Date(account.last_probed_at).toLocaleString(i18n.resolvedLanguage?.startsWith('zh') ? 'zh-CN' : 'en-US', { hour12: false })}</span>}
             <Button size="sm" variant="ghost" className="h-7 gap-1 px-2 text-xs" disabled={busy} onClick={onProbe}>
-                {busy ? <IndeterminateSpinner label="正在测试存储连接" size="sm" /> : <RefreshCw className="h-3.5 w-3.5" />}
-                测试连接
+                {busy ? <IndeterminateSpinner label={t('settings.probe.testing')} size="sm" /> : <RefreshCw className="h-3.5 w-3.5" />}
+                {t('settings.probe.test')}
             </Button>
             {feedback && <span className={cn("min-w-0 basis-full rounded-md px-2 py-1.5 font-medium [overflow-wrap:anywhere]", feedback.tone === 'success' ? "bg-emerald-50 text-emerald-700" : "bg-red-50 text-red-700")} role="status" aria-live="polite">{feedback.tone === 'success' ? <CheckCircle className="mr-1 inline h-3.5 w-3.5" /> : <XCircle className="mr-1 inline h-3.5 w-3.5" />}{feedback.message}</span>}
             {!feedback && status === 'failed' && account.last_probe_error && <p className="min-w-0 basis-full [overflow-wrap:anywhere] text-red-700">{account.last_probe_error}</p>}
@@ -196,14 +201,18 @@ const ActionDialog = ({ state, input, onInput, onCancel, onConfirm }: {
     );
 };
 
-export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount, activeSection, onSectionChange }: SettingsPageProps) => {
+export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount, onStorageConfigChanged, onStorageStatsRefresh, activeSection, onSectionChange }: SettingsPageProps) => {
     const { t } = useTranslation();
 
     const pageRef = useRef<HTMLDivElement>(null);
+    const oauthPopupCleanupRef = useRef<(() => void) | null>(null);
+    const oauthPopupRef = useRef<Window | null>(null);
     useRuntimeUiLocalization(pageRef);
     const [actionDialog, setActionDialog] = useState<ActionDialogState | null>(null);
     const [actionNotice, setActionNotice] = useState<ActionNoticeState | null>(null);
     const [actionDialogInput, setActionDialogInput] = useState('');
+    const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
+    const [isCheckingUpdates, setIsCheckingUpdates] = useState(false);
 
     const closeActionNotice = useCallback(() => {
         setActionNotice(null);
@@ -271,6 +280,14 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
     const [webdavUsername, setWebdavUsername] = useState("");
     const [webdavPassword, setWebdavPassword] = useState("");
     const [showWebDAVForm, setShowWebDAVForm] = useState(false);
+
+    // OpenList native connection state (no remote management UI)
+    const [openlistAccountName, setOpenlistAccountName] = useState("");
+    const [openlistBaseUrl, setOpenlistBaseUrl] = useState("");
+    const [openlistRootPath, setOpenlistRootPath] = useState("/");
+    const [openlistUsername, setOpenlistUsername] = useState("");
+    const [openlistPassword, setOpenlistPassword] = useState("");
+    const [showOpenListForm, setShowOpenListForm] = useState(false);
 
     // Google Drive Form State
     const [gdAccountName, setGdAccountName] = useState("");
@@ -488,11 +505,49 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
     };
 
     const reloadStorageConfig = async () => {
-        const data = await fileApi.getStorageConfig();
-        setConfig(data);
+        const data = await synchronizeStorageConfig({
+            loadConfig: () => fileApi.getStorageConfig(),
+            publishConfig: nextConfig => {
+                setConfig(nextConfig);
+                onStorageConfigChanged?.(nextConfig);
+            },
+        });
         setShowTelegramUserDownload(!!data.telegramUserDownloadEnabled);
         setTelegramAllowedUserIdsInput((data.telegramAllowedUserIds || []).join(', '));
         return data;
+    };
+
+    const refreshStorageStats = async (data: StorageConfig): Promise<boolean> => {
+        if (!onStorageStatsRefresh) return true;
+        try {
+            await onStorageStatsRefresh(data.activeAccountId);
+            return true;
+        } catch (error) {
+            console.error('存储账户已更新，但容量统计刷新失败:', error);
+            return false;
+        }
+    };
+
+    useEffect(() => () => {
+        oauthPopupCleanupRef.current?.();
+        oauthPopupRef.current?.close();
+    }, []);
+
+    const handleCheckForUpdates = async () => {
+        if (isCheckingUpdates) return;
+        setIsCheckingUpdates(true);
+        try {
+            const status = await fileApi.checkForUpdates();
+            setUpdateStatus(status);
+            window.dispatchEvent(new CustomEvent('tgvault:update-status', { detail: status }));
+            await showNotice(status.updateAvailable
+                ? t('updates.found', { version: status.latestVersion })
+                : t('updates.alreadyLatest', { version: status.currentVersion }));
+        } catch (error: any) {
+            await showNotice(error?.message || '检查版本失败', '检查失败');
+        } finally {
+            setIsCheckingUpdates(false);
+        }
     };
 
     useEffect(() => {
@@ -521,7 +576,8 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
     useEffect(() => {
         const loadConfig = async () => {
             try {
-                await Promise.all([reloadStorageConfig(), reloadAdvancedTasks(), reloadTelegramBotConfig()]);
+                const [, , , versionStatus] = await Promise.all([reloadStorageConfig(), reloadAdvancedTasks(), reloadTelegramBotConfig(), fileApi.getUpdateStatus()]);
+                setUpdateStatus(versionStatus);
             } catch (error) {
                 console.error("Failed to load storage config:", error);
             }
@@ -530,7 +586,7 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
     }, []);
 
 
-    const handleSwitchProvider = async (provider: 'local' | 'onedrive' | 'aliyun_oss' | 's3' | 'webdav' | 'google_drive', accountId?: string) => {
+    const handleSwitchProvider = async (provider: 'local' | 'onedrive' | 'aliyun_oss' | 's3' | 'webdav' | 'openlist' | 'google_drive', accountId?: string) => {
         if (isSaving) return;
 
         // If switching to the same account/provider, do nothing
@@ -539,6 +595,7 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
         if (provider === 'aliyun_oss' && accountId === config?.activeAccountId) return;
         if (provider === 's3' && accountId === config?.activeAccountId) return;
         if (provider === 'webdav' && accountId === config?.activeAccountId) return;
+        if (provider === 'openlist' && accountId === config?.activeAccountId) return;
         if (provider === 'google_drive' && accountId === config?.activeAccountId) return;
 
         // If switching to OneDrive and no accounts exist, show form
@@ -569,6 +626,12 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
             return;
         }
 
+        const openlistAccounts = config?.accounts.filter(a => a.type === 'openlist') || [];
+        if (provider === 'openlist' && openlistAccounts.length === 0) {
+            setShowOpenListForm(true);
+            return;
+        }
+
         // If switching to Google Drive and no accounts exist, show form
         const gdAccounts = config?.accounts.filter(a => a.type === 'google_drive') || [];
         if (provider === 'google_drive' && gdAccounts.length === 0) {
@@ -582,6 +645,7 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
             'aliyun_oss': '阿里云 OSS',
             's3': 'S3 兼容存储',
             'webdav': 'WebDAV 存储',
+            'openlist': 'OpenList 原生存储',
             'google_drive': 'Google Drive'
         };
         const providerName = providerNames[provider];
@@ -591,9 +655,12 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
         setIsSaving(true);
         try {
             await fileApi.switchStorageProvider(provider as any, accountId);
-            const data = await fileApi.getStorageConfig();
-            setConfig(data);
-            await showNotice(`已成功切换到 ${providerName}`);
+            const data = await reloadStorageConfig();
+            const statisticsFresh = await refreshStorageStats(data);
+            await showNotice(statisticsFresh
+                ? `已成功切换到 ${providerName}`
+                : `已成功切换到 ${providerName}，但容量统计刷新失败，请稍后手动刷新`,
+            statisticsFresh ? '操作结果' : '切换完成');
         } catch (error: any) {
             await reloadStorageConfig().catch(() => undefined);
             await showNotice(error.message, '操作失败');
@@ -654,41 +721,56 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
                 throw new Error('授权窗口被浏览器拦截，请允许弹窗后重试');
             }
 
-            let authHandled = false;
-            const finishGoogleDriveAuth = async (showAlert: boolean) => {
-                if (authHandled) return;
-                authHandled = true;
-                window.removeEventListener('message', messageHandler);
-                window.clearInterval(authWindowPoll);
-                await reloadStorageConfig();
-                setShowGDForm(false);
-                if (showAlert) {
-                    await showNotice('Google Drive 授权成功并已启用！');
-                }
-            };
-
-            const messageHandler = async (event: MessageEvent) => {
-                if (isTrustedOAuthPopupMessage(event, {
-                    frontendOrigin,
-                    popup: authWindow,
-                    provider: 'google_drive',
-                    flowNonce,
-                })) {
-                    await finishGoogleDriveAuth(true);
-                }
-            };
-            window.addEventListener('message', messageHandler);
-
-            const authWindowPoll = window.setInterval(async () => {
-                if (authHandled) return;
-                if (authWindow.closed) {
-                    await finishGoogleDriveAuth(false);
-                }
-            }, 1000);
+            oauthPopupCleanupRef.current?.();
+            oauthPopupRef.current?.close();
+            oauthPopupRef.current = authWindow;
+            let statisticsFresh = true;
+            oauthPopupCleanupRef.current = monitorOAuthPopup({
+                host: window,
+                popup: authWindow,
+                classifyMessage: event => {
+                    if (!isTrustedOAuthPopupMessage(event, {
+                        frontendOrigin,
+                        popup: authWindow,
+                        provider: 'google_drive',
+                        flowNonce,
+                    })) return null;
+                    return event.data.type === 'oauth_success' ? 'success' : 'failed';
+                },
+                onSuccess: async event => {
+                    const accountId = (event.data as { accountId?: unknown }).accountId;
+                    if (typeof accountId !== 'string' || !accountId) throw new Error('授权回调缺少新账户标识');
+                    const data = await synchronizeStorageConfig({
+                        loadConfig: () => fileApi.getStorageConfig(),
+                        publishConfig: nextConfig => {
+                            setConfig(nextConfig);
+                            onStorageConfigChanged?.(nextConfig);
+                        },
+                    }, accountId);
+                    statisticsFresh = await refreshStorageStats(data);
+                    setShowGDForm(false);
+                },
+                onStateChange: async (state, flowError) => {
+                    if (state !== 'waiting') {
+                        setIsSaving(false);
+                        oauthPopupRef.current = null;
+                    }
+                    if (state === 'cancelled') await showNotice('Google Drive 授权已取消，表单内容已保留。', '授权已取消');
+                    if (state === 'failed') {
+                        const providerError = flowError instanceof MessageEvent
+                            ? (flowError.data as { error?: unknown }).error
+                            : undefined;
+                        await showNotice(`Google Drive 授权失败: ${typeof providerError === 'string' ? providerError : flowError instanceof Error ? flowError.message : '未知错误'}`, '授权失败');
+                    }
+                    if (state === 'success') await showNotice(statisticsFresh
+                        ? 'Google Drive 授权成功并已启用！'
+                        : 'Google Drive 授权成功并已启用，但容量统计刷新失败，请稍后手动刷新。',
+                    statisticsFresh ? '操作结果' : '授权完成');
+                },
+            });
         } catch (error: any) {
-            await showNotice('发起授权失败: ' + error.message, '授权失败');
-        } finally {
             setIsSaving(false);
+            await showNotice('发起授权失败: ' + error.message, '授权失败');
         }
     };
 
@@ -718,9 +800,12 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
             }
             if (!(await requestConfirmation(impactText, '删除存储账户'))) return;
             const result = await fileApi.deleteAccount(accountId, preview.confirmationToken);
-            await showNotice(result.message);
-            const data = await fileApi.getStorageConfig();
-            setConfig(data);
+            const data = await reloadStorageConfig();
+            const statisticsFresh = await refreshStorageStats(data);
+            await showNotice(statisticsFresh
+                ? result.message
+                : `${result.message}；但容量统计刷新失败，请稍后手动刷新`,
+            statisticsFresh ? '操作结果' : '删除完成');
         } catch (error: any) {
             await showNotice(error.message, '操作失败');
         }
@@ -750,42 +835,56 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
                 throw new Error('授权窗口被浏览器拦截，请允许弹窗后重试');
             }
 
-            let authHandled = false;
-            const finishOneDriveAuth = async (showAlert: boolean) => {
-                if (authHandled) return;
-                authHandled = true;
-                window.removeEventListener('message', messageHandler);
-                window.clearInterval(authWindowPoll);
-                const newData = await fileApi.getStorageConfig();
-                setConfig(newData);
-                setShowOneDriveForm(false);
-                if (showAlert) {
-                    await showNotice('OneDrive 授权成功并已启用！');
-                }
-            };
-
-            const messageHandler = async (event: MessageEvent) => {
-                if (isTrustedOAuthPopupMessage(event, {
-                    frontendOrigin,
-                    popup: authWindow,
-                    provider: 'onedrive',
-                    flowNonce,
-                })) {
-                    await finishOneDriveAuth(true);
-                }
-            };
-            window.addEventListener('message', messageHandler);
-
-            const authWindowPoll = window.setInterval(async () => {
-                if (authHandled) return;
-                if (authWindow.closed) {
-                    await finishOneDriveAuth(false);
-                }
-            }, 1000);
+            oauthPopupCleanupRef.current?.();
+            oauthPopupRef.current?.close();
+            oauthPopupRef.current = authWindow;
+            let statisticsFresh = true;
+            oauthPopupCleanupRef.current = monitorOAuthPopup({
+                host: window,
+                popup: authWindow,
+                classifyMessage: event => {
+                    if (!isTrustedOAuthPopupMessage(event, {
+                        frontendOrigin,
+                        popup: authWindow,
+                        provider: 'onedrive',
+                        flowNonce,
+                    })) return null;
+                    return event.data.type === 'oauth_success' ? 'success' : 'failed';
+                },
+                onSuccess: async event => {
+                    const accountId = (event.data as { accountId?: unknown }).accountId;
+                    if (typeof accountId !== 'string' || !accountId) throw new Error('授权回调缺少新账户标识');
+                    const data = await synchronizeStorageConfig({
+                        loadConfig: () => fileApi.getStorageConfig(),
+                        publishConfig: nextConfig => {
+                            setConfig(nextConfig);
+                            onStorageConfigChanged?.(nextConfig);
+                        },
+                    }, accountId);
+                    statisticsFresh = await refreshStorageStats(data);
+                    setShowOneDriveForm(false);
+                },
+                onStateChange: async (state, flowError) => {
+                    if (state !== 'waiting') {
+                        setIsSaving(false);
+                        oauthPopupRef.current = null;
+                    }
+                    if (state === 'cancelled') await showNotice('OneDrive 授权已取消，表单内容已保留。', '授权已取消');
+                    if (state === 'failed') {
+                        const providerError = flowError instanceof MessageEvent
+                            ? (flowError.data as { error?: unknown }).error
+                            : undefined;
+                        await showNotice(`OneDrive 授权失败: ${typeof providerError === 'string' ? providerError : flowError instanceof Error ? flowError.message : '未知错误'}`, '授权失败');
+                    }
+                    if (state === 'success') await showNotice(statisticsFresh
+                        ? 'OneDrive 授权成功并已启用！'
+                        : 'OneDrive 授权成功并已启用，但容量统计刷新失败，请稍后手动刷新。',
+                    statisticsFresh ? '操作结果' : '授权完成');
+                },
+            });
         } catch (error: any) {
-            await showNotice('发起授权失败: ' + error.message, '授权失败');
-        } finally {
             setIsSaving(false);
+            await showNotice('发起授权失败: ' + error.message, '授权失败');
         }
     };
 
@@ -797,8 +896,7 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
         setIsSaving(true);
         try {
             await fileApi.addAliyunOSSAccount(ossAccountName, ossRegion, ossAccessKeyId, ossAccessKeySecret, ossBucket);
-            const data = await fileApi.getStorageConfig();
-            setConfig(data);
+            await reloadStorageConfig();
             await showNotice('阿里云 OSS 账户添加成功！');
             setShowOSSForm(false);
         } catch (error: any) {
@@ -816,8 +914,7 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
         setIsSaving(true);
         try {
             await fileApi.addS3Account(s3AccountName, s3Endpoint, s3Region, s3AccessKeyId, s3AccessKeySecret, s3Bucket, s3ForcePathStyle);
-            const data = await fileApi.getStorageConfig();
-            setConfig(data);
+            await reloadStorageConfig();
             await showNotice('S3 兼容存储账户添加成功！');
             setShowS3Form(false);
         } catch (error: any) {
@@ -835,12 +932,30 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
         setIsSaving(true);
         try {
             await fileApi.addWebDAVAccount(webdavAccountName, webdavUrl, webdavUsername, webdavPassword);
-            const data = await fileApi.getStorageConfig();
-            setConfig(data);
+            await reloadStorageConfig();
             await showNotice('WebDAV 存储账户添加成功！');
             setShowWebDAVForm(false);
         } catch (error: any) {
             await showNotice('添加 WebDAV 存储账户失败: ' + error.message, '添加失败');
+        } finally {
+            setIsSaving(false);
+        }
+    };
+
+    const handleSaveOpenListConfig = async () => {
+        if (!openlistAccountName || !openlistBaseUrl || !openlistUsername || !openlistPassword) {
+            await showNotice(t('settings.openlist.required'), t('settings.openlist.incomplete'));
+            return;
+        }
+        setIsSaving(true);
+        try {
+            await fileApi.addOpenListAccount(openlistAccountName, openlistBaseUrl, openlistRootPath || '/', openlistUsername, openlistPassword);
+            await reloadStorageConfig();
+            setOpenlistPassword('');
+            setShowOpenListForm(false);
+            await showNotice(t('settings.openlist.success'));
+        } catch (error: any) {
+            await showNotice(t('settings.openlist.failure', { message: error.message }), t('settings.openlist.incomplete'));
         } finally {
             setIsSaving(false);
         }
@@ -990,6 +1105,33 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
                     action={<LanguageToggle />}
                 />
             {/* Theme controls live in the global header so appearance is reachable from every page. */}
+            </SettingsSection>
+            <SettingsSection title={t('updates.settingsTitle')}>
+                <SettingsRow
+                    icon={PackageCheck}
+                    label="TG Vault"
+                    description={updateStatus?.checkedAt
+                        ? `${t('updates.lastChecked', { time: new Date(updateStatus.checkedAt).toLocaleString() })}${updateStatus.stale ? t('updates.staleSuffix') : ''}`
+                        : updateStatus?.enabled === false ? t('updates.disabled') : t('updates.notChecked')}
+                    stackActionOnMobile
+                    action={
+                        <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto sm:justify-end">
+                            <span className="text-xs text-muted-foreground">{t('updates.current', { version: updateStatus?.currentVersion || '—' })}</span>
+                            <span className={cn("rounded-full px-2 py-1 text-xs font-semibold", updateStatus?.updateAvailable ? "bg-sky-100 text-sky-700 dark:bg-sky-950 dark:text-sky-200" : "bg-muted text-muted-foreground")}>
+                                {updateStatus?.updateAvailable ? t('updates.latest', { version: updateStatus.latestVersion }) : updateStatus?.latestVersion ? t('updates.upToDate') : t('updates.waiting')}
+                            </span>
+                            {updateStatus?.releaseUrl && (
+                                <a href={updateStatus.releaseUrl} target="_blank" rel="noopener noreferrer" className="inline-flex h-8 items-center gap-1 rounded-md border border-border px-2.5 text-xs font-medium hover:bg-muted">
+                                    {t('updates.releaseNotes')} <ExternalLink className="h-3.5 w-3.5" />
+                                </a>
+                            )}
+                            <Button size="sm" variant="outline" disabled={isCheckingUpdates || updateStatus?.enabled === false} onClick={() => void handleCheckForUpdates()}>
+                                {isCheckingUpdates ? <IndeterminateSpinner label={t('updates.checking')} size="sm" /> : <RefreshCw className="h-3.5 w-3.5" />}
+                                {t('updates.checkNow')}
+                            </Button>
+                        </div>
+                    }
+                />
             </SettingsSection>
             </>}
 
@@ -2444,6 +2586,56 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
                     )}
                 </AnimatePresence>
             </SettingsSection>
+
+            {/* OpenList native storage: connection and account switching only. */}
+            <SettingsSection title={t('settings.openlist.title')}>
+                <div className="border-b border-border/50 bg-muted/20 p-4">
+                    <div className="mb-4 flex items-center justify-between gap-3">
+                        <div className="flex items-center gap-3">
+                            <div className="rounded-lg bg-muted p-2 text-muted-foreground"><Server className="h-4 w-4" /></div>
+                            <div>
+                                <span className="text-sm font-medium">{t('settings.openlist.accounts')}</span>
+                                <p className="text-xs text-muted-foreground">{t('settings.openlist.description')}</p>
+                            </div>
+                        </div>
+                        <Button size="sm" variant="outline" onClick={() => setShowOpenListForm(!showOpenListForm)}>
+                            {showOpenListForm ? t('settings.openlist.cancelAdd') : t('settings.openlist.addAccount')}
+                        </Button>
+                    </div>
+                    <div className="space-y-2">
+                        {config?.accounts.filter(account => account.type === 'openlist').map(account => (
+                            <div key={account.id} className={cn("flex flex-col gap-3 rounded-lg border p-3 sm:flex-row sm:items-center sm:justify-between", account.is_active ? "border-primary/20 bg-primary/5" : "border-border bg-background")}>
+                                <div className="min-w-0">
+                                    <p className="text-sm font-medium">{account.name || t('settings.openlist.unnamed')}</p>
+                                    <p className="break-all font-mono text-[10px] text-muted-foreground opacity-60">{account.id}</p>
+                                    <StorageProbeStatus account={account} busy={probingAccountId === account.id} feedback={probeFeedback?.accountId === account.id ? probeFeedback : null} onProbe={() => void handleProbeAccount(account)} />
+                                </div>
+                                <div className="flex items-center justify-end gap-2">
+                                    {account.is_active ? <span className="rounded bg-green-500/10 px-2 py-1 text-xs font-semibold text-green-600">{t('settings.openlist.inUse')}</span> : <>
+                                        <Button size="sm" variant="ghost" onClick={() => handleSwitchProvider('openlist', account.id)} disabled={isSaving}>{t('settings.openlist.switchAccount')}</Button>
+                                        <Button size="sm" variant="ghost" className="h-8 w-8 p-0 text-muted-foreground hover:bg-destructive/10 hover:text-destructive" onClick={() => handleDeleteAccount(account.id, account.name)} disabled={isSaving} title={t('settings.openlist.deleteTitle')}><Trash2 className="h-3.5 w-3.5" /></Button>
+                                    </>}
+                                </div>
+                            </div>
+                        ))}
+                        {config?.accounts.filter(account => account.type === 'openlist').length === 0 && !showOpenListForm && <p className="rounded-lg border border-dashed py-6 text-center text-xs text-muted-foreground">{t('settings.openlist.empty')}</p>}
+                    </div>
+                </div>
+                <AnimatePresence>
+                    {showOpenListForm && <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }} exit={{ height: 0, opacity: 0 }} className="border-t border-border/50 bg-muted/30">
+                        <div className="space-y-5 p-6">
+                            <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                                <div className="space-y-2 md:col-span-2"><label className="text-sm font-medium">{t('settings.openlist.accountName')}</label><input value={openlistAccountName} onChange={event => setOpenlistAccountName(event.target.value)} className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm" placeholder={t('settings.openlist.accountPlaceholder')} /></div>
+                                <div className="space-y-2 md:col-span-2"><label className="text-sm font-medium">{t('settings.openlist.address')}</label><input type="url" value={openlistBaseUrl} onChange={event => setOpenlistBaseUrl(event.target.value)} className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm" placeholder="https://openlist.example.com" /></div>
+                                <div className="space-y-2 md:col-span-2"><label className="text-sm font-medium">{t('settings.openlist.rootPath')}</label><input value={openlistRootPath} onChange={event => setOpenlistRootPath(event.target.value)} className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm" placeholder="/" /><p className="text-xs text-muted-foreground">{t('settings.openlist.rootHint')}</p></div>
+                                <div className="space-y-2"><label className="text-sm font-medium">{t('settings.openlist.username')}</label><input autoComplete="username" value={openlistUsername} onChange={event => setOpenlistUsername(event.target.value)} className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm" /></div>
+                                <div className="space-y-2"><label className="text-sm font-medium">{t('settings.openlist.password')}</label><input type="password" autoComplete="new-password" value={openlistPassword} onChange={event => setOpenlistPassword(event.target.value)} className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm" /></div>
+                            </div>
+                            <div className="flex justify-end gap-2"><Button variant="ghost" onClick={() => { setShowOpenListForm(false); setOpenlistPassword(''); }}>{t('settings.openlist.cancel')}</Button><Button onClick={handleSaveOpenListConfig} disabled={isSaving || !openlistBaseUrl || !openlistUsername || !openlistPassword}>{isSaving ? t('settings.openlist.saving') : t('settings.openlist.save')}</Button></div>
+                        </div>
+                    </motion.div>}
+                </AnimatePresence>
+            </SettingsSection>
             <SettingsSection title={t("settings.storage.title")}>
                 <div className="p-6 space-y-6">
                     {storageStats ? (
@@ -2506,7 +2698,7 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
                                             <div className="flex items-baseline gap-1">
                                                 <span className="text-2xl font-bold tracking-tight">{storageStats.tgvault.used}</span>
                                                 <span className="text-sm text-muted-foreground font-medium">
-                                                    ({storageStats.tgvault.fileCount} 个文件)
+                                                    ({t('storage.fileCount', { count: storageStats.tgvault.fileCount })})
                                                 </span>
                                             </div>
                                         </div>

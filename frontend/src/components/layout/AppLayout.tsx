@@ -1,12 +1,12 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Folder, Settings, Menu, X, Star, Download, LogOut, ListChecks, Monitor, Moon, Sun, UploadCloud } from "lucide-react";
+import { Folder, Settings, Menu, X, Star, Download, LogOut, ListChecks, Monitor, Moon, Sun, UploadCloud, ExternalLink, Sparkles } from "lucide-react";
 import { Button } from "../ui/Button";
 import { cn } from "../../lib/utils";
 import { useTranslation } from "react-i18next";
 import { StorageWidget } from "../ui/StorageWidget";
 import { LanguageToggle } from "../ui/LanguageToggle";
-import type { StorageStats } from "../../services/api";
+import fileApi, { type StorageStats, type UpdateStatus } from "../../services/api";
 import { useTheme } from "../../hooks/useTheme";
 
 const HeaderThemeSwitch = () => {
@@ -68,6 +68,49 @@ const SidebarItem = ({ icon: Icon, label, isActive, onClick, collapsed }: Sideba
 export const AppLayout = ({ children, activeCategory, onCategoryChange, storageStats, onLogout }: { children: React.ReactNode; activeCategory: string; onCategoryChange?: (category: string) => void; storageStats?: StorageStats | null; onLogout?: () => void | Promise<void> }) => {
     const [isSidebarOpen, setIsSidebarOpen] = useState(true);
     const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
+    const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
+    const [dismissedRelease, setDismissedRelease] = useState<string | null>(null);
+
+    useEffect(() => {
+        let active = true;
+        const applyStatus = (status: UpdateStatus) => {
+            if (!active) return;
+            setUpdateStatus(status);
+            if (!status.latestVersion) {
+                setDismissedRelease(null);
+                return;
+            }
+            try {
+                setDismissedRelease(window.localStorage.getItem(`tgvault:update-dismissed:${status.latestVersion}`));
+            } catch {
+                setDismissedRelease(null);
+            }
+        };
+        const loadStatus = () => { void fileApi.getUpdateStatus().then(applyStatus).catch(() => undefined); };
+        const handleStatusEvent = (event: Event) => {
+            const status = (event as CustomEvent<UpdateStatus>).detail;
+            if (status) applyStatus(status);
+        };
+        const handleVisibility = () => { if (document.visibilityState === 'visible') loadStatus(); };
+        loadStatus();
+        const timer = window.setInterval(loadStatus, 15 * 60 * 1000);
+        window.addEventListener('tgvault:update-status', handleStatusEvent);
+        document.addEventListener('visibilitychange', handleVisibility);
+        return () => {
+            active = false;
+            window.clearInterval(timer);
+            window.removeEventListener('tgvault:update-status', handleStatusEvent);
+            document.removeEventListener('visibilitychange', handleVisibility);
+        };
+    }, []);
+
+    const dismissUpdate = () => {
+        if (!updateStatus?.latestVersion) return;
+        const key = `tgvault:update-dismissed:${updateStatus.latestVersion}`;
+        try { window.localStorage.setItem(key, 'true'); } catch { /* memory-only dismissal remains available */ }
+        setDismissedRelease('true');
+    };
+    const showUpdateBanner = Boolean(updateStatus?.updateAvailable && updateStatus.latestVersion && updateStatus.releaseUrl && dismissedRelease !== 'true');
 
     const { t } = useTranslation();
 
@@ -219,6 +262,23 @@ export const AppLayout = ({ children, activeCategory, onCategoryChange, storageS
                         </div>
                     </div>
                 </header>
+                {showUpdateBanner && updateStatus && (
+                    <div className="border-b border-sky-200/70 bg-sky-50/90 px-4 py-3 text-sky-950 dark:border-sky-900/70 dark:bg-sky-950/35 dark:text-sky-100 sm:px-8" role="status">
+                        <div className="mx-auto flex max-w-7xl items-start gap-3 sm:items-center">
+                            <span className="mt-0.5 rounded-full bg-sky-100 p-1.5 text-sky-700 dark:bg-sky-900/70 dark:text-sky-200 sm:mt-0"><Sparkles className="h-4 w-4" /></span>
+                            <p className="min-w-0 flex-1 text-sm leading-5">
+                                <span className="font-semibold">{t('updates.bannerTitle', { latest: updateStatus.latestVersion })}</span>
+                                <span className="ml-1 text-sky-800/80 dark:text-sky-200/80">{t('updates.bannerCurrent', { current: updateStatus.currentVersion })}</span>
+                            </p>
+                            <a href={updateStatus.releaseUrl || '#'} target="_blank" rel="noopener noreferrer" className="inline-flex shrink-0 items-center gap-1 rounded-md px-2 py-1 text-xs font-semibold text-sky-800 transition-colors hover:bg-sky-100 dark:text-sky-200 dark:hover:bg-sky-900/70">
+                                {t('updates.viewRelease')} <ExternalLink className="h-3.5 w-3.5" />
+                            </a>
+                            <button type="button" onClick={dismissUpdate} className="shrink-0 rounded-md p-1 text-sky-700/70 transition-colors hover:bg-sky-100 hover:text-sky-900 dark:text-sky-200/70 dark:hover:bg-sky-900/70 dark:hover:text-sky-100" aria-label={t('updates.dismiss')} title={t('updates.dismiss')}>
+                                <X className="h-4 w-4" />
+                            </button>
+                        </div>
+                    </div>
+                )}
                 <div className="flex-1 overflow-auto p-4 sm:p-8 scroll-smooth will-change-transform">
                     {children}
                 </div>

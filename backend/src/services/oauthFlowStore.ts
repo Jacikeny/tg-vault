@@ -79,6 +79,13 @@ export class OAuthFlowStore {
                     )
                 `);
                 await this.db.query('CREATE INDEX IF NOT EXISTS idx_oauth_pending_flows_expiry ON oauth_pending_flows(expires_at)');
+                await this.db.query(`
+                    DELETE FROM oauth_pending_flows older
+                    USING oauth_pending_flows newer
+                    WHERE older.auth_session_hash = newer.auth_session_hash
+                      AND (older.created_at, older.state_hash) < (newer.created_at, newer.state_hash)
+                `);
+                await this.db.query('CREATE UNIQUE INDEX IF NOT EXISTS idx_oauth_pending_flows_session ON oauth_pending_flows(auth_session_hash)');
             })().catch(error => {
                 this.schemaPromise = null;
                 throw error;
@@ -102,7 +109,15 @@ export class OAuthFlowStore {
         await this.db.query(
             `INSERT INTO oauth_pending_flows
                 (state_hash, provider, auth_session_hash, redirect_uri, pending_config, flow_nonce, expires_at)
-             VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7)`,
+             VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7)
+             ON CONFLICT (auth_session_hash) DO UPDATE SET
+                state_hash = EXCLUDED.state_hash,
+                provider = EXCLUDED.provider,
+                redirect_uri = EXCLUDED.redirect_uri,
+                pending_config = EXCLUDED.pending_config,
+                flow_nonce = EXCLUDED.flow_nonce,
+                expires_at = EXCLUDED.expires_at,
+                created_at = NOW()`,
             [
                 sha256(state),
                 input.provider,

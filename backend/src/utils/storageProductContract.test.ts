@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { buildStorageCapabilities, buildStorageStatsPayload, type StorageCapabilities } from './storageProductContract.js';
+import { buildStorageCapabilities, buildStorageScopeForTarget, buildStorageStatsPayload, type StorageCapabilities } from './storageProductContract.js';
 
 test('provider capability contract exposes share field support before opening the UI', () => {
     assert.deepEqual(buildStorageCapabilities('onedrive'), {
@@ -8,14 +8,23 @@ test('provider capability contract exposes share field support before opening th
         sharePassword: true,
         shareExpiration: true,
         quota: true,
+        userDelete: true,
     } satisfies StorageCapabilities);
     assert.deepEqual(buildStorageCapabilities('google_drive'), {
         share: true,
         sharePassword: false,
         shareExpiration: false,
         quota: true,
+        userDelete: true,
     });
     assert.equal(buildStorageCapabilities('webdav').share, false);
+    assert.equal(buildStorageCapabilities('openlist').userDelete, false);
+});
+
+test('storage statistics scope is derived from one immutable target snapshot', () => {
+    assert.deepEqual(buildStorageScopeForTarget({ providerName: 'local', accountId: null }), { clause: "source = 'local'", params: [] });
+    assert.deepEqual(buildStorageScopeForTarget({ providerName: 'onedrive', accountId: 'account-a' }), { clause: 'storage_account_id = $1', params: ['account-a'] });
+    assert.throws(() => buildStorageScopeForTarget({ providerName: 'onedrive', accountId: null }), /账户/);
 });
 
 test('storage stats never divide indexed bytes by temporary disk capacity', () => {

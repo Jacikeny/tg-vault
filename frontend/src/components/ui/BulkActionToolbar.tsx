@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Trash2, X, CheckSquare, Share2, Copy, Calendar, Lock, Check } from "lucide-react";
 import { Button } from "./Button";
@@ -10,20 +10,24 @@ import type { StorageCapabilities } from "../../services/api";
 interface BulkActionToolbarProps {
     selectedFilesCount: number;
     selectedFoldersCount: number;
+    selectedFileId?: string;
     onDelete: () => void;
     onCancel: () => void;
     onShare: (password: string, expiration: string) => Promise<string | null>;
     shareCapabilities?: StorageCapabilities;
+    canDelete?: boolean;
     isVisible: boolean;
 }
 
 export const BulkActionToolbar = ({
     selectedFilesCount,
     selectedFoldersCount,
+    selectedFileId,
     onDelete,
     onCancel,
     onShare,
     shareCapabilities,
+    canDelete = true,
     isVisible
 }: BulkActionToolbarProps) => {
     const [showShareSettings, setShowShareSettings] = useState(false);
@@ -36,6 +40,13 @@ export const BulkActionToolbar = ({
     const [selectedExpDate, setSelectedExpDate] = useState<Date | null>(null);
 
     const [generatedLink, setGeneratedLink] = useState<string | null>(null);
+
+    useEffect(() => {
+        setGeneratedLink(null);
+        setCopySuccess(false);
+        setErrorMsg(null);
+        setShowShareSettings(false);
+    }, [selectedFileId]);
 
     // Share is currently only available for exactly one file (not folders).
     const canShare = selectedFilesCount === 1 && selectedFoldersCount === 0 && shareCapabilities?.share === true;
@@ -186,7 +197,7 @@ export const BulkActionToolbar = ({
                                     <span>分享</span>
                                 </Button>
 
-                                <Button
+                                {canDelete && <Button
                                     variant="destructive"
                                     size="sm"
                                     className="h-11 px-4 text-sm flex items-center gap-1.5 shadow-md shadow-red-500/10 touch-manipulation"
@@ -195,7 +206,7 @@ export const BulkActionToolbar = ({
                                 >
                                     <Trash2 className="h-3.5 w-3.5" />
                                     <span>删除</span>
-                                </Button>
+                                </Button>}
                             </div>
                         </div>
 

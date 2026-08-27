@@ -11,8 +11,9 @@ import storageRouter from './routes/storage.js';
 import chunkedUploadRouter from './routes/chunkedUpload.js';
 import tasksRouter from './routes/tasks.js';
 import authRouter, { requireAuth } from './routes/auth.js';
+import { createSystemRouter } from './routes/system.js';
 import { requireAuthOrSignedUrl } from './middleware/signedUrl.js';
-import { initTelegramBot } from './services/telegramBot.js';
+import { initTelegramBot, sendUpdateNotificationToUser } from './services/telegramBot.js';
 import { applyEffectiveTelegramBotConfig } from './services/telegramBotConfig.js';
 import { getTelegramBotStatus, markTelegramBotError, telegramBotBlocksReadiness } from './services/telegramBotStatus.js';
 import { initTelegramUserClient, isTelegramUserClientReady } from './services/telegramUserClient.js';
@@ -25,6 +26,8 @@ import { normalizeRequestId } from './services/operationalEvents.js';
 import { markTransferTasksAfterRestart } from './services/transferTasks.js';
 import { initializeYtDlpQueue } from './services/ytDlpDownload.js';
 import { logRuntimeConfigSummary, validateRuntimeConfig } from './utils/runtimeConfig.js';
+import { APP_VERSION } from './services/appVersion.js';
+import { createUpdateChecker } from './services/updateChecker.js';
 
 dotenv.config();
 const runtimeConfigSummary = validateRuntimeConfig();
@@ -33,6 +36,14 @@ logRuntimeConfigSummary(runtimeConfigSummary);
 const app = express();
 app.set('trust proxy', process.env.TRUST_PROXY || 'loopback');
 const PORT = process.env.PORT || 51947;
+const updateCheckEnabled = !/^(0|false|no|off)$/i.test(process.env.UPDATE_CHECK_ENABLED || 'true');
+const updateChecker = createUpdateChecker({
+    currentVersion: APP_VERSION,
+    repository: process.env.UPDATE_CHECK_REPOSITORY || 'hicocos/tg-vault',
+    enabled: updateCheckEnabled,
+    sendBotMessage: sendUpdateNotificationToUser,
+});
+let updateCheckTimer: ReturnType<typeof setInterval> | null = null;
 
 // 确保上传目录存在
 const UPLOAD_DIR = process.env.UPLOAD_DIR || './data/uploads';
@@ -144,6 +155,7 @@ app.use('/api/v1/upload', apiUploadRouter);
 app.use('/api/chunked', requireAuth, chunkedUploadRouter);
 app.use('/api/tasks', tasksRouter);
 app.use('/api/storage', storageRouter);
+app.use('/api/system', createSystemRouter(updateChecker));
 
 // 健康检查（不需要认证）
 let applicationReady = false;
@@ -209,6 +221,20 @@ async function initializeApplication(): Promise<void> {
     await initializeYtDlpQueue();
     applicationReady = true;
     readinessError = null;
+    if (updateCheckEnabled) {
+        const configuredInitialDelayMs = Number(process.env.UPDATE_CHECK_INITIAL_DELAY_MS || 30_000);
+        const configuredIntervalMs = Number(process.env.UPDATE_CHECK_INTERVAL_MS || 6 * 60 * 60 * 1000);
+        const initialDelayMs = Number.isFinite(configuredInitialDelayMs) ? Math.max(5_000, configuredInitialDelayMs) : 30_000;
+        const intervalMs = Number.isFinite(configuredIntervalMs) ? Math.max(60 * 60 * 1000, configuredIntervalMs) : 6 * 60 * 60 * 1000;
+        const initialTimer = setTimeout(() => {
+            void updateChecker.checkNow();
+        }, initialDelayMs);
+        initialTimer.unref?.();
+        updateCheckTimer = setInterval(() => {
+            void updateChecker.checkNow();
+        }, intervalMs);
+        updateCheckTimer.unref?.();
+    }
 }
 
 async function startApplication(): Promise<void> {
@@ -219,6 +245,7 @@ async function startApplication(): Promise<void> {
         const initialSetupRequired = await isInitialSetupRequired();
         console.log(`
 🚀 TG Vault 后端服务已启动
+🏷️  版本: v${APP_VERSION}
 📍 端口: ${PORT}
 📁 上传目录: ${path.resolve(UPLOAD_DIR)}
 🖼️  缩略图目录: ${path.resolve(THUMBNAIL_DIR)}
@@ -243,6 +270,8 @@ async function shutdown(signal: string) {
     shuttingDown = true;
     applicationReady = false;
     readinessError = `正在因 ${signal} 停机`;
+    if (updateCheckTimer) clearInterval(updateCheckTimer);
+    updateCheckTimer = null;
     const forceTimer = setTimeout(() => process.exit(1), 30_000);
     forceTimer.unref();
     if (server) {

@@ -15,10 +15,12 @@ test('Chinese and English locale catalogs have identical keys', () => {
 test('second-step core journeys are fully represented in both locales', () => {
     const required = [
         'sidebar.favorites', 'sidebar.tasks', 'sidebar.logout',
-        'app.mobileSearch', 'app.refresh', 'app.sortName', 'app.sortDate',
+        'app.mobileSearch', 'app.refresh', 'app.sortName', 'app.sortDate', 'app.noOtherFolders',
+        'file.moreActions',
         'upload.anyFile', 'upload.chunkHint', 'upload.speed', 'upload.eta',
         'empty.root.title', 'empty.folder.title', 'empty.search.title', 'empty.filter.title', 'empty.offline.title', 'empty.stale.title',
         'settings.nav.general', 'settings.nav.security', 'settings.nav.telegram', 'settings.nav.storage', 'settings.nav.maintenance',
+        'settings.openlist.title', 'settings.openlist.description', 'settings.openlist.save', 'settings.openlist.failure',
     ];
     const zhKeys = new Set(keys(zh));
     const enKeys = new Set(keys(en));
@@ -26,4 +28,11 @@ test('second-step core journeys are fully represented in both locales', () => {
         assert.ok(zhKeys.has(key), `zh missing ${key}`);
         assert.ok(enKeys.has(key), `en missing ${key}`);
     }
+});
+
+test('OpenList English catalog contains complete English UI copy', () => {
+    const values = Object.values(en.settings.openlist);
+    assert.ok(values.length >= 20);
+    for (const value of values) assert.doesNotMatch(value, /[\u3400-\u9fff]/);
+    assert.equal(en.app.noOtherFolders, 'No other folders');
 });

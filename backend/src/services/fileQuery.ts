@@ -2,6 +2,12 @@ export type FileQuerySort = 'date' | 'name';
 export type FileQueryDirection = 'asc' | 'desc';
 export type FileQueryScope = { kind: 'local' } | { kind: 'account'; accountId: string };
 
+// Fallback for callers that do not have the database-projected sort key. Paged SQL
+// returns its own LOWER(name) value and cursorForFile always prefers that value.
+export function normalizeNameSortValue(value: string): string {
+    return value.toLowerCase();
+}
+
 export interface NormalizedFileQuery {
     q: string | null;
     type: 'image' | 'video' | 'audio' | 'document' | 'other' | 'media' | null;
@@ -177,7 +183,7 @@ export function buildFilePageQuery(scope: FileQueryScope, options: NormalizedFil
     const direction = options.direction.toUpperCase();
     if (cursor) {
         if (options.sort === 'name') {
-            params.push(cursor.value.toLocaleLowerCase(), cursor.id);
+            params.push(cursor.value, cursor.id);
             where.push(`(LOWER(name), id) ${comparator} ($${params.length - 1}, $${params.length}::uuid)`);
         } else {
             params.push(cursor.value, cursor.id);
@@ -190,7 +196,8 @@ export function buildFilePageQuery(scope: FileQueryScope, options: NormalizedFil
     return {
         text: `SELECT
     id, name, stored_name, type, mime_type, size, thumbnail_path, preview_path,
-    width, height, source, folder, storage_account_id, is_favorite, created_at, updated_at
+    width, height, source, folder, storage_account_id, is_favorite, created_at, updated_at,
+    LOWER(name) AS sort_value
 FROM files
 WHERE ${where.join(' AND ')}
 ORDER BY ${sortColumn} ${direction}, id ${direction}
@@ -241,7 +248,7 @@ ORDER BY ${order}`,
 
 export function cursorForFile(file: Record<string, unknown>, sort: FileQuerySort, direction: FileQueryDirection): string {
     const value = sort === 'name'
-        ? String(file.name || '').toLocaleLowerCase()
+        ? String(file.sort_value ?? normalizeNameSortValue(String(file.name || '')))
         : new Date(String(file.created_at)).toISOString();
     return encodeFileQueryCursor({ sort, direction, value, id: String(file.id) });
 }

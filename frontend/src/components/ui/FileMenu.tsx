@@ -5,7 +5,7 @@ import { useTranslation } from "react-i18next";
 import { Button } from "./Button";
 
 interface FileMenuProps {
-    onDelete: () => void;
+    onDelete?: () => void;
     onToggleFavorite?: () => void;
     isFavorite?: boolean;
 }
@@ -21,10 +21,15 @@ export const FileMenu = ({ onDelete, onToggleFavorite, isFavorite = false }: Fil
                 setIsOpen(false);
             }
         };
+        const handleEscape = (event: KeyboardEvent) => {
+            if (event.key === 'Escape') setIsOpen(false);
+        };
 
         document.addEventListener("mousedown", handleClickOutside);
+        document.addEventListener("keydown", handleEscape);
         return () => {
             document.removeEventListener("mousedown", handleClickOutside);
+            document.removeEventListener("keydown", handleEscape);
         };
     }, []);
 
@@ -38,6 +43,9 @@ export const FileMenu = ({ onDelete, onToggleFavorite, isFavorite = false }: Fil
                     e.stopPropagation();
                     setIsOpen(!isOpen);
                 }}
+                aria-label={t("file.moreActions") || "More actions"}
+                aria-haspopup="menu"
+                aria-expanded={isOpen}
             >
                 <MoreVertical className="h-5 w-5" />
             </Button>
@@ -45,13 +53,15 @@ export const FileMenu = ({ onDelete, onToggleFavorite, isFavorite = false }: Fil
             <AnimatePresence>
                 {isOpen && (
                     <motion.div
+                        role="menu"
                         initial={{ opacity: 0, scale: 0.95, y: 5 }}
                         animate={{ opacity: 1, scale: 1, y: 0 }}
                         exit={{ opacity: 0, scale: 0.95, y: 5 }}
                         transition={{ duration: 0.1 }}
                         className="absolute right-0 top-full mt-1 w-36 bg-white dark:bg-zinc-900 border border-border rounded-xl shadow-lg overflow-hidden z-50 p-1.5"
                     >
-                        <button
+                        {onDelete && <button
+                            role="menuitem"
                             className="w-full min-h-11 flex items-center gap-2 px-3 py-2 text-sm text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-500/10 rounded-lg transition-colors text-left font-medium touch-manipulation"
                             onClick={(e) => {
                                 e.stopPropagation();
@@ -61,8 +71,9 @@ export const FileMenu = ({ onDelete, onToggleFavorite, isFavorite = false }: Fil
                         >
                             <Trash2 className="h-4 w-4" />
                             {t("file.delete") || "Delete"}
-                        </button>
+                        </button>}
                         <button
+                            role="menuitem"
                             className="w-full min-h-11 flex items-center gap-2 px-3 py-2 text-sm text-yellow-600 dark:text-yellow-400 hover:bg-yellow-50 dark:hover:bg-yellow-500/10 rounded-lg transition-colors text-left font-medium touch-manipulation"
                             onClick={(e) => {
                                 e.stopPropagation();

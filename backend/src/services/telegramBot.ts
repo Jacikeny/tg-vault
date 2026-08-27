@@ -50,6 +50,7 @@ import { messageChatKey, callbackChatKey, telegramSubscriptionPeerKey } from '..
 import { buildSubscriptionDisplayLines, buildSubscriptionManagePanel as buildSubscriptionManagePanelText } from '../bot/presentation/subscription.js';
 import {
     classifyTelegramBotStartupError,
+    getTelegramBotStatus,
     markTelegramBotError,
     markTelegramBotReady,
     markTelegramBotStarting,
@@ -2417,6 +2418,13 @@ export async function restartTelegramBot(credentialsOverride?: TelegramBotCreden
     return withTelegramBotLifecycle(controls => controls.restart(credentialsOverride));
 }
 
+export async function sendUpdateNotificationToUser(userId: number, message: string): Promise<void> {
+    if (!client || !client.connected || getTelegramBotStatus().status !== 'ready') {
+        throw new Error('Telegram Bot 当前离线');
+    }
+    await client.sendMessage(userId, { message });
+}
+
 // 发送安全通知给所有已认证用户
 export async function sendSecurityNotification(message: string): Promise<void> {
     if (!client || !client.connected) {
@@ -2436,4 +2444,4 @@ export async function sendSecurityNotification(message: string): Promise<void> {
     }
 }
 
-export default { initTelegramBot, restartTelegramBot, stopTelegramBot, sendSecurityNotification };
+export default { initTelegramBot, restartTelegramBot, stopTelegramBot, sendSecurityNotification, sendUpdateNotificationToUser };

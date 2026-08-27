@@ -28,12 +28,15 @@ import { describeFileViewState } from "./services/fileViewState";
 import { buildFolderBreadcrumbs, parentFolder } from "./services/folderNavigation";
 import { attachUploadSession, createUploadQueueInput, type UploadQueueInput } from "./services/uploadQueueInput";
 import { createUploadTargetSnapshot } from "./services/uploadTargetSnapshot";
+import { StorageStatisticsSynchronization } from "./services/storageStatisticsSynchronization";
+import { activateParentControl } from "./services/keyboardActivation";
 import { ConfirmDialog } from "./components/ui/ConfirmDialog";
 import { appRouteHref, parseAppRoute, routeForCategory, routeForSettings, type AppRoute } from "./services/appRoute";
 import type { SettingsSectionId } from "./components/pages/settingsSections";
 import { IndeterminateSpinner } from "./components/ui/IndeterminateSpinner";
 import { UploadCenter } from "./components/pages/UploadCenter";
 import { YtDlpTaskComposer } from "./components/pages/YtDlpTaskComposer";
+
 
 const SettingsPage = lazy(() => import("./components/pages/SettingsPage").then(module => ({ default: module.SettingsPage })));
 const TasksPage = lazy(() => import("./components/pages/TasksPage").then(module => ({ default: module.TasksPage })));
@@ -67,6 +70,8 @@ function App() {
 
   const [files, setFiles] = useState<FileData[]>(() => initialFileSnapshot?.files ?? []);
   const [folderAggregations, setFolderAggregations] = useState<FolderAggregation[]>(() => initialFileSnapshot?.folders ?? []);
+  const filesRef = useRef<FileData[]>(files);
+  const folderAggregationsRef = useRef<FolderAggregation[]>(folderAggregations);
   const [loading, setLoading] = useState(() => initialFileSnapshot === null);
   const [queryError, setQueryError] = useState<string | null>(null);
   const [isStale, setIsStale] = useState(false);
@@ -78,11 +83,16 @@ function App() {
   const fileQueryCacheRef = useRef(createBrowserFileQueryCache());
 
   const applyFileQuerySnapshot = useCallback((snapshot: FileQuerySnapshot) => {
+    filesRef.current = snapshot.files;
+    folderAggregationsRef.current = snapshot.folders;
     setFiles(snapshot.files);
     setFolderAggregations(snapshot.folders);
     setFileCursor(snapshot.nextCursor);
     setHasMoreFiles(snapshot.hasMore);
   }, []);
+
+  useEffect(() => { filesRef.current = files; }, [files]);
+  useEffect(() => { folderAggregationsRef.current = folderAggregations; }, [folderAggregations]);
 
   const invalidateFileQueryCache = useCallback(() => {
     fileQueryCacheRef.current.invalidate();
@@ -129,6 +139,7 @@ function App() {
 
   const [storageStats, setStorageStats] = useState<StorageStatsType | null>(null);
   const [storageConfig, setStorageConfig] = useState<StorageConfig | null>(null);
+  const storageStatisticsSynchronizationRef = useRef(new StorageStatisticsSynchronization());
 
   // 通知状态
   const [notification, setNotification] = useState<{
@@ -183,7 +194,23 @@ function App() {
   // 响应式列数监听
   const [columns, setColumns] = useState(2);
 
+  const clearFileInteractionState = useCallback(() => {
+    setIsSelectionMode(false);
+    setSelectedFileIds([]);
+    setSelectedFolderNames([]);
+    setSelectedFile(null);
+    setDeletingFile(null);
+    setPendingBatchDelete(null);
+    setBatchDeletePreview(null);
+    setBatchDeleteResult(null);
+    setRenamingFile(null);
+    setRenamingFolder(null);
+    setMovingFile(null);
+    setMovingFolder(null);
+  }, []);
+
   const applyRoute = useCallback((route: AppRoute) => {
+    clearFileInteractionState();
     if (route.kind === 'files') {
       setCurrentCategory(route.category);
       setCurrentFolder(route.folder);
@@ -196,7 +223,7 @@ function App() {
     setSearchQuery('');
     setTaskAccountId(route.kind === 'tasks' ? route.accountId : null);
     if (route.kind === 'settings') setSettingsSection(route.section);
-  }, []);
+  }, [clearFileInteractionState]);
 
   const navigateRoute = useCallback((route: AppRoute, replace = false) => {
     const href = appRouteHref(route);
@@ -216,16 +243,26 @@ function App() {
     navigateRoute(routeForCategory(category));
   }, [navigateRoute]);
 
+  const handleFileTypeChange = useCallback((category: FileTypeCategory) => {
+    navigateRoute(routeForCategory(category, { folder: currentFolder, query: searchQuery }));
+  }, [currentFolder, navigateRoute, searchQuery]);
+
   const navigateFolder = useCallback((folder: string | null) => {
     navigateRoute(routeForCategory(currentCategory, { folder, query: searchQuery }));
   }, [currentCategory, navigateRoute, searchQuery]);
 
+  const syncCurrentFolderRoute = useCallback((folder: string | null) => {
+    setCurrentFolder(folder);
+    window.history.replaceState({}, '', appRouteHref(routeForCategory(currentCategory, { folder, query: searchQuery })));
+  }, [currentCategory, searchQuery]);
+
   const updateSearchQuery = useCallback((query: string) => {
+    clearFileInteractionState();
     setSearchQuery(query);
     if (!['upload', 'tasks', 'settings'].includes(currentCategory)) {
       window.history.replaceState({}, '', appRouteHref(routeForCategory(currentCategory, { folder: currentFolder, query })));
     }
-  }, [currentCategory, currentFolder]);
+  }, [clearFileInteractionState, currentCategory, currentFolder]);
 
   const handleSettingsSectionChange = useCallback((section: SettingsSectionId) => {
     navigateRoute(routeForSettings(section));
@@ -326,7 +363,7 @@ function App() {
   const loadFiles = useCallback(async () => {
     if (!isAuthenticated) return;
     const request = latestFileRequestRef.current.begin();
-    const hadData = files.length > 0 || folderAggregations.length > 0;
+    const hadData = filesRef.current.length > 0 || folderAggregationsRef.current.length > 0;
     try {
       setLoading(true);
       setQueryError(null);
@@ -391,25 +428,36 @@ function App() {
         setIsStale(true);
       }
     } finally {
-      if (request.isCurrent()) setLoadingMoreFiles(false);
+      setLoadingMoreFiles(false);
     }
   }, [isAuthenticated, hasMoreFiles, fileCursor, loadingMoreFiles, buildFileQueryOptions]);
 
   // 加载存储统计
-  const loadStorageStats = useCallback(async () => {
+  const loadStorageStats = useCallback(async (expectedAccountId?: string | null) => {
     if (!isAuthenticated) return;
+    const request = storageStatisticsSynchronizationRef.current.begin(expectedAccountId);
     try {
       const stats = await fileApi.getStorageStats();
-      setStorageStats(stats);
+      const accepted = request.accept(stats);
+      if (accepted) setStorageStats(stats);
+      else if (expectedAccountId !== undefined) throw new Error('存储统计账户与当前活动账户不一致');
     } catch (error: any) {
       if (error.message === 'UNAUTHORIZED') {
         authService.clearToken();
         setIsAuthenticated(false);
       } else {
         console.error('加载存储统计失败:', error);
+        if (expectedAccountId !== undefined) throw error;
       }
     }
   }, [isAuthenticated]);
+
+  const handleStorageConfigChanged = useCallback((config: StorageConfig) => {
+    const targetChanged = storageConfig !== null
+      && (storageConfig.provider !== config.provider || storageConfig.activeAccountId !== config.activeAccountId);
+    setStorageConfig(config);
+    if (targetChanged) setStorageStats(null);
+  }, [storageConfig]);
 
   // 加载存储配置 (获取当前提供商)
   const loadStorageConfig = useCallback(async () => {
@@ -600,6 +648,10 @@ function App() {
   };
 
   const startUpload = async (newFiles: File[], folder?: string) => {
+    if (!storageConfig) {
+      setNotification({ show: true, message: '上传目标尚未加载，请稍后重试', type: 'error' });
+      return;
+    }
     const targetSnapshot = createUploadTargetSnapshot(storageConfig, activeStorageDisplay?.provider || null, folder);
     // 1. 创建队列项
     const newItems: QueueItem[] = newFiles.map(file => ({
@@ -931,9 +983,9 @@ function App() {
     if (!renamingFile) return;
     try {
       await fileApi.renameFile(renamingFile.id, newName);
-      setFiles(prev => prev.map(f => f.id === renamingFile.id ? { ...f, name: newName } : f));
       invalidateFileQueryCache();
       setRenamingFile(null);
+      await refreshFilesAfterMutation();
     } catch (error: any) {
       if (error.message === 'UNAUTHORIZED') {
         authService.clearToken();
@@ -957,7 +1009,7 @@ function App() {
       const result = await fileApi.renameFolder(renamingFolder, newName);
       const renamedPath = result.name;
       if (currentFolder && (currentFolder === renamingFolder || currentFolder.startsWith(`${renamingFolder}/`))) {
-        setCurrentFolder(`${renamedPath}${currentFolder.slice(renamingFolder.length)}`);
+        syncCurrentFolderRoute(`${renamedPath}${currentFolder.slice(renamingFolder.length)}`);
       }
       setRenamingFolder(null);
       await refreshFilesAfterMutation();
@@ -996,6 +1048,7 @@ function App() {
         message: error.message || '创建文件夹失败',
         type: 'error'
       });
+      throw error;
     }
   };
 
@@ -1003,7 +1056,7 @@ function App() {
     return files.filter(file => {
       const matchesCategory =
         file.name === '.folder' || // 占位文件始终允许通过，以便计算文件夹列表
-        currentCategory === "favorites" ||
+        (currentCategory === "favorites" && file.is_favorite === true) ||
         currentCategory === "all" ||
         (currentCategory === "ytdlp" && file.folder === "ytdlp") ||
         (currentCategory === "media" && ["image", "video", "audio"].includes(file.type)) ||
@@ -1012,12 +1065,12 @@ function App() {
         (currentCategory === "audio" && file.type === "audio") ||
         (currentCategory === "document" && !["image", "video", "audio"].includes(file.type));
 
-      const matchesSearch = file.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        (file.folder && file.folder.toLowerCase().includes(searchQuery.toLowerCase()));
+      const matchesSearch = file.name.toLowerCase().includes(debouncedSearchQuery.toLowerCase()) ||
+        (file.folder && file.folder.toLowerCase().includes(debouncedSearchQuery.toLowerCase()));
 
       return matchesCategory && matchesSearch;
     });
-  }, [files, currentCategory, searchQuery]);
+  }, [files, currentCategory, debouncedSearchQuery]);
 
   // 将数据库中的完整 folder 路径聚合成当前位置的直接子目录。
   const folders = useMemo(() => {
@@ -1082,25 +1135,12 @@ function App() {
   // 如果文件夹总数不超过一行，则不需要显示展开/折叠按钮
   const showFolderToggle = folders.length > columns;
 
-  // 文件查询已经按当前位置精确过滤，排除目录占位索引即可展示。
+  // The API already returns a globally sorted cursor page. Preserve that order.
   const looseFiles = useMemo(() => {
-    const files = filteredFiles.filter(file => file.name !== '.folder');
+    return filteredFiles.filter(file => file.name !== '.folder');
+  }, [filteredFiles]);
 
-    // 排序逻辑
-    return files.sort((a, b) => {
-      let comparison = 0;
-      if (sortConfig.key === 'name') {
-        comparison = a.name.localeCompare(b.name, 'zh-CN');
-      } else {
-        const dateA = new Date(a.created_at).getTime();
-        const dateB = new Date(b.created_at).getTime();
-        comparison = dateA - dateB;
-      }
-      return sortConfig.direction === 'asc' ? comparison : -comparison;
-    });
-  }, [filteredFiles, sortConfig, currentCategory]);
-
-  // 当前显示的文件（在文件夹内时显示该文件夹的文件）
+  // Nested folders preserve the same authoritative server order.
   const displayFiles = useMemo(() => {
     if (currentFolder) {
       return filteredFiles.filter(file => file.folder === currentFolder && file.name !== '.folder');
@@ -1138,6 +1178,7 @@ function App() {
       aliyun_oss: '阿里云 OSS',
       s3: 'S3',
       webdav: 'WebDAV',
+      openlist: 'OpenList',
     };
     const account = storageConfig.accounts.find(item => item.id === storageConfig.activeAccountId);
     return {
@@ -1159,8 +1200,7 @@ function App() {
     try {
       const result = await fileApi.moveFile(movingFile.id, destinationFolder);
       if (result.success) {
-        setFiles(prev => prev.map(f => f.id === movingFile.id ? { ...f, folder: destinationFolder || undefined } : f));
-        invalidateFileQueryCache();
+        await refreshFilesAfterMutation();
         setNotification({
           show: true,
           message: t("app.moveSuccess") || "移动成功",
@@ -1174,8 +1214,7 @@ function App() {
         message: error.message || t("app.moveFailed") || "移动失败",
         type: "error"
       });
-    } finally {
-      setMovingFile(null);
+      throw error;
     }
   };
 
@@ -1186,7 +1225,7 @@ function App() {
       if (result.success) {
         const finalPath = result.folder;
         if (currentFolder && finalPath && (currentFolder === movingFolder || currentFolder.startsWith(`${movingFolder}/`))) {
-          setCurrentFolder(`${finalPath}${currentFolder.slice(movingFolder.length)}`);
+          syncCurrentFolderRoute(`${finalPath}${currentFolder.slice(movingFolder.length)}`);
         }
         setNotification({
           show: true,
@@ -1202,8 +1241,7 @@ function App() {
         message: error.message || t("app.moveFailed") || "移动文件夹失败",
         type: "error"
       });
-    } finally {
-      setMovingFolder(null);
+      throw error;
     }
   };
 
@@ -1238,6 +1276,8 @@ function App() {
                 storageStats={storageStats}
                 onSignedOut={() => setIsAuthenticated(false)}
                 onOpenTasksForAccount={(accountId) => navigateRoute({ kind: 'tasks', accountId, needsReplace: false })}
+                onStorageConfigChanged={handleStorageConfigChanged}
+                onStorageStatsRefresh={loadStorageStats}
                 activeSection={settingsSection}
                 onSectionChange={handleSettingsSectionChange}
               />
@@ -1253,6 +1293,7 @@ function App() {
               uploadProgress={totalUploadProgress}
               capabilities={uploadCapabilities}
               storageTarget={activeStorageDisplay}
+              ready={!!storageConfig}
               folders={allFolderNames}
               queue={uploadQueue}
               recoveredUploadCount={recoveredUploads.length}
@@ -1281,7 +1322,7 @@ function App() {
                   <div className="order-2 w-full md:order-1 md:w-auto">
                     <FileTypeFilter
                       value={currentCategory}
-                      onChange={(category: FileTypeCategory) => handleCategoryChange(category)}
+                      onChange={handleFileTypeChange}
                     />
                   </div>
                   <div data-testid="file-toolbar-primary" className="order-1 flex min-w-0 items-center gap-1 md:order-2 md:gap-3">
@@ -1410,6 +1451,7 @@ function App() {
                     isVisible
                     selectedFilesCount={selectedFileIds.length}
                     selectedFoldersCount={selectedFolderNames.length}
+                    selectedFileId={selectedFileIds.length === 1 ? selectedFileIds[0] : undefined}
                     onCancel={() => {
                       setIsSelectionMode(false);
                       setSelectedFileIds([]);
@@ -1418,6 +1460,7 @@ function App() {
                     onDelete={() => void handleBatchDelete()}
                     onShare={handleShare}
                     shareCapabilities={storageConfig?.capabilities}
+                    canDelete={storageConfig?.capabilities.userDelete !== false}
                   />
                 </div>
               )}
@@ -1509,7 +1552,7 @@ function App() {
                             onRename={() => setRenamingFolder(folder.name)}
                             onToggleFavorite={() => handleToggleFolderFavorite(folder.name)}
                             onMove={() => setMovingFolder(folder.name)}
-                            onDelete={() => handleBatchDelete([], [folder.name])}
+                            onDelete={storageConfig?.capabilities.userDelete !== false ? () => handleBatchDelete([], [folder.name]) : undefined}
                             isSelectionMode={isSelectionMode}
                             isSelected={selectedFolderNames.includes(folder.name)}
                             onSelect={toggleFolderSelection}
@@ -1526,7 +1569,7 @@ function App() {
                                 <FileCard
                                   file={file}
                                   onPreview={() => setSelectedFile(file)}
-                                  onDelete={() => verifyDelete(file)}
+                                  onDelete={storageConfig?.capabilities.userDelete !== false ? () => verifyDelete(file) : undefined}
                                   onRename={() => setRenamingFile(file)}
                                   onToggleFavorite={() => handleToggleFavorite(file.id)}
                                   onMove={() => setMovingFile(file)}
@@ -1537,12 +1580,20 @@ function App() {
                               ) : (
                                 <div
                                   className={`flex min-h-[64px] items-center gap-4 p-3 rounded-xl border ${selectedFileIds.includes(file.id) ? 'border-primary bg-primary/5' : 'border-border bg-card'} shadow-sm cursor-pointer group hover:bg-muted/50 transition-colors touch-manipulation`}
+                                  role="button"
+                                  tabIndex={0}
                                   onClick={() => isSelectionMode ? toggleFileSelection(file.id) : setSelectedFile(file)}
+                                  onKeyDown={(event) => {
+                                    activateParentControl(event, () => {
+                                      if (isSelectionMode) toggleFileSelection(file.id);
+                                      else setSelectedFile(file);
+                                    });
+                                  }}
                                 >
                                   <div className="h-12 w-12 rounded-lg bg-muted flex items-center justify-center text-xs font-bold text-muted-foreground uppercase">{file.type.slice(0, 3)}</div>
                                   <div className="flex-1 min-w-0"><h4 className="font-medium truncate">{file.name}</h4><p className="text-xs text-muted-foreground">{file.date}</p></div>
                                   <div className="text-sm font-medium tabular-nums text-muted-foreground">{file.size}</div>
-                                  <FileMenu onDelete={() => verifyDelete(file)} onToggleFavorite={() => handleToggleFavorite(file.id)} isFavorite={!!file.is_favorite} />
+                                  <FileMenu onDelete={storageConfig?.capabilities.userDelete !== false ? () => verifyDelete(file) : undefined} onToggleFavorite={() => handleToggleFavorite(file.id)} isFavorite={!!file.is_favorite} />
                                 </div>
                               )}
                             </motion.div>
@@ -1595,7 +1646,7 @@ function App() {
                                   onRename={() => setRenamingFolder(folder.name)}
                                   onToggleFavorite={() => handleToggleFolderFavorite(folder.name)}
                                   onMove={() => setMovingFolder(folder.name)}
-                                  onDelete={() => handleBatchDelete([], [folder.name])}
+                                  onDelete={storageConfig?.capabilities.userDelete !== false ? () => handleBatchDelete([], [folder.name]) : undefined}
                                   isSelectionMode={isSelectionMode}
                                   isSelected={selectedFolderNames.includes(folder.name)}
                                   onSelect={toggleFolderSelection}
@@ -1629,7 +1680,7 @@ function App() {
                                   <FileCard
                                     file={file}
                                     onPreview={() => setSelectedFile(file)}
-                                    onDelete={() => verifyDelete(file)}
+                                    onDelete={storageConfig?.capabilities.userDelete !== false ? () => verifyDelete(file) : undefined}
                                     onRename={() => setRenamingFile(file)}
                                     onToggleFavorite={() => handleToggleFavorite(file.id)}
                                     onMove={() => setMovingFile(file)}
@@ -1640,7 +1691,15 @@ function App() {
                                 ) : (
                                   <div
                                     className={`flex min-h-[64px] items-center gap-4 p-3 rounded-xl border ${selectedFileIds.includes(file.id) ? 'border-primary bg-primary/5' : 'border-border bg-card'} shadow-sm cursor-pointer group hover:bg-muted/50 transition-colors touch-manipulation`}
+                                    role="button"
+                                    tabIndex={0}
                                     onClick={() => isSelectionMode ? toggleFileSelection(file.id) : setSelectedFile(file)}
+                                    onKeyDown={(event) => {
+                                      activateParentControl(event, () => {
+                                        if (isSelectionMode) toggleFileSelection(file.id);
+                                        else setSelectedFile(file);
+                                      });
+                                    }}
                                   >
                                     {isSelectionMode && (
                                       <div className={`h-5 w-5 rounded-full border-2 flex items-center justify-center ${selectedFileIds.includes(file.id) ? 'bg-primary border-primary' : 'border-muted-foreground/30'}`}>
@@ -1663,7 +1722,7 @@ function App() {
                                     </div>
                                     <div className="text-sm font-medium tabular-nums text-muted-foreground px-4">{file.size}</div>
                                     <div>
-                                      <FileMenu onDelete={() => verifyDelete(file)} onToggleFavorite={() => handleToggleFavorite(file.id)} isFavorite={!!file.is_favorite} />
+                                      <FileMenu onDelete={storageConfig?.capabilities.userDelete !== false ? () => verifyDelete(file) : undefined} onToggleFavorite={() => handleToggleFavorite(file.id)} isFavorite={!!file.is_favorite} />
                                     </div>
                                   </div>
                                 )}
@@ -1814,9 +1873,9 @@ function App() {
             setMovingFile(null);
             setMovingFolder(null);
           }}
-          onConfirm={(dest) => {
-            if (movingFile) handleMoveFile(dest);
-            if (movingFolder) handleMoveFolder(dest);
+          onConfirm={async (dest) => {
+            if (movingFile) await handleMoveFile(dest);
+            else if (movingFolder) await handleMoveFolder(dest);
           }}
           currentFolder={movingFolder
             ? (movingFolder.includes('/') ? movingFolder.split('/').slice(0, -1).join('/') : null)

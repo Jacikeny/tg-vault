@@ -12,6 +12,7 @@ interface UploadCenterProps {
     uploadProgress: number;
     capabilities: UploadCapabilities | null;
     storageTarget: { provider: string; account: string } | null;
+    ready: boolean;
     folders: string[];
     queue: QueueItem[];
     recoveredUploadCount: number;
@@ -40,6 +41,7 @@ export const UploadCenter = ({
     uploadProgress,
     capabilities,
     storageTarget,
+    ready,
     folders,
     queue,
     recoveredUploadCount,
@@ -77,6 +79,7 @@ export const UploadCenter = ({
                         uploadProgress={uploadProgress}
                         capabilities={capabilities}
                         destinationLabel={destination || "根目录"}
+                        disabled={!ready}
                     />
                 </div>
                 <div data-testid="upload-destination" className="flex flex-col gap-3 border-t border-border bg-muted/25 p-4 sm:flex-row sm:items-center sm:justify-between sm:px-6">
@@ -91,6 +94,7 @@ export const UploadCenter = ({
                         id="upload-destination"
                         value={destination}
                         onChange={event => setDestination(event.target.value)}
+                        disabled={!ready}
                         className="h-11 min-w-0 rounded-lg border border-input bg-background px-3 text-sm outline-none transition-shadow focus:ring-2 focus:ring-primary/20 sm:w-72"
                     >
                         <option value="">根目录</option>

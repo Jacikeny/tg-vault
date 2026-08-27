@@ -3,17 +3,26 @@ export interface StorageCapabilities {
     sharePassword: boolean;
     shareExpiration: boolean;
     quota: boolean;
+    userDelete: boolean;
 }
 
 export function buildStorageCapabilities(provider: string): StorageCapabilities {
     switch (provider) {
         case 'onedrive':
-            return { share: true, sharePassword: true, shareExpiration: true, quota: true };
+            return { share: true, sharePassword: true, shareExpiration: true, quota: true, userDelete: true };
         case 'google_drive':
-            return { share: true, sharePassword: false, shareExpiration: false, quota: true };
+            return { share: true, sharePassword: false, shareExpiration: false, quota: true, userDelete: true };
+        case 'openlist':
+            return { share: false, sharePassword: false, shareExpiration: false, quota: false, userDelete: false };
         default:
-            return { share: false, sharePassword: false, shareExpiration: false, quota: false };
+            return { share: false, sharePassword: false, shareExpiration: false, quota: false, userDelete: true };
     }
+}
+
+export function buildStorageScopeForTarget(target: { providerName: string; accountId: string | null }): { clause: string; params: unknown[] } {
+    if (target.providerName === 'local') return { clause: "source = 'local'", params: [] };
+    if (!target.accountId) throw new Error('云存储统计缺少活动账户');
+    return { clause: 'storage_account_id = $1', params: [target.accountId] };
 }
 
 export interface StorageHealthContract {

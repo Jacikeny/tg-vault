@@ -12,6 +12,7 @@ interface UploadZoneProps {
     uploadProgress?: number;
     capabilities?: UploadCapabilities | null;
     destinationLabel?: string;
+    disabled?: boolean;
 }
 
 function formatGiB(bytes: number): string {
@@ -19,7 +20,7 @@ function formatGiB(bytes: number): string {
     return `${Number.isInteger(value) ? value : value.toFixed(1)} GiB`;
 }
 
-export const UploadZone = ({ onDrop, uploading = false, uploadProgress = 0, capabilities, destinationLabel }: UploadZoneProps) => {
+export const UploadZone = ({ onDrop, uploading = false, uploadProgress = 0, capabilities, destinationLabel, disabled = false }: UploadZoneProps) => {
     const [isDragActive, setIsDragActive] = useState(false);
     const fileInputRef = useRef<HTMLInputElement>(null);
     const { t } = useTranslation();
@@ -46,14 +47,24 @@ export const UploadZone = ({ onDrop, uploading = false, uploadProgress = 0, capa
         e.stopPropagation();
         setIsDragActive(false);
 
+        if (disabled) return;
+
         if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
             const files = Array.from(e.dataTransfer.files);
             onDrop?.(files);
         }
-    }, [onDrop]);
+    }, [disabled, onDrop]);
 
     const handleClick = () => {
+        if (disabled) return;
         fileInputRef.current?.click();
+    };
+
+    const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            handleClick();
+        }
     };
 
     const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -72,6 +83,9 @@ export const UploadZone = ({ onDrop, uploading = false, uploadProgress = 0, capa
             onDragOver={handleDragOver}
             onDrop={handleDrop}
             onClick={handleClick}
+            onKeyDown={handleKeyDown}
+            role="button"
+            tabIndex={disabled ? -1 : 0}
             className={cn(
                 "relative group flex flex-col items-center justify-center rounded-xl border-2 border-dashed border-border py-10 px-4 text-center transition-all duration-300 ease-out cursor-pointer overflow-hidden",
                 isDragActive
@@ -79,6 +93,7 @@ export const UploadZone = ({ onDrop, uploading = false, uploadProgress = 0, capa
                     : "hover:border-primary/50 hover:bg-accent/30"
             )}
             aria-label={t("app.dropTitle")}
+            aria-disabled={disabled}
         >
             <input
                 ref={fileInputRef}
@@ -86,6 +101,7 @@ export const UploadZone = ({ onDrop, uploading = false, uploadProgress = 0, capa
                 multiple
                 className="hidden"
                 onChange={handleFileSelect}
+                disabled={disabled}
             />
 
             <div className="absolute inset-0 bg-grid-slate-100 [mask-image:linear-gradient(0deg,#fff,rgba(255,255,255,0.6))] dark:bg-grid-slate-700/25 pointer-events-none" />

@@ -38,6 +38,7 @@ export interface StorageCapabilities {
     sharePassword: boolean;
     shareExpiration: boolean;
     quota: boolean;
+    userDelete: boolean;
 }
 
 export interface StorageStats {
@@ -199,6 +200,19 @@ export interface TelegramBotPublicConfig {
     lastConnectedAt: string | null;
     lastError: string | null;
     action: string | null;
+}
+
+export interface UpdateStatus {
+    enabled: boolean;
+    currentVersion: string;
+    latestVersion: string | null;
+    updateAvailable: boolean;
+    releaseName: string | null;
+    releaseUrl: string | null;
+    publishedAt: string | null;
+    checkedAt: string | null;
+    stale: boolean;
+    error: string | null;
 }
 
 export interface TelegramUserAccountStatus {
@@ -555,6 +569,7 @@ class FileAPI {
         tasks?: Array<{ sourceType: UnifiedTaskSource; id: string }>;
         source?: string;
         status?: string;
+        accountId?: string;
     }): Promise<TaskDismissalPreview> {
         const response = await fetch(`${API_BASE}/api/tasks/dismissals/prepare`, {
             credentials: 'include',
@@ -972,6 +987,30 @@ class FileAPI {
         return response.json();
     }
 
+    async getUpdateStatus(): Promise<UpdateStatus> {
+        const response = await fetch(`${API_BASE}/api/system/update-status`, {
+            credentials: 'include',
+            cache: 'no-store',
+            headers: getHeaders(),
+        });
+        if (response.status === 401 || response.status === 428) throw new Error('UNAUTHORIZED');
+        if (!response.ok) throw new Error('获取版本信息失败');
+        return response.json();
+    }
+
+    async checkForUpdates(): Promise<UpdateStatus> {
+        const response = await fetch(`${API_BASE}/api/system/update-check`, {
+            method: 'POST',
+            credentials: 'include',
+            cache: 'no-store',
+            headers: getHeaders(),
+        });
+        if (response.status === 401 || response.status === 428) throw new Error('UNAUTHORIZED');
+        if (response.status === 429) throw new Error('检查过于频繁，请稍后再试');
+        if (!response.ok) throw new Error('检查版本失败');
+        return response.json();
+    }
+
     async testTelegramBotConfig(input: { botToken: string; apiId: string; apiHash: string }): Promise<{ success: boolean; bot: { username: string | null; displayName: string | null } }> {
         return this.telegramBotConfigRequest('/api/storage/config/telegram-bot/test', 'POST', input);
     }
@@ -1113,8 +1152,13 @@ class FileAPI {
         return postStorageAccount('/api/storage/config/webdav', { name, url, username, password }, 'WebDAV');
     }
 
+    // 添加 OpenList 原生存储账户
+    async addOpenListAccount(name: string, baseUrl: string, rootPath: string, username: string, password: string): Promise<{ success: boolean; message: string; accountId: string }> {
+        return postStorageAccount('/api/storage/config/openlist', { name, baseUrl, rootPath, username, password }, 'OpenList');
+    }
+
     // 切换存储提供商或账户
-    async switchStorageProvider(provider: 'local' | 'onedrive' | 'aliyun_oss' | 's3' | 'webdav' | 'google_drive', accountId?: string): Promise<{ success: boolean; message: string; scope?: string; inFlightTargetsPreserved?: boolean }> {
+    async switchStorageProvider(provider: 'local' | 'onedrive' | 'aliyun_oss' | 's3' | 'webdav' | 'openlist' | 'google_drive', accountId?: string): Promise<{ success: boolean; message: string; scope?: string; inFlightTargetsPreserved?: boolean }> {
         const response = await fetch(`${API_BASE}/api/storage/switch`, {
             credentials: 'include',
             method: 'POST',

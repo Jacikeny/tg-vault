@@ -8,6 +8,7 @@ const SENSITIVE_CONFIG_KEYS = new Set([
     'refreshToken',
     'accessKeySecret',
     'password',
+    'username',
 ]);
 
 const SENSITIVE_SETTING_KEYS = new Set([

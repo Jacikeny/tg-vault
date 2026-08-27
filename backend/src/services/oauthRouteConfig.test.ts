@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { getOAuthRouteConfig, renderOAuthSuccessPage } from './oauthRouteConfig.js';
+import { getOAuthRouteConfig, renderOAuthFailurePage, renderOAuthSuccessPage } from './oauthRouteConfig.js';
 
 test('OAuth redirect URI is derived only from configured API origin and ignores request override/Host', () => {
     const config = getOAuthRouteConfig('google_drive', {
@@ -32,5 +32,16 @@ test('OAuth success page targets exact frontend origin and carries structured pr
     assert.match(html, /https:\/\/cloud\.example\.test/);
     assert.match(html, /"type":"oauth_success"/);
     assert.match(html, /"flowNonce":"flow-nonce"/);
+    assert.doesNotMatch(html, /postMessage\([^\n]+,\s*['"]\*['"]\)/);
+});
+
+test('OAuth failure page reports a structured failure to the exact frontend origin', () => {
+    const html = renderOAuthFailurePage({
+        provider: 'google_drive', providerName: 'Google Drive', frontendOrigin: 'https://cloud.example.test',
+        flowNonce: 'failure-nonce', error: 'provider rejected request', scriptNonce: 'script-nonce',
+    });
+    assert.match(html, /"type":"oauth_failure"/);
+    assert.match(html, /"flowNonce":"failure-nonce"/);
+    assert.match(html, /postMessage\(message, targetOrigin\)/);
     assert.doesNotMatch(html, /postMessage\([^\n]+,\s*['"]\*['"]\)/);
 });

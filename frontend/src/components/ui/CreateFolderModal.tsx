@@ -4,25 +4,36 @@ import { FolderPlus } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { Button } from "./Button";
 import { Dialog } from "./Dialog";
+import { performAsyncMutation } from "../../services/asyncMutation";
 
 interface CreateFolderModalProps {
     isOpen: boolean;
     onClose: () => void;
-    onConfirm: (folderName: string) => void;
+    onConfirm: (folderName: string) => Promise<void>;
     currentFolder?: string | null;
 }
 
 export const CreateFolderModal = ({ isOpen, onClose, onConfirm, currentFolder }: CreateFolderModalProps) => {
     useTranslation();
     const [folderName, setFolderName] = useState("");
+    const [isSubmitting, setIsSubmitting] = useState(false);
+    const [submitError, setSubmitError] = useState<string | null>(null);
 
     if (!isOpen) return null;
 
-    const handleConfirm = () => {
-        if (folderName.trim()) {
-            onConfirm(folderName.trim());
-            setFolderName("");
-            onClose();
+    const handleConfirm = async () => {
+        if (folderName.trim() && !isSubmitting) {
+            setIsSubmitting(true);
+            setSubmitError(null);
+            await performAsyncMutation({
+                action: () => onConfirm(folderName.trim()),
+                onSuccess: () => {
+                    setFolderName("");
+                    onClose();
+                },
+                onFailure: error => setSubmitError(error instanceof Error ? error.message : '创建文件夹失败'),
+                onSettled: () => setIsSubmitting(false),
+            });
         }
     };
 
@@ -32,7 +43,7 @@ export const CreateFolderModal = ({ isOpen, onClose, onConfirm, currentFolder }:
     };
 
     const modalContent = (
-        <Dialog open={isOpen} onClose={handleClose} labelledBy="create-folder-title" className="relative w-full max-w-md bg-background border border-border rounded-xl shadow-2xl overflow-hidden z-[70] flex flex-col">
+        <Dialog open={isOpen} onClose={handleClose} closeOnEscape={!isSubmitting} closeOnBackdrop={!isSubmitting} labelledBy="create-folder-title" className="relative w-full max-w-md bg-background border border-border rounded-xl shadow-2xl overflow-hidden z-[70] flex flex-col">
             <motion.div initial={{ scale: 0.95, opacity: 0, y: 10 }} animate={{ scale: 1, opacity: 1, y: 0 }} exit={{ scale: 0.95, opacity: 0, y: 10 }} transition={{ type: "spring", stiffness: 350, damping: 25 }}>
                     {/* Header */}
                     <div className="flex items-center gap-3 px-6 py-4 border-b border-border bg-muted/30">
@@ -63,12 +74,14 @@ export const CreateFolderModal = ({ isOpen, onClose, onConfirm, currentFolder }:
                                     placeholder="输入文件夹名称..."
                                     value={folderName}
                                     onChange={(e) => setFolderName(e.target.value)}
+                                    disabled={isSubmitting}
                                     autoFocus
                                     onKeyDown={(e) => {
-                                        if (e.key === "Enter") handleConfirm();
+                                        if (e.key === "Enter") void handleConfirm();
                                     }}
                                 />
                             </div>
+                            {submitError && <p role="alert" className="text-sm text-destructive">{submitError}</p>}
                         </div>
                     </div>
 
@@ -77,13 +90,15 @@ export const CreateFolderModal = ({ isOpen, onClose, onConfirm, currentFolder }:
                         <Button
                             className="flex-1 h-10 px-5 text-sm font-medium bg-primary hover:bg-primary/90 text-primary-foreground shadow-sm"
                             onClick={handleConfirm}
+                            disabled={isSubmitting || !folderName.trim()}
                         >
-                            确认创建
+                            {isSubmitting ? '正在创建...' : '确认创建'}
                         </Button>
                         <Button
                             variant="outline"
                             className="flex-1 h-10 px-5 text-sm font-medium border-border/80 hover:bg-muted"
                             onClick={handleClose}
+                            disabled={isSubmitting}
                         >
                             取消
                         </Button>
