@@ -2994,6 +2994,7 @@ __export(authSettings_exports, {
   changeTelegramPin: () => changeTelegramPin,
   changeTelegramPinWithClient: () => changeTelegramPinWithClient,
   changeWebPasswordAndRevokeSessions: () => changeWebPasswordAndRevokeSessions,
+  changeWebPasswordAndRevokeSessionsWithClient: () => changeWebPasswordAndRevokeSessionsWithClient,
   countAuthenticatedTelegramUsers: () => countAuthenticatedTelegramUsers,
   createInitialAdminCredentials: () => createInitialAdminCredentials,
   createInitialAdminCredentialsWithClient: () => createInitialAdminCredentialsWithClient,
@@ -3174,6 +3175,17 @@ async function createInitialAdminCredentials(webPassword, telegramPin) {
     client2.release();
   }
 }
+async function changeWebPasswordAndRevokeSessionsWithClient(client2, currentPassword, newPassword) {
+  await client2.query(`SELECT pg_advisory_xact_lock(hashtext('tg-vault:web-password-change'))`);
+  const current3 = await client2.query("SELECT value FROM system_settings WHERE key = $1 FOR UPDATE", [WEB_PASSWORD_KEY]);
+  const storedHash = decryptSettingValue(WEB_PASSWORD_KEY, String(current3.rows[0]?.value || ""));
+  if (!verifySecret(currentPassword, storedHash)) throw new Error("\u5F53\u524D\u5BC6\u7801\u4E0D\u6B63\u786E");
+  await client2.query(
+    `UPDATE system_settings SET value = $2, updated_at = NOW() WHERE key = $1`,
+    [WEB_PASSWORD_KEY, encryptSettingValue(WEB_PASSWORD_KEY, hashSecret(newPassword))]
+  );
+  await client2.query("DELETE FROM web_sessions");
+}
 async function changeWebPasswordAndRevokeSessions(currentPassword, newPassword) {
   const validationError = validateWebPassword(newPassword);
   if (validationError) throw new Error(validationError);
@@ -3181,15 +3193,7 @@ async function changeWebPasswordAndRevokeSessions(currentPassword, newPassword) 
   const client2 = await pool.connect();
   try {
     await client2.query("BEGIN");
-    await client2.query(`SELECT pg_advisory_xact_lock(hashtext('tg-vault:web-password-change'))`);
-    const current3 = await client2.query("SELECT value FROM system_settings WHERE key = $1 FOR UPDATE", [WEB_PASSWORD_KEY]);
-    const storedHash = String(current3.rows[0]?.value || "");
-    if (!verifySecret(currentPassword, storedHash)) throw new Error("\u5F53\u524D\u5BC6\u7801\u4E0D\u6B63\u786E");
-    await client2.query(
-      `UPDATE system_settings SET value = $2, updated_at = NOW() WHERE key = $1`,
-      [WEB_PASSWORD_KEY, hashSecret(newPassword)]
-    );
-    await client2.query("DELETE FROM web_sessions");
+    await changeWebPasswordAndRevokeSessionsWithClient(client2, currentPassword, newPassword);
     await client2.query("COMMIT");
   } catch (error) {
     await client2.query("ROLLBACK").catch(() => void 0);
@@ -23209,7 +23213,7 @@ function logRuntimeConfigSummary(summary) {
 // package.json
 var package_default = {
   name: "tg-vault-backend",
-  version: "2.2.0",
+  version: "2.2.1",
   type: "module",
   scripts: {
     dev: "tsx watch src/index.ts",

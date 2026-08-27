@@ -1,5 +1,10 @@
 import assert from 'node:assert/strict';
-import { changeTelegramPinWithClient, createInitialAdminCredentialsWithClient } from './authSettings.js';
+import {
+    changeTelegramPinWithClient,
+    changeWebPasswordAndRevokeSessionsWithClient,
+    createInitialAdminCredentialsWithClient,
+} from './authSettings.js';
+import { encryptSettingValue, isEncryptedCredential } from './credentialCrypto.js';
 import crypto from 'node:crypto';
 
 const calls: Array<{ text: string; params?: unknown[] }> = [];
@@ -86,6 +91,37 @@ assert.ok(firstPinCalls.some(call => /INSERT INTO system_settings/.test(call.tex
 await assert.rejects(
     () => changeTelegramPinWithClient(firstPinClient as any, 'current_pin', '1234', '2468'),
     /首次设置 PIN 必须使用网页管理员密码验证/,
+);
+
+const currentWebPasswordHash = legacyHash('password-123');
+const encryptedCurrentWebPasswordHash = encryptSettingValue('admin_password_hash', currentWebPasswordHash);
+const webPasswordChangeCalls: Array<{ text: string; params?: unknown[] }> = [];
+const webPasswordChangeClient = {
+    async query(text: string, params?: unknown[]) {
+        webPasswordChangeCalls.push({ text, params });
+        if (/SELECT value/.test(text)) return {
+            rows: [{ value: encryptedCurrentWebPasswordHash }],
+            rowCount: 1,
+        };
+        return { rows: [], rowCount: 1 };
+    },
+};
+await changeWebPasswordAndRevokeSessionsWithClient(
+    webPasswordChangeClient as any,
+    'password-123',
+    'password-456',
+);
+const passwordUpdate = webPasswordChangeCalls.find(call => /UPDATE system_settings/.test(call.text));
+assert.ok(passwordUpdate, 'password hash is updated');
+assert.ok(isEncryptedCredential(passwordUpdate.params?.[1]), 'updated password hash remains encrypted at rest');
+assert.ok(webPasswordChangeCalls.some(call => /DELETE FROM web_sessions/.test(call.text)), 'all web sessions are revoked');
+await assert.rejects(
+    () => changeWebPasswordAndRevokeSessionsWithClient(
+        webPasswordChangeClient as any,
+        'wrong-password',
+        'password-456',
+    ),
+    /当前密码不正确/,
 );
 
 console.log('atomic admin setup ok');

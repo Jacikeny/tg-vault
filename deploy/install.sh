@@ -289,8 +289,20 @@ if [[ -f .env ]]; then
 else
   created_env=true
 fi
-CORS_ORIGIN_VALUE="${CORS_ORIGIN:-$CURRENT_CORS_ORIGIN}"
-VITE_API_URL_VALUE="${VITE_API_URL:-$CURRENT_VITE_API_URL}"
+
+if [[ "$NON_INTERACTIVE" == true && "$created_env" == false ]]; then
+  # Existing installations treat .env as the source of truth. Ambient shell variables
+  # are often staging/audit overrides and must never silently rewrite production.
+  if [[ -n "${CORS_ORIGIN:-}" && -n "$CURRENT_CORS_ORIGIN" && "$CORS_ORIGIN" != "$CURRENT_CORS_ORIGIN" ]] ||
+     [[ -n "${VITE_API_URL:-}" && -n "$CURRENT_VITE_API_URL" && "$VITE_API_URL" != "$CURRENT_VITE_API_URL" ]]; then
+    echo "警告：已有安装以 .env 为准，已忽略环境变量中的 URL 覆盖。" >&2
+  fi
+  CORS_ORIGIN_VALUE="${CURRENT_CORS_ORIGIN:-${CORS_ORIGIN:-}}"
+  VITE_API_URL_VALUE="${CURRENT_VITE_API_URL:-${VITE_API_URL:-}}"
+else
+  CORS_ORIGIN_VALUE="${CORS_ORIGIN:-$CURRENT_CORS_ORIGIN}"
+  VITE_API_URL_VALUE="${VITE_API_URL:-$CURRENT_VITE_API_URL}"
+fi
 
 if [[ "$NON_INTERACTIVE" == false ]]; then
   echo "TG Vault 安装向导"

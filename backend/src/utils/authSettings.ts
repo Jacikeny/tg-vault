@@ -219,6 +219,24 @@ export async function createInitialAdminCredentials(webPassword: string, telegra
     }
 }
 
+type WebPasswordChangeClient = Pick<PoolClient, 'query'>;
+
+export async function changeWebPasswordAndRevokeSessionsWithClient(
+    client: WebPasswordChangeClient,
+    currentPassword: string,
+    newPassword: string,
+): Promise<void> {
+    await client.query(`SELECT pg_advisory_xact_lock(hashtext('tg-vault:web-password-change'))`);
+    const current = await client.query('SELECT value FROM system_settings WHERE key = $1 FOR UPDATE', [WEB_PASSWORD_KEY]);
+    const storedHash = decryptSettingValue(WEB_PASSWORD_KEY, String(current.rows[0]?.value || ''));
+    if (!verifySecret(currentPassword, storedHash)) throw new Error('当前密码不正确');
+    await client.query(
+        `UPDATE system_settings SET value = $2, updated_at = NOW() WHERE key = $1`,
+        [WEB_PASSWORD_KEY, encryptSettingValue(WEB_PASSWORD_KEY, hashSecret(newPassword))],
+    );
+    await client.query('DELETE FROM web_sessions');
+}
+
 export async function changeWebPasswordAndRevokeSessions(currentPassword: string, newPassword: string): Promise<void> {
     const validationError = validateWebPassword(newPassword);
     if (validationError) throw new Error(validationError);
@@ -227,15 +245,7 @@ export async function changeWebPasswordAndRevokeSessions(currentPassword: string
     const client = await pool.connect();
     try {
         await client.query('BEGIN');
-        await client.query(`SELECT pg_advisory_xact_lock(hashtext('tg-vault:web-password-change'))`);
-        const current = await client.query('SELECT value FROM system_settings WHERE key = $1 FOR UPDATE', [WEB_PASSWORD_KEY]);
-        const storedHash = String(current.rows[0]?.value || '');
-        if (!verifySecret(currentPassword, storedHash)) throw new Error('当前密码不正确');
-        await client.query(
-            `UPDATE system_settings SET value = $2, updated_at = NOW() WHERE key = $1`,
-            [WEB_PASSWORD_KEY, hashSecret(newPassword)],
-        );
-        await client.query('DELETE FROM web_sessions');
+        await changeWebPasswordAndRevokeSessionsWithClient(client, currentPassword, newPassword);
         await client.query('COMMIT');
     } catch (error) {
         await client.query('ROLLBACK').catch(() => undefined);

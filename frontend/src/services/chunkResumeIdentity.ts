@@ -1,13 +1,12 @@
+import { sha256Hex } from './chunkHash.js';
+
+export { sha256Hex } from './chunkHash.js';
+
 export interface ResumeIdentity {
     totalSize: number;
     maxChunkBytes: number;
     uploadedChunks: number[];
     uploadedChunkHashes: Record<number, string>;
-}
-
-export async function sha256Hex(blob: Blob): Promise<string> {
-    const digest = await crypto.subtle.digest('SHA-256', await blob.arrayBuffer());
-    return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
 }
 
 export async function verifyResumeFileIdentity(file: Blob, session: ResumeIdentity): Promise<void> {
