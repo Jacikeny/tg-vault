@@ -23209,7 +23209,7 @@ function logRuntimeConfigSummary(summary) {
 // package.json
 var package_default = {
   name: "tg-vault-backend",
-  version: "2.1.1",
+  version: "2.2.0",
   type: "module",
   scripts: {
     dev: "tsx watch src/index.ts",

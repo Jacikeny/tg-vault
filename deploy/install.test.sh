@@ -21,7 +21,7 @@ make_fixture() {
   mkdir -p "$FIXTURE/deploy" "$FIXTURE/backend" "$FIXTURE/fake-bin"
   cp "$ROOT/deploy/install.sh" "$FIXTURE/deploy/install.sh"
   printf 'services: {}\n' > "$FIXTURE/docker-compose.yml"
-  printf '{"version":"2.1.1"}\n' > "$FIXTURE/backend/package.json"
+  printf '{"version":"2.2.0"}\n' > "$FIXTURE/backend/package.json"
 
   cat > "$FIXTURE/fake-bin/docker" <<'SH'
 #!/usr/bin/env bash
@@ -39,7 +39,7 @@ run_in_tty() {
   local status
   set +e
   printf '%b' "$input" | script -qec \
-    "cd '$FIXTURE' && env PATH='$FIXTURE/fake-bin:$PATH' INSTALL_TEST_DOCKER_LOG='$FIXTURE/docker.log' bash deploy/install.sh" \
+    "cd '$FIXTURE' && env -u CORS_ORIGIN -u VITE_API_URL PATH='$FIXTURE/fake-bin:$PATH' INSTALL_TEST_DOCKER_LOG='$FIXTURE/docker.log' bash deploy/install.sh" \
     /dev/null > "$output" 2>&1
   status=$?
   set -e
