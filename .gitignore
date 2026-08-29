@@ -15,12 +15,14 @@ backend/dist/*
 frontend/dist/
 dist/
 
-# local agent workspace
+# local agent workspace and reports
 .hermes/
+/audit-report-*.md
 
-# archives and local backups
+# archives, local backups, and release-note drafts
 *.tar.gz
 backups/
+/RELEASE_NOTES_v*.md
 
 # logs
 *.log
