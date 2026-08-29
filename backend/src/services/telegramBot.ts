@@ -8,7 +8,7 @@ import crypto from 'crypto';
 import { storageManager, type StorageTargetSnapshot } from '../services/storage.js';
 import { passwordInputState, isAuthenticatedAsync, loadAuthenticatedUsers, persistAuthenticatedUser, revokeAuthenticatedUser, reconcileTelegramAllowedUsers, userStates, TelegramUserState } from './telegramState.js';
 import { is2FAEnabled, generateOTPAuthUrl, verifyTOTP, activate2FA } from '../utils/security.js';
-import { handleStart, handleHelp, handleNotifications, handleStatus, handleStorage, handleStorageSwitch, handleStorageSwitchCallback, handleTarget, handleFind, handleList, handleDelete, handleDeleteConfirmCallback, handleTelegramFileBrowserCallback, applyPendingTelegramFileMutation, handleTasks, handleTaskCenterCallback, handleBulkTaskCancelCallback, handleStopTasks, handlePauseTasks, handleResumeTasks, handleCancelTask, handleChannelTaskQueueCallback, handleRetryFailedTasks, handleDownloadWorkers, handleDownloadWorkersCallback, handleFileConcurrency, handleFileConcurrencyCallback, handleStorageCleanupCallback, handlePathRules, handlePathOnce, handlePathSession, handlePathClear, handlePathRulesCallback, handleDuplicateMode, handleDuplicateModeCallback, handleCleanupSettings, handleCleanupSettingsCallback } from './telegramCommands.js';
+import { handleStart, handleHelp, handleNotifications, handleNotificationsCallback, handleStatus, handleStorage, handleStorageSwitch, handleStorageSwitchCallback, handleTarget, handleTargetCallback, handleFind, handleList, handleDelete, handleDeleteConfirmCallback, handleTelegramFileBrowserCallback, applyPendingTelegramFileMutation, handleTasks, handleTaskCenterCallback, handleBulkTaskCancelCallback, handleStopTasks, handlePauseTasks, handleResumeTasks, handleCancelTask, handleChannelTaskQueueCallback, handleRetryFailedTasks, handleDownloadWorkers, handleDownloadWorkersCallback, handleFileConcurrency, handleFileConcurrencyCallback, handleStorageCleanupCallback, handlePathRules, handlePathOnce, handlePathSession, handlePathClear, handlePathRulesCallback, handleDuplicateMode, handleDuplicateModeCallback, handleCleanupSettings, handleCleanupSettingsCallback } from './telegramCommands.js';
 import { handleFileUpload, handleCleanupCallback, pauseDownloadTasks, resumeDownloadTasks, resolveTaskChatIdForControl, refreshSilentProgress, cancelSilentTask, canControlTask, listFailedDownloadTaskDetails, retryFailedDownloadTasks, loadFileDownloadConcurrencySetting } from './telegramUpload.js';
 import { handleYtDlpCommand, setYtDlpNotifier } from './ytDlpDownload.js';
 import { runYtDlpProbe, type YtDlpProbeResult } from './ytDlpProbe.js';
@@ -96,7 +96,7 @@ async function handleBotHomeCallback(update: Api.UpdateBotCallbackQuery, data: s
     if (data === 'home_tasks' || data === 'home_open_tasks') return handleTasks(await currentMessage());
     if (data === 'home_storage' || data === 'home_open_storage') return handleStorage(await currentMessage());
     if (data === 'home_upload') {
-        await client!.editMessage(update.peer, { message: Number(update.msgId), text: '📤 直接发送或转发任意文件即可上传。\n\n使用 /path_rules 选择保存位置，使用 /tasks 查看进度。', buttons: buildBotStartKeyboard() });
+        await client!.editMessage(update.peer, { message: Number(update.msgId), text: '📤 直接发送或转发文件即可上传。\n\n下方可打开任务或更多功能。', buttons: buildBotStartKeyboard() });
         return;
     }
     const pageMatch = data.match(/^home_page_(\d+)$/);
@@ -116,7 +116,7 @@ async function handleBotHomeCallback(update: Api.UpdateBotCallbackQuery, data: s
     if (command === 'tg_sub') return startTelegramWizard(message, userId, 'tg_sub_manage');
     if (command === 'tg_subs') {
         const rows = await listManageableTelegramSubscriptions(userId);
-        await message.reply({ message: formatSubscriptionList(rows) });
+        await message.reply({ message: buildSubscriptionManagePanel(rows, 0), buttons: buildSubscriptionActionKeyboard(rows, 0) });
         return;
     }
     if (command === 'list') return handleList(message, []);
@@ -133,13 +133,34 @@ async function handleBotHomeCallback(update: Api.UpdateBotCallbackQuery, data: s
     if (command === 'pc') return handlePathClear(message);
     if (command === 'duplicate_mode') return handleDuplicateMode(message);
     if (command === 'cleanup_settings') return handleCleanupSettings(message);
-    if (command === 'help') return handleHelp(message);
+    if (command === 'help') return handleHelp(message, homePageKeyboard(0));
     if (command === 'logout') {
         await client!.sendMessage(update.peer, { message: '发送 /logout 可立即撤销当前 Bot 认证。' });
         return;
     }
+    if (command === 'ytdlp') {
+        await client!.sendMessage(update.peer, { message: '请直接发送一个视频链接。' });
+        return;
+    }
+    if (command === 'setup_2fa') {
+        await client!.sendMessage(update.peer, { message: '请从 Telegram 命令菜单发送“配置双重验证”。' });
+        return;
+    }
+    if (['p', 'ps', 'delete', 'task_cancel', 'tg_unsub'].includes(command)) {
+        const prompts: Record<string, string> = {
+            p: '请发送下一次要使用的目录名称。',
+            ps: '请发送本聊天要持续使用的目录名称。',
+            delete: '请在“搜索和操作文件”中选择文件并点击删除。',
+            task_cancel: '请在任务中心选择要取消的任务。',
+            tg_unsub: '请在频道订阅面板选择要取消的订阅。',
+        };
+        await client!.sendMessage(update.peer, { message: prompts[command] });
+        return;
+    }
     const definition = BOT_COMMANDS.find(item => item.command === command);
-    await client!.sendMessage(update.peer, { message: `/${command}${definition?.usage ? ` ${definition.usage}` : ''}` });
+    await client!.sendMessage(update.peer, {
+        message: definition ? `${definition.description}\n\n请按提示输入，或返回“更多功能”选择其它入口。` : '这个入口暂时不可用。',
+    });
 }
 
 // Session File Path
@@ -363,11 +384,10 @@ function buildTelegramWizardPrompt(state: TelegramWizardState): string {
             title,
             '',
             '请选择下载方式：',
-            '`日期` — 下载某个日期范围内的频道媒体',
-            '`标签` — 下载带指定 #标签 的频道媒体',
+            '• 按日期：下载指定日期范围内的文件',
+            '• 按标签：下载带指定标签的文件',
             '',
-            '也可以直接发送：`date` / `tag`。',
-            '发送“取消”可退出。',
+            '👇 点击按钮继续。',
         ].join('\n');
     }
 
@@ -375,10 +395,8 @@ function buildTelegramWizardPrompt(state: TelegramWizardState): string {
         return [
             title,
             '',
-            '请发送频道用户名或链接：',
-            '例如：`@channel_username` 或 `https://t.me/channel_username`',
-            '',
-            '也可以直接发送：`@频道 comments` 或 `@频道 no-comments`。',
+            '请发送频道用户名或链接。',
+            '支持公开频道、私密邀请链接和已加入的频道。',
             '',
             '发送“取消”可退出。',
         ].join('\n');
@@ -411,8 +429,7 @@ function buildTelegramWizardPrompt(state: TelegramWizardState): string {
             `默认关闭；开启后每个频道帖子最多扫描 ${state.commentsMaxPerPost || TELEGRAM_COMMENTS_MAX_PER_POST} 条评论。`,
             '文字评论、普通链接和其它无文件消息会自动忽略。',
             '',
-            '也可以发送：`开` / `关` / `yes` / `no`。',
-            '发送“取消”可退出。',
+            '👇 点击按钮选择是否扫描评论区。',
         ].join('\n');
     }
 
@@ -429,8 +446,8 @@ function buildTelegramWizardPrompt(state: TelegramWizardState): string {
             `💬 评论区：${state.includeComments ? `包含（每帖最多 ${state.commentsMaxPerPost} 条）` : '不包含'}`,
             `📁 目录：${state.customFolder || '默认自动分类'}`,
             `☁️ 固定存储：${state.targetProvider || '当前存储'} / ${state.targetAccountName || state.targetAccountId || '当前账户'}`,
-            '', '估计量将在扫描中实时更新；超过服务端扫描上限时会分段继续，任务可在 /tasks 取消。',
-            '发送 `确认` 开始，或发送 `取消` 放弃。'].join('\n');
+            '', '扫描进度会实时更新；可在任务中心随时取消。',
+            '发送“确认”开始，或发送“取消”放弃。'].join('\n');
     }
 
     if (state.step === 'tag') {
@@ -504,10 +521,10 @@ export function buildLegacyJobProgressPresentation(summary: TelegramJobProgressS
                     ? '✅ **频道任务完成**'
                     : '🔎 **频道任务运行中**';
     const controls = summary.status === 'paused'
-        ? `控制：/task_resume ${summary.jobId.slice(0, 12)} · /task_cancel ${summary.jobId.slice(0, 12)}`
+        ? '可在任务中心继续或取消。'
         : summary.status === 'cooling' || summary.status === 'cancelled'
             ? ''
-            : `控制：/task_pause ${summary.jobId.slice(0, 12)} · /task_cancel ${summary.jobId.slice(0, 12)}`;
+            : '可在任务中心暂停或取消。';
     return [
         title,
         `🆔 job: ${summary.jobId.slice(0, 12)}`,
@@ -817,9 +834,8 @@ async function listManageableTelegramSubscriptions(userId: number): Promise<any[
     return rows.filter(isTelegramSubscriptionVisibleInManagement);
 }
 
-function buildSubscriptionActionKeyboard(rows: any[], requestedPage = 0): Api.ReplyInlineMarkup | undefined {
+function buildSubscriptionActionKeyboard(rows: any[], requestedPage = 0): Api.ReplyInlineMarkup {
     const page = buildTelegramSubscriptionPage(rows, requestedPage);
-    if (page.visibleRows.length === 0) return undefined;
     const actionRows = page.visibleRows.flatMap((row, localIndex) => [
         new Api.KeyboardButtonRow({
             buttons: [new Api.KeyboardButtonCallback({ text: `${page.startIndex + localIndex + 1}. ${row.title || row.source}`, data: Buffer.from(`tsub_view_${row.id}_${page.page}`) })],
@@ -843,24 +859,18 @@ function buildSubscriptionActionKeyboard(rows: any[], requestedPage = 0): Api.Re
     navigation.push(new Api.KeyboardButtonCallback({ text: '🔄 刷新', data: Buffer.from(`tsub_page_${page.page}`) }));
     if (page.page + 1 < page.totalPages) navigation.push(new Api.KeyboardButtonCallback({ text: '下一页 ▶️', data: Buffer.from(`tsub_page_${page.page + 1}`) }));
     return new Api.ReplyInlineMarkup({
-        rows: [...actionRows, new Api.KeyboardButtonRow({ buttons: navigation })],
+        rows: [
+            ...actionRows,
+            new Api.KeyboardButtonRow({
+                buttons: [new Api.KeyboardButtonCallback({ text: '➕ 新增订阅', data: Buffer.from('tsub_add') })],
+            }),
+            new Api.KeyboardButtonRow({ buttons: navigation }),
+        ],
     });
 }
 
 function buildSubscriptionManagePanel(rows: any[], requestedPage = 0): string {
     return buildSubscriptionManagePanelText(rows, buildTelegramSubscriptionPage(rows, requestedPage));
-}
-
-function formatSubscriptionList(rows: any[]): string {
-    if (rows.length === 0) return '📭 暂无频道订阅。\n\n使用 `/tg_sub @频道` 添加订阅。';
-    return [
-        '📡 **频道订阅**',
-        '',
-        ...rows.map((row, index) => [
-            buildSubscriptionDisplayLines(row, index),
-            `   ID: ${String(row.id).slice(0, 8)}`,
-        ].join('\n')),
-    ].join('\n');
 }
 
 function buildSubscriptionCancelConfirm(target: any, token: string): { text: string; buttons: Api.ReplyInlineMarkup } {
@@ -871,7 +881,7 @@ function buildSubscriptionCancelConfirm(target: any, token: string): { text: str
             `📌 ${target.title || target.source_original || target.source}`,
             `来源：${target.source_original || target.source}`,
             target.folder_override ? `专属目录：${target.folder_override}` : '保存策略：默认自动分类',
-            `当前游标：last_id=${target.last_message_id || 0}`,
+            `同步位置：第 ${target.last_message_id || 0} 条消息之后`,
             '',
             '确认后会停止自动同步，并从订阅管理列表中移除；已保存的文件不会删除。',
         ].join('\n'),
@@ -1349,6 +1359,16 @@ async function handleTelegramSubscriptionCallback(update: Api.UpdateBotCallbackQ
         return;
     }
     const parsed = parseTelegramSubscriptionCallback(data);
+    if (data === 'tsub_add') {
+        const state: TelegramWizardState = { kind: 'tg_sub_manage', step: 'source' };
+        putTelegramWizardState(userId, callbackChatKey(update, userId), state, Number(update.msgId));
+        await client.editMessage(update.peer, {
+            message: update.msgId,
+            text: buildTelegramWizardPrompt(state),
+        });
+        await client.invoke(new Api.messages.SetBotCallbackAnswer({ queryId: update.queryId, message: '请发送频道' }));
+        return;
+    }
     if (!parsed) {
         await client.invoke(new Api.messages.SetBotCallbackAnswer({ queryId: update.queryId, message: '订阅按钮无效或已过期', alert: true }));
         return;
@@ -1701,12 +1721,17 @@ export async function initTelegramBot(credentialsOverride?: TelegramBotCredentia
                         await message.reply({ message: MSG.AUTH_REQUIRED });
                         return;
                     }
+                    let tempPath: string | null = null;
                     try {
+                        if (await is2FAEnabled()) {
+                            await message.reply({ message: '🔐 双重验证已启用。为保护现有密钥，Bot 不会再次显示二维码。' });
+                            return;
+                        }
                         const qrDataUrl = await generateOTPAuthUrl();
                         const base64Data = qrDataUrl.replace(/^data:image\/png;base64,/, "");
                         const buffer = Buffer.from(base64Data, 'base64');
-                        const tempPath = path.join(process.cwd(), `temp_qr_${senderId}_${Date.now()}_${Math.random().toString(36).slice(2)}.png`);
-                        fs.writeFileSync(tempPath, buffer);
+                        tempPath = path.join(process.cwd(), `temp_qr_${senderId}_${Date.now()}_${crypto.randomBytes(8).toString('hex')}.png`);
+                        fs.writeFileSync(tempPath, buffer, { mode: 0o600 });
 
                         const qrMessage = await client.sendFile(chatId, {
                             file: tempPath,
@@ -1717,17 +1742,17 @@ export async function initTelegramBot(credentialsOverride?: TelegramBotCredentia
                             state: TelegramUserState.WAITING_2FA_SETUP,
                             qrMessageId: qrMessage.id
                         });
-
-                        fs.unlinkSync(tempPath);
                     } catch (e) {
                         console.error('生成 2FA 二维码失败:', e);
                         await client.sendMessage(chatId, { message: MSG.AUTH_2FA_QR_FAIL });
+                    } finally {
+                        if (tempPath && fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
                     }
                     return;
                 }
 
                 if (text === '/help') {
-                    await handleHelp(message);
+                    await handleHelp(message, homePageKeyboard(0));
                     return;
                 }
 
@@ -1736,11 +1761,17 @@ export async function initTelegramBot(credentialsOverride?: TelegramBotCredentia
                         await message.reply({ message: MSG.AUTH_REQUIRED });
                         return;
                     }
-                    await revokeAuthenticatedUser(senderId);
-                    passwordInputState.delete(senderId);
-                    userStates.delete(senderId);
-                    telegramWizardStates.delete(senderId, messageChatKey(message, senderId));
-                    await message.reply({ message: '✅ 当前 Telegram 用户的 Bot 认证已撤销。发送 /start 可重新认证。' });
+                    try {
+                        await revokeAuthenticatedUser(senderId);
+                        passwordInputState.delete(senderId);
+                        userStates.delete(senderId);
+                        telegramWizardStates.delete(senderId, messageChatKey(message, senderId));
+                        await message.reply({ message: '✅ 当前 Telegram 用户的 Bot 认证已撤销。发送 /start 可重新认证。' });
+                    } catch (error) {
+                        const operationId = crypto.randomUUID().slice(0, 8);
+                        console.error(`🤖 撤销 Telegram 认证失败 operationId=${operationId}:`, error);
+                        await message.reply({ message: `❌ 退出失败，请稍后重试。\n操作 ID：${operationId}` });
+                    }
                     return;
                 }
 
@@ -1756,13 +1787,13 @@ export async function initTelegramBot(credentialsOverride?: TelegramBotCredentia
 
                         const argsText = (match[1] || '').trim();
                     if (!argsText) {
-                        await message.reply({ message: '❌ 用法: /ytdlp <url>' });
+                        await message.reply({ message: '请发送一个视频链接，也可以直接粘贴链接。' });
                         return;
                     }
 
                     const parts = argsText.split(/\s+/).filter(Boolean);
                     if (parts.length !== 1) {
-                        await message.reply({ message: '❌ 只允许一个链接\n\n用法: /ytdlp <url>' });
+                        await message.reply({ message: '❌ 一次只能处理一个链接，请重新发送。' });
                         return;
                     }
 
@@ -1866,7 +1897,10 @@ export async function initTelegramBot(credentialsOverride?: TelegramBotCredentia
                         return;
                     }
                     const rows = await listManageableTelegramSubscriptions(senderId);
-                    await message.reply({ message: formatSubscriptionList(rows) });
+                    await message.reply({
+                        message: buildSubscriptionManagePanel(rows, 0),
+                        buttons: buildSubscriptionActionKeyboard(rows, 0),
+                    });
                     return;
                 }
 
@@ -1877,7 +1911,7 @@ export async function initTelegramBot(credentialsOverride?: TelegramBotCredentia
                     }
                     const source = text.split(/\s+/).slice(1).join(' ').trim();
                     if (!source) {
-                        await message.reply({ message: '❌ 用法：/tg_sub @频道' });
+                        await startTelegramWizard(message, senderId, 'tg_sub_manage');
                         return;
                     }
                     try {
@@ -1896,7 +1930,7 @@ export async function initTelegramBot(credentialsOverride?: TelegramBotCredentia
                     }
                     const selector = text.split(/\s+/).slice(1).join(' ').trim();
                     if (!selector) {
-                        await message.reply({ message: '❌ 用法：/tg_unsub @频道 或 /tg_unsub <订阅ID前缀>' });
+                        await message.reply({ message: '请从频道订阅面板选择要取消的订阅。' });
                         return;
                     }
                     const target = await findTelegramSubscription(senderId, selector);
@@ -1917,7 +1951,7 @@ export async function initTelegramBot(credentialsOverride?: TelegramBotCredentia
                     const mode = (parts.shift() || '').toLowerCase();
                     if (mode === 'date' || mode === '日期') {
                         if (parts.length !== 3) {
-                            await message.reply({ message: '❌ 用法：/tg_download date @频道 YYYY-MM-DD YYYY-MM-DD' });
+                            await startTelegramWizard(message, senderId, 'tg_download');
                             return;
                         }
                         try {
@@ -1931,7 +1965,7 @@ export async function initTelegramBot(credentialsOverride?: TelegramBotCredentia
                     }
                     if (mode === 'tag' || mode === '标签') {
                         if (parts.length !== 2) {
-                            await message.reply({ message: '❌ 用法：/tg_download tag @频道 #标签' });
+                            await startTelegramWizard(message, senderId, 'tg_download');
                             return;
                         }
                         try {
@@ -1943,7 +1977,7 @@ export async function initTelegramBot(credentialsOverride?: TelegramBotCredentia
                         }
                         return;
                     }
-                    await message.reply({ message: '❌ 用法：/tg_download date @频道 YYYY-MM-DD YYYY-MM-DD\n或：/tg_download tag @频道 #标签' });
+                    await startTelegramWizard(message, senderId, 'tg_download');
                     return;
                 }
 
@@ -2300,6 +2334,18 @@ export async function initTelegramBot(credentialsOverride?: TelegramBotCredentia
                     return;
                 }
 
+
+                // 处理当前聊天存储目标快捷按钮
+                if (data.startsWith('target_')) {
+                    await handleTargetCallback(activeClient, callbackUpdate, data);
+                    return;
+                }
+
+                // 处理通知偏好快捷按钮
+                if (data.startsWith('nt_')) {
+                    await handleNotificationsCallback(activeClient, callbackUpdate, data);
+                    return;
+                }
 
                 // 处理保存路径规则回调
                 if (data.startsWith('pr_')) {

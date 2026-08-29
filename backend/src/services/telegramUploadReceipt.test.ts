@@ -20,8 +20,7 @@ test('production single-upload receipt includes the actual indexed file id and f
     const text = buildUploadSuccess('photo.jpg', 123, 'image', 's3', 'photos', '12345678-1234-4000-8000-123456789abc', 'copied');
     assert.match(text, /12345678-1234/);
     assert.match(text, /已生成副本/);
-    assert.match(text, /\/find/);
-    assert.match(text, /\/delete <ID>/);
+    assert.match(text, /可在“搜索和操作文件”中继续管理/);
 });
 
 test('batch receipt remains one card and exposes retry-failed and failure details', () => {

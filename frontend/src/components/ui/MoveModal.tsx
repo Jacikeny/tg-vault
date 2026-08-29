@@ -1,11 +1,12 @@
-import { motion, AnimatePresence } from "framer-motion";
+import { motion } from "framer-motion";
 import { Folder, FolderRoot, X, Check, ArrowRight } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { Button } from "./Button";
 import { useState, useEffect } from "react";
-import { createPortal } from "react-dom";
+import { Dialog } from "./Dialog";
 import type { FolderMovePreview } from "../../services/api";
 import { performAsyncMutation } from "../../services/asyncMutation";
+import { formatBytes } from "../../services/formatBytes";
 
 interface MoveModalProps {
     isOpen: boolean;
@@ -67,34 +68,15 @@ export const MoveModal = ({ isOpen, onClose, onConfirm, currentFolder, folders, 
 
     const isChanged = selectedFolder !== currentFolder;
     const canConfirm = isChanged && !isPreviewLoading && !previewError && (!isFolder || (!!preview && !preview.conflict));
-    const formatBytes = (bytes: number) => {
-        if (!bytes) return '0 B';
-        const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-        const unit = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
-        return `${(bytes / (1024 ** unit)).toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`;
-    };
 
     const modalContent = (
-        <AnimatePresence>
-            <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
-                {/* Backdrop */}
-                <motion.div
-                    initial={{ opacity: 0 }}
-                    animate={{ opacity: 1 }}
-                    exit={{ opacity: 0 }}
-                    transition={{ duration: 0.2 }}
-                    className="absolute inset-0 bg-black/50 backdrop-blur-sm"
-                    onClick={isSubmitting ? undefined : onClose}
-                />
-                
-                {/* Modal Container */}
+        <Dialog open={isOpen} onClose={onClose} labelledBy="move-modal-title" closeOnEscape={!isSubmitting} closeOnBackdrop={!isSubmitting} className="w-full max-w-md">
                 <motion.div
                     initial={{ scale: 0.95, opacity: 0, y: 10 }}
                     animate={{ scale: 1, opacity: 1, y: 0 }}
                     exit={{ scale: 0.95, opacity: 0, y: 10 }}
                     transition={{ type: "spring", stiffness: 350, damping: 25 }}
-                    className="relative w-full max-w-md bg-background border border-border rounded-xl shadow-2xl overflow-hidden z-[70] flex flex-col"
-                    onClick={(e) => e.stopPropagation()}
+                    className="w-full overflow-hidden rounded-xl border border-border bg-background shadow-2xl"
                 >
                     {/* Header */}
                     <div className="flex items-center gap-3 px-6 py-4 border-b border-border bg-muted/30">
@@ -102,15 +84,18 @@ export const MoveModal = ({ isOpen, onClose, onConfirm, currentFolder, folders, 
                             <ArrowRight className="h-5 w-5" />
                         </div>
                         <div className="flex flex-col flex-1">
-                            <h3 className="font-semibold text-lg leading-none tracking-tight">
+                            <h3 id="move-modal-title" className="font-semibold text-lg leading-none tracking-tight">
                                 {title || t("app.moveTo") || "移动到"}
                             </h3>
                             <p className="text-sm text-muted-foreground mt-1.5">选择目标文件夹位置</p>
                         </div>
                         <button
+                            type="button"
                             onClick={isSubmitting ? undefined : onClose}
                             disabled={isSubmitting}
                             className="flex items-center justify-center w-8 h-8 rounded-lg hover:bg-muted transition-colors"
+                            aria-label="关闭移动弹窗"
+                            title="关闭移动弹窗"
                         >
                             <X className="h-4 w-4 text-muted-foreground" />
                         </button>
@@ -266,9 +251,8 @@ export const MoveModal = ({ isOpen, onClose, onConfirm, currentFolder, folders, 
                         </Button>
                     </div>
                 </motion.div>
-            </div>
-        </AnimatePresence>
+        </Dialog>
     );
 
-    return createPortal(modalContent, document.body);
+    return modalContent;
 };

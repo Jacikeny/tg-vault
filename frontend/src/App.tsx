@@ -3,7 +3,7 @@ import { AppLayout } from "./components/layout/AppLayout";
 import { Button } from "./components/ui/Button";
 import { FileCard } from "./components/ui/FileCard";
 import { FolderCard, type FolderData } from "./components/ui/FolderCard";
-import { Search, RefreshCw, ArrowLeft, ChevronDown, ChevronRight, CheckSquare, Cloud, HardDrive, Database, Package, Network, FolderPlus, Upload } from "lucide-react";
+import { Search, RefreshCw, ArrowLeft, ChevronDown, ChevronRight, CheckSquare, FolderPlus, Upload } from "lucide-react";
 import { AnimatePresence, motion } from "framer-motion";
 import { BulkActionToolbar } from "./components/ui/BulkActionToolbar";
 import { useTranslation } from "react-i18next";
@@ -18,6 +18,7 @@ import { MoveModal } from "./components/ui/MoveModal";
 import { Notification, type NotificationType } from "./components/ui/Notification";
 import { fileApi, type BatchDeletePreview, type BatchDeleteResult, type ChunkUploadSession, type FileData, type FolderAggregation, type FileQueryOptions, type StorageConfig, type StorageStats as StorageStatsType, type UploadCapabilities } from "./services/api";
 import { authService } from "./services/auth";
+import { isUnauthorizedError } from "./services/apiActionError";
 import type { QueueItem } from "./components/ui/UploadQueueModal";
 import { LatestRequest } from "./services/latestRequest";
 import { FileQueryController } from "./services/fileQueryController";
@@ -36,7 +37,11 @@ import type { SettingsSectionId } from "./components/pages/settingsSections";
 import { IndeterminateSpinner } from "./components/ui/IndeterminateSpinner";
 import { UploadCenter } from "./components/pages/UploadCenter";
 import { YtDlpTaskComposer } from "./components/pages/YtDlpTaskComposer";
+import { getProviderMetadata } from "./services/providerMetadata";
+import { errorMessage, isErrorNamed } from "./services/unknownError";
+import { useAuthSession } from "./hooks/useAuthSession";
 
+const FILE_RENDER_WINDOW_SIZE = 200;
 
 const SettingsPage = lazy(() => import("./components/pages/SettingsPage").then(module => ({ default: module.SettingsPage })));
 const TasksPage = lazy(() => import("./components/pages/TasksPage").then(module => ({ default: module.TasksPage })));
@@ -61,12 +66,6 @@ function App() {
       sortConfig: { key: 'date', direction: 'desc' },
     }));
   }, [initialRoute]);
-  // 认证状态
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [needsPassword, setNeedsPassword] = useState(true);
-  const [setupRequired, setSetupRequired] = useState(false);
-  const [telegramPinRequired, setTelegramPinRequired] = useState(false);
-  const [authChecking, setAuthChecking] = useState(true);
 
   const [files, setFiles] = useState<FileData[]>(() => initialFileSnapshot?.files ?? []);
   const [folderAggregations, setFolderAggregations] = useState<FolderAggregation[]>(() => initialFileSnapshot?.folders ?? []);
@@ -97,6 +96,7 @@ function App() {
   const invalidateFileQueryCache = useCallback(() => {
     fileQueryCacheRef.current.invalidate();
   }, []);
+
 
   // 改用队列管理上传状态
   const [uploadQueue, setUploadQueue] = useState<QueueItem[]>([]);
@@ -137,6 +137,29 @@ function App() {
   const [isUploadQueuePaused, setIsUploadQueuePaused] = useState(false);
   const [uploadCapabilities, setUploadCapabilities] = useState<UploadCapabilities | null>(null);
 
+  const resetAuthenticatedState = useCallback(() => {
+    uploadManagerRef.current.reset();
+    latestFileRequestRef.current.cancel();
+    invalidateFileQueryCache();
+    setFiles([]);
+    setFolderAggregations([]);
+    setUploadQueue([]);
+    setRecoveredUploads([]);
+    setResumingSessionIds([]);
+    setIsUploadQueuePaused(false);
+  }, [invalidateFileQueryCache]);
+  const {
+    isAuthenticated,
+    needsPassword,
+    setupRequired,
+    telegramPinRequired,
+    authChecking,
+    login: handleLogin,
+    setup: handleInitialSetup,
+    signOut,
+    markUnauthenticated,
+  } = useAuthSession(resetAuthenticatedState);
+
   const [storageStats, setStorageStats] = useState<StorageStatsType | null>(null);
   const [storageConfig, setStorageConfig] = useState<StorageConfig | null>(null);
   const storageStatisticsSynchronizationRef = useRef(new StorageStatisticsSynchronization());
@@ -156,6 +179,7 @@ function App() {
   const [currentCategory, setCurrentCategory] = useState(() => initialRoute.kind === 'files' ? initialRoute.category : initialRoute.kind);
   const [taskAccountId, setTaskAccountId] = useState<string | null>(() => initialRoute.kind === 'tasks' ? initialRoute.accountId : null);
   const [viewMode, setViewMode] = useState<"grid" | "list">("grid");
+  const [fileRenderWindow, setFileRenderWindow] = useState(0);
   const [selectedFile, setSelectedFile] = useState<FileData | null>(null);
   const [deletingFile, setDeletingFile] = useState<FileData | null>(null);
   const [pendingBatchDelete, setPendingBatchDelete] = useState<{ fileIds: string[]; folderNames: string[] } | null>(null);
@@ -274,10 +298,9 @@ function App() {
       setRecoveredUploads(sessions);
       if (openWhenFound && sessions.length > 0) setIsQueueModalOpen(true);
       return sessions;
-    } catch (error: any) {
-      if (error?.message === 'UNAUTHORIZED') {
-        authService.clearToken();
-        setIsAuthenticated(false);
+    } catch (error: unknown) {
+      if (isUnauthorizedError(error)) {
+        authService.invalidateSession(error.status);
       } else {
         console.error('加载未完成上传失败:', error);
       }
@@ -311,36 +334,6 @@ function App() {
       .then(setUploadCapabilities)
       .catch(error => console.error('加载上传能力失败:', error));
   }, [isAuthenticated, loadIncompleteUploads]);
-
-  // 检查认证状态
-  useEffect(() => {
-    const checkAuth = async () => {
-      try {
-        // 检查认证/首次初始化状态
-        const authStatus = await authService.getAuthStatus();
-        setNeedsPassword(authStatus.passwordRequired);
-        setSetupRequired(authStatus.setupRequired);
-        setTelegramPinRequired(authStatus.telegramPinRequired);
-
-        if (authStatus.setupRequired) {
-          setIsAuthenticated(false);
-        } else if (!authStatus.passwordRequired) {
-          // 不需要密码，直接进入（仅兼容历史/开发模式）
-          setIsAuthenticated(true);
-        } else if (authService.isAuthenticated()) {
-          // 已有 token，验证是否有效
-          const valid = await authService.verify();
-          setIsAuthenticated(valid);
-        }
-      } catch (error) {
-        console.error('检查认证状态失败:', error);
-      } finally {
-        setAuthChecking(false);
-      }
-    };
-
-    checkAuth();
-  }, []);
 
   const buildFileQueryOptions = useCallback((signal?: AbortSignal): FileQueryOptions => {
     let type: FileQueryOptions['type'];
@@ -381,15 +374,14 @@ function App() {
       setFileCursor(page.nextCursor);
       setHasMoreFiles(page.hasMore);
       setIsStale(false);
-    } catch (error: any) {
-      if (error?.name === 'AbortError') return;
+    } catch (error: unknown) {
+      if (isErrorNamed(error, 'AbortError')) return;
       if (!request.isCurrent()) return;
-      if (error.message === 'UNAUTHORIZED') {
-        authService.clearToken();
-        setIsAuthenticated(false);
+      if (isUnauthorizedError(error)) {
+        authService.invalidateSession(error.status);
       } else {
         console.error('加载文件失败:', error);
-        setQueryError(error.message || '加载文件失败');
+        setQueryError(errorMessage(error, '加载文件失败'));
         setIsStale(hadData);
       }
     } finally {
@@ -417,14 +409,13 @@ function App() {
       setHasMoreFiles(page.hasMore);
       setQueryError(null);
       setIsStale(false);
-    } catch (error: any) {
-      if (error?.name === 'AbortError' || !request.isCurrent()) return;
-      if (error.message === 'UNAUTHORIZED') {
-        authService.clearToken();
-        setIsAuthenticated(false);
+    } catch (error: unknown) {
+      if (isErrorNamed(error, 'AbortError') || !request.isCurrent()) return;
+      if (isUnauthorizedError(error)) {
+        authService.invalidateSession(error.status);
       } else {
         console.error('加载更多文件失败:', error);
-        setQueryError(error.message || '加载更多文件失败');
+        setQueryError(errorMessage(error) || '加载更多文件失败');
         setIsStale(true);
       }
     } finally {
@@ -441,10 +432,9 @@ function App() {
       const accepted = request.accept(stats);
       if (accepted) setStorageStats(stats);
       else if (expectedAccountId !== undefined) throw new Error('存储统计账户与当前活动账户不一致');
-    } catch (error: any) {
-      if (error.message === 'UNAUTHORIZED') {
-        authService.clearToken();
-        setIsAuthenticated(false);
+    } catch (error: unknown) {
+      if (isUnauthorizedError(error)) {
+        authService.invalidateSession(error.status);
       } else {
         console.error('加载存储统计失败:', error);
         if (expectedAccountId !== undefined) throw error;
@@ -510,14 +500,12 @@ function App() {
         fileQueryCacheRef.current.set(queryKey, snapshot);
         setIsStale(false);
         return snapshot;
-      } catch (error: any) {
-        if (error?.name !== 'AbortError' && request.isCurrent()) {
-          if (error.message === 'UNAUTHORIZED') {
-            authService.clearToken();
-            invalidateFileQueryCache();
-            setIsAuthenticated(false);
+      } catch (error: unknown) {
+        if (!isErrorNamed(error, 'AbortError') && request.isCurrent()) {
+          if (isUnauthorizedError(error)) {
+            authService.invalidateSession(error.status);
           } else {
-            setQueryError(error.message || '加载文件失败');
+            setQueryError(errorMessage(error, '加载文件失败'));
             setIsStale(hadData);
           }
         }
@@ -564,38 +552,18 @@ function App() {
     }, 450);
   }, [navigateFolder]);
 
-  // 登录处理
-  const handleLogin = async (password: string) => {
-    const result = await authService.login(password);
-    if (result.success && !result.requiresTOTP) {
-      setIsAuthenticated(true);
-    }
-    return result;
-  };
-
-  const handleInitialSetup = async (webPassword: string, telegramPin?: string) => {
-    const result = await authService.setup(webPassword, telegramPin);
-    if (result.success) {
-      setSetupRequired(false);
-      setNeedsPassword(true);
-      setIsAuthenticated(true);
-    }
-    return result;
-  };
-
   const handleLogout = useCallback(async () => {
     uploadManagerRef.current.reset();
-    await authService.logout();
+    await signOut();
     latestFileRequestRef.current.cancel();
     invalidateFileQueryCache();
-    setIsAuthenticated(false);
     setFiles([]);
     setFolderAggregations([]);
     setUploadQueue([]);
     setRecoveredUploads([]);
     setResumingSessionIds([]);
     setIsUploadQueuePaused(false);
-  }, [invalidateFileQueryCache]);
+  }, [invalidateFileQueryCache, signOut]);
 
   // 派生上传状态
   const isUploading = useMemo(() => {
@@ -632,10 +600,9 @@ function App() {
           type: 'success'
         });
       }
-    } catch (error: any) {
-      if (error.message === 'UNAUTHORIZED') {
-        authService.clearToken();
-        setIsAuthenticated(false);
+    } catch (error: unknown) {
+      if (isUnauthorizedError(error)) {
+        authService.invalidateSession(error.status);
       } else {
         console.error('切换文件夹收藏状态失败:', error);
         setNotification({
@@ -679,20 +646,19 @@ function App() {
         try {
           await uploadManagerRef.current.enqueue(item.id, createUploadQueueInput(item, folder, targetSnapshot));
           setUploadQueue(prev => prev.map(q => q.id === item.id ? { ...q, status: 'completed', progress: 100 } : q));
-        } catch (err: any) {
-          if (err?.name === 'AbortError') {
+        } catch (err: unknown) {
+          if (isErrorNamed(err, 'AbortError')) {
             setUploadQueue(prev => prev.map(q => q.id === item.id ? { ...q, status: 'cancelled', error: '已取消' } : q));
             return;
           }
           console.error(`File ${item.file.name} upload failed:`, err);
-          if (err.message === 'UNAUTHORIZED') {
-            authService.clearToken();
-            setIsAuthenticated(false);
+          if (isUnauthorizedError(err)) {
+            authService.invalidateSession(err.status);
           }
           setUploadQueue(prev => prev.map(q => q.id === item.id ? {
             ...q,
             status: 'error',
-            error: err.message || '上传失败'
+            error: errorMessage(err, '上传失败')
           } : q));
         }
       });
@@ -703,7 +669,7 @@ function App() {
       invalidateFileQueryCache();
       await Promise.all([loadFiles(), loadStorageStats(), loadIncompleteUploads(false)]);
 
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error('批量上传过程出错:', error);
     }
   };
@@ -746,10 +712,10 @@ function App() {
       setRecoveredUploads(prev => prev.filter(entry => entry.uploadId !== session.uploadId));
       invalidateFileQueryCache();
       await Promise.all([loadFiles(), loadStorageStats()]);
-    } catch (error: any) {
-      const cancelled = error?.name === 'AbortError';
+    } catch (error: unknown) {
+      const cancelled = isErrorNamed(error, 'AbortError');
       setUploadQueue(prev => prev.map(entry => entry.id === item.id
-        ? { ...entry, status: cancelled ? 'cancelled' : 'error', error: cancelled ? '已取消' : (error?.message || '续传失败') }
+        ? { ...entry, status: cancelled ? 'cancelled' : 'error', error: cancelled ? '已取消' : errorMessage(error, '续传失败') }
         : entry));
       await loadIncompleteUploads(false);
     } finally {
@@ -778,8 +744,8 @@ function App() {
         message: cancellation === 'cancelled' ? '上传会话已取消' : '上传会话已结束',
         type: 'success',
       });
-    } catch (error: any) {
-      setNotification({ show: true, message: error?.message || '取消上传会话失败', type: 'error' });
+    } catch (error: unknown) {
+      setNotification({ show: true, message: errorMessage(error, '取消上传会话失败'), type: 'error' });
       await loadIncompleteUploads(false);
     }
   };
@@ -821,10 +787,10 @@ function App() {
         : item));
       invalidateFileQueryCache();
       await Promise.all([loadFiles(), loadStorageStats()]);
-    } catch (error: any) {
-      const cancelled = error?.name === 'AbortError';
+    } catch (error: unknown) {
+      const cancelled = isErrorNamed(error, 'AbortError');
       setUploadQueue(prev => prev.map(item => item.id === id
-        ? { ...item, status: cancelled ? 'cancelled' : 'error', error: cancelled ? '已取消' : (error?.message || '上传失败') }
+        ? { ...item, status: cancelled ? 'cancelled' : 'error', error: cancelled ? '已取消' : (errorMessage(error, '上传失败')) }
         : item));
     }
   };
@@ -842,13 +808,12 @@ function App() {
       setDeletingFile(null);
       setNotification({ show: true, message: '文件已删除', type: 'success' });
       await loadStorageStats();
-    } catch (error: any) {
-      if (error.message === 'UNAUTHORIZED') {
-        authService.clearToken();
-        setIsAuthenticated(false);
+    } catch (error: unknown) {
+      if (isUnauthorizedError(error)) {
+        authService.invalidateSession(error.status);
       } else {
         console.error('删除失败:', error);
-        setNotification({ show: true, message: error.message || '删除失败', type: 'error' });
+        setNotification({ show: true, message: errorMessage(error) || '删除失败', type: 'error' });
         throw error;
       }
     }
@@ -881,13 +846,12 @@ function App() {
       setPendingBatchDelete(null);
       setBatchDeletePreview(null);
       setNotification({ show: true, message: result.message || '删除完成', type: 'success' });
-    } catch (error: any) {
-      if (error.message === 'UNAUTHORIZED') {
-        authService.clearToken();
-        setIsAuthenticated(false);
+    } catch (error: unknown) {
+      if (isUnauthorizedError(error)) {
+        authService.invalidateSession(error.status);
       } else {
         console.error('批量删除失败:', error);
-        setNotification({ show: true, message: error.message || '批量删除失败', type: 'error' });
+        setNotification({ show: true, message: errorMessage(error) || '批量删除失败', type: 'error' });
         throw error;
       }
     } finally {
@@ -902,12 +866,11 @@ function App() {
       setBatchDeletePreview(preview);
       setBatchDeleteResult(null);
       setPendingBatchDelete({ fileIds, folderNames });
-    } catch (error: any) {
-      if (error.message === 'UNAUTHORIZED') {
-        authService.clearToken();
-        setIsAuthenticated(false);
+    } catch (error: unknown) {
+      if (isUnauthorizedError(error)) {
+        authService.invalidateSession(error.status);
       } else {
-        setNotification({ show: true, message: error.message || '获取删除影响范围失败', type: 'error' });
+        setNotification({ show: true, message: errorMessage(error) || '获取删除影响范围失败', type: 'error' });
       }
     }
   };
@@ -932,10 +895,9 @@ function App() {
           type: 'success'
         });
       }
-    } catch (error: any) {
-      if (error.message === 'UNAUTHORIZED') {
-        authService.clearToken();
-        setIsAuthenticated(false);
+    } catch (error: unknown) {
+      if (isUnauthorizedError(error)) {
+        authService.invalidateSession(error.status);
       } else {
         console.error('切换收藏状态失败:', error);
         setNotification({
@@ -956,11 +918,10 @@ function App() {
     try {
       const result = await fileApi.createShareLink(fileId, password, expiration);
       return result.link;
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error("Share failed:", error);
-      if (error.message === 'UNAUTHORIZED') {
-        authService.clearToken();
-        setIsAuthenticated(false);
+      if (isUnauthorizedError(error)) {
+        authService.invalidateSession(error.status);
       }
       throw error;
     }
@@ -986,15 +947,14 @@ function App() {
       invalidateFileQueryCache();
       setRenamingFile(null);
       await refreshFilesAfterMutation();
-    } catch (error: any) {
-      if (error.message === 'UNAUTHORIZED') {
-        authService.clearToken();
-        setIsAuthenticated(false);
+    } catch (error: unknown) {
+      if (isUnauthorizedError(error)) {
+        authService.invalidateSession(error.status);
       } else {
         console.error('重命名失败:', error);
         setNotification({
           show: true,
-          message: error.message || '重命名失败',
+          message: errorMessage(error) || '重命名失败',
           type: 'error'
         });
       }
@@ -1013,15 +973,14 @@ function App() {
       }
       setRenamingFolder(null);
       await refreshFilesAfterMutation();
-    } catch (error: any) {
-      if (error.message === 'UNAUTHORIZED') {
-        authService.clearToken();
-        setIsAuthenticated(false);
+    } catch (error: unknown) {
+      if (isUnauthorizedError(error)) {
+        authService.invalidateSession(error.status);
       } else {
         console.error('重命名文件夹失败:', error);
         setNotification({
           show: true,
-          message: error.message || '重命名文件夹失败',
+          message: errorMessage(error) || '重命名文件夹失败',
           type: 'error'
         });
       }
@@ -1041,11 +1000,11 @@ function App() {
       });
       // 刷新列表
       await refreshFilesAfterMutation();
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error('创建文件夹失败:', error);
       setNotification({
         show: true,
-        message: error.message || '创建文件夹失败',
+        message: errorMessage(error, '创建文件夹失败'),
         type: 'error'
       });
       throw error;
@@ -1148,6 +1107,14 @@ function App() {
     return looseFiles;
   }, [currentFolder, filteredFiles, looseFiles]);
 
+  useEffect(() => setFileRenderWindow(0), [currentCategory, currentFolder, debouncedSearchQuery, sortConfig]);
+  const displayedFileSource = currentFolder ? displayFiles : looseFiles;
+  const renderedFiles = useMemo(() => {
+    const start = fileRenderWindow * FILE_RENDER_WINDOW_SIZE;
+    return displayedFileSource.slice(start, start + FILE_RENDER_WINDOW_SIZE);
+  }, [displayedFileSource, fileRenderWindow]);
+  const fileRenderWindowCount = Math.max(1, Math.ceil(displayedFileSource.length / FILE_RENDER_WINDOW_SIZE));
+
   const mediaPreviewFiles = useMemo(() => {
     const base = currentFolder ? displayFiles : [...folders.flatMap(folder => folder.files.filter(file => file.name !== '.folder')), ...looseFiles];
     const seen = new Set<string>();
@@ -1207,11 +1174,11 @@ function App() {
           type: "success"
         });
       }
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error("Move file failed:", error);
       setNotification({
         show: true,
-        message: error.message || t("app.moveFailed") || "移动失败",
+        message: errorMessage(error) || t("app.moveFailed") || "移动失败",
         type: "error"
       });
       throw error;
@@ -1234,11 +1201,11 @@ function App() {
         });
         await refreshFilesAfterMutation();
       }
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error("Move folder failed:", error);
       setNotification({
         show: true,
-        message: error.message || t("app.moveFailed") || "移动文件夹失败",
+        message: errorMessage(error) || t("app.moveFailed") || "移动文件夹失败",
         type: "error"
       });
       throw error;
@@ -1274,7 +1241,7 @@ function App() {
             <Suspense fallback={<LazyFallback />}>
               <SettingsPage
                 storageStats={storageStats}
-                onSignedOut={() => setIsAuthenticated(false)}
+                onSignedOut={markUnauthenticated}
                 onOpenTasksForAccount={(accountId) => navigateRoute({ kind: 'tasks', accountId, needsReplace: false })}
                 onStorageConfigChanged={handleStorageConfigChanged}
                 onStorageStatsRefresh={loadStorageStats}
@@ -1284,7 +1251,7 @@ function App() {
             </Suspense>
           ) : currentCategory === "tasks" ? (
             <Suspense fallback={<LazyFallback />}>
-              <TasksPage onUnauthorized={() => setIsAuthenticated(false)} onOpenUploads={() => setIsQueueModalOpen(true)} initialAccountId={taskAccountId} />
+              <TasksPage onUnauthorized={markUnauthenticated} onOpenUploads={() => setIsQueueModalOpen(true)} onShowAllTasks={() => navigateRoute(routeForCategory('tasks'))} initialAccountId={taskAccountId} />
             </Suspense>
           ) : currentCategory === "upload" ? (
             <UploadCenter
@@ -1411,10 +1378,9 @@ function App() {
                     try {
                       const result = await fileApi.createYtDlpTask(input);
                       setNotification({ show: true, message: `下载任务 ${result.task.id} 已加入队列`, type: 'success' });
-                    } catch (error: any) {
-                      if (error?.message === 'UNAUTHORIZED') {
-                        authService.clearToken();
-                        setIsAuthenticated(false);
+                    } catch (error: unknown) {
+                      if (isUnauthorizedError(error)) {
+                        authService.invalidateSession(error.status);
                       }
                       throw error;
                     }
@@ -1563,7 +1529,7 @@ function App() {
                     {displayFiles.length > 0 && (
                       <div className={viewMode === "grid" ? "grid grid-cols-2 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-5" : "flex flex-col gap-2"}>
                         <AnimatePresence mode="wait">
-                          {displayFiles.map((file) => (
+                          {renderedFiles.map((file) => (
                             <motion.div key={file.id} initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.15 }}>
                               {viewMode === "grid" ? (
                                 <FileCard
@@ -1593,7 +1559,7 @@ function App() {
                                   <div className="h-12 w-12 rounded-lg bg-muted flex items-center justify-center text-xs font-bold text-muted-foreground uppercase">{file.type.slice(0, 3)}</div>
                                   <div className="flex-1 min-w-0"><h4 className="font-medium truncate">{file.name}</h4><p className="text-xs text-muted-foreground">{file.date}</p></div>
                                   <div className="text-sm font-medium tabular-nums text-muted-foreground">{file.size}</div>
-                                  <FileMenu onDelete={storageConfig?.capabilities.userDelete !== false ? () => verifyDelete(file) : undefined} onToggleFavorite={() => handleToggleFavorite(file.id)} isFavorite={!!file.is_favorite} />
+                                  <FileMenu onDownload={() => void fileApi.downloadFile(file.id, file.name)} onRename={() => setRenamingFile(file)} onMove={() => setMovingFile(file)} onDelete={storageConfig?.capabilities.userDelete !== false ? () => verifyDelete(file) : undefined} onToggleFavorite={() => handleToggleFavorite(file.id)} isFavorite={!!file.is_favorite} />
                                 </div>
                               )}
                             </motion.div>
@@ -1668,7 +1634,7 @@ function App() {
                         )}
                         <div className={viewMode === "grid" ? "grid grid-cols-2 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-5" : "flex flex-col gap-2"}>
                           <AnimatePresence mode="wait">
-                            {looseFiles.map((file) => (
+                            {renderedFiles.map((file) => (
                               <motion.div
                                 key={file.id}
                                 initial={{ opacity: 0 }}
@@ -1714,15 +1680,12 @@ function App() {
                                       <div className="flex items-center gap-2">
                                         <p className="text-xs text-muted-foreground">{file.date}</p>
                                         <span className="text-[10px] text-muted-foreground/60">•</span>
-                                        <div className="flex items-center gap-1 text-[10px] text-muted-foreground/60">
-                                          {file.source === 'onedrive' ? <Cloud className="h-2.5 w-2.5" /> : (file.source === 'google_drive' ? <Database className="h-2.5 w-2.5" /> : (file.source === 'aliyun_oss' ? <Database className="h-2.5 w-2.5" /> : (file.source === 's3' ? <Package className="h-2.5 w-2.5" /> : (file.source === 'webdav' ? <Network className="h-2.5 w-2.5" /> : <HardDrive className="h-2.5 w-2.5" />))))}
-                                          <span>{file.source === 'onedrive' ? 'OneDrive' : (file.source === 'google_drive' ? 'Google Drive' : (file.source === 'aliyun_oss' ? 'Aliyun OSS' : (file.source === 's3' ? 'S3' : (file.source === 'webdav' ? 'WebDAV' : 'Local'))))}</span>
-                                        </div>
+                                        {(() => { const provider = getProviderMetadata(file.source); const ProviderIcon = provider.icon; return <div className="flex items-center gap-1 text-[10px] text-muted-foreground/60"><ProviderIcon className="h-2.5 w-2.5" /><span>{provider.label}</span></div>; })()}
                                       </div>
                                     </div>
                                     <div className="text-sm font-medium tabular-nums text-muted-foreground px-4">{file.size}</div>
                                     <div>
-                                      <FileMenu onDelete={storageConfig?.capabilities.userDelete !== false ? () => verifyDelete(file) : undefined} onToggleFavorite={() => handleToggleFavorite(file.id)} isFavorite={!!file.is_favorite} />
+                                      <FileMenu onDownload={() => void fileApi.downloadFile(file.id, file.name)} onRename={() => setRenamingFile(file)} onMove={() => setMovingFile(file)} onDelete={storageConfig?.capabilities.userDelete !== false ? () => verifyDelete(file) : undefined} onToggleFavorite={() => handleToggleFavorite(file.id)} isFavorite={!!file.is_favorite} />
                                     </div>
                                   </div>
                                 )}
@@ -1733,6 +1696,14 @@ function App() {
                       </div>
                     )}
                   </div>
+                )}
+
+                {displayedFileSource.length > FILE_RENDER_WINDOW_SIZE && !loading && (
+                  <nav className="flex items-center justify-center gap-3 pt-6" aria-label="已加载文件窗口">
+                    <Button variant="outline" disabled={fileRenderWindow === 0} onClick={() => setFileRenderWindow(value => Math.max(0, value - 1))}>上一批</Button>
+                    <span className="text-sm text-muted-foreground">已加载文件第 {fileRenderWindow + 1}/{fileRenderWindowCount} 批</span>
+                    <Button variant="outline" disabled={fileRenderWindow >= fileRenderWindowCount - 1} onClick={() => setFileRenderWindow(value => Math.min(fileRenderWindowCount - 1, value + 1))}>下一批</Button>
+                  </nav>
                 )}
 
                 {hasMoreFiles && !loading && (

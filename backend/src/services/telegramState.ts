@@ -26,13 +26,16 @@ export const authenticatedUsers = new Map<number, { authenticatedAt: Date }>();
 // Password input state
 export const passwordInputState = new ScopedInteractionMap<number, { password: string }>({ ttlMs: INTERACTION_TTL_MS, maxEntries: INTERACTION_MAX_ENTRIES });
 
-export async function revokeAuthenticatedUser(userId: number): Promise<void> {
-    authenticatedUsers.delete(userId);
-    try {
-        await query('DELETE FROM telegram_auth WHERE user_id = $1', [userId]);
-    } catch (error) {
-        console.error('🤖 撤销 Telegram 授权用户失败:', error);
-    }
+type TelegramRevokeQuery = (sql: string, params?: unknown[]) => Promise<Pick<QueryResult, 'rows' | 'rowCount'>>;
+
+export async function revokeAuthenticatedUser(
+    userId: number,
+    dependencies: { query?: TelegramRevokeQuery; cache?: Map<number, { authenticatedAt: Date }> } = {},
+): Promise<void> {
+    const runQuery = dependencies.query || (query as TelegramRevokeQuery);
+    const cache = dependencies.cache || authenticatedUsers;
+    await runQuery('DELETE FROM telegram_auth WHERE user_id = $1', [userId]);
+    cache.delete(userId);
 }
 
 export interface TelegramAllowlistReconciliationResult {

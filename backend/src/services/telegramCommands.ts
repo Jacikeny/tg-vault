@@ -52,6 +52,12 @@ import {
 import { buildTelegramStatusPanel } from './telegramStatusPanel.js';
 import { getTelegramBotStatus } from './telegramBotStatus.js';
 import { getTelegramNotificationPreferences, setTelegramNotificationPreferences } from './telegramNotificationPreferences.js';
+import {
+    buildNotificationSettingsButtonRows,
+    buildNotificationSettingsText,
+    notificationCallbackArgs,
+    updateNotificationPreference,
+} from './telegramNotificationSettings.js';
 import { getTelegramUserClientStatus } from './telegramUserClientStatus.js';
 import crypto from 'crypto';
 import { buildStorageCapabilities } from '../utils/storageProductContract.js';
@@ -364,15 +370,11 @@ function buildDownloadWorkersText(current: number): string {
     return [
         '⚙️ **Telegram 分片并发设置**',
         '',
-        `当前 worker 数：**${current}**`,
+        `当前分片数：**${current}**`,
         '',
-        '说明：Telegram 单次请求上限仍是 512KB，这里调整的是单个文件内部的并发分片请求数。',
-        '如果要调整“一次同时下载几个文件”，请使用 /file_concurrency。',
+        '这里控制单个文件同时下载多少个分片；数值越高越快，也越容易触发限流。',
         '',
-        '建议：',
-        '- `4`：稳定优先',
-        '- `8`：速度/稳定平衡',
-        '- `12` / `16`：激进模式，可能触发风控、断流、限速，甚至账号风险，需要二次确认',
+        '建议：4 稳定优先，8 速度与稳定平衡；12 或 16 属于激进模式，需要二次确认。',
     ].join('\n');
 }
 
@@ -426,16 +428,11 @@ function buildFileConcurrencyText(current: number): string {
         `当前同时下载文件数：**${current}**`,
         `当前队列：进行中 ${stats.active}，等待中 ${stats.pending}`,
         '',
-        '说明：这里控制“一次同时下载几个文件”。',
-        '它不同于 /download_workers：后者控制单个文件内部的 512KB 分片并发。',
+        '这里控制一次同时下载多少个文件。',
         '',
-        '建议：',
-        '- `1`：最稳，适合风控/限速时使用',
-        '- `2`：默认推荐，速度与稳定平衡',
-        '- `3`：速度优先，适合线路稳定时使用',
-        '- `4`：激进模式，可能触发 Telegram 限流或云盘上传限速，需要二次确认',
+        '建议：1 最稳定，2 默认推荐，3 速度优先；4 属于激进模式，需要二次确认。',
         '',
-        '修改后会立即影响队列中新启动的文件下载；已在进行中的文件不会被中断。',
+        '修改后只影响新开始的文件，正在下载的文件不会中断。',
     ].join('\n');
 }
 
@@ -467,10 +464,10 @@ function buildDuplicateModeText(mode: DuplicateMode): string {
         '',
         `当前模式：${mode === 'skip' ? '跳过重复' : '生成副本'}`,
         '',
-        '- 跳过重复：同名 + 同目录 + 同大小时不再保存',
-        '- 生成副本：自动改名为 `文件 (1).ext` 保留副本',
+        '• 跳过重复：名称、目录和大小都相同时不再保存',
+        '• 生成副本：自动改名并保留一份副本',
         '',
-        '说明：修改后只影响后续新上传/转存文件。',
+        '只影响之后保存的文件。',
     ].join('\n');
 }
 
@@ -498,10 +495,10 @@ function buildCleanupSettingsText(enabled: boolean): string {
         '',
         `当前状态：${enabled ? '✅ 开启' : '⬜ 关闭'}`,
         '',
-        '开启后会自动删除本地 uploads 中未登记到文件索引、且超过保护期的临时文件。',
-        '这不会删除任务历史、已登记文件或第三方云端实体。',
+        '开启后每小时检查服务器下载目录，只删除超过 10 分钟且未出现在文件列表中的临时文件。',
+        '不会删除任务记录、已登记文件或云端文件。',
         '',
-        '如果本地 uploads 中有绕过 TG Vault 写入的文件，请保持关闭，避免其被识别为未索引临时文件。',
+        '如果你会绕过 TG Vault 直接写入服务器下载目录，请保持关闭。',
     ].join('\n');
 }
 
@@ -521,8 +518,19 @@ export async function handleStart(message: Api.Message, senderId: number, button
     }
 }
 
-export async function handleHelp(message: Api.Message): Promise<void> {
-    await message.reply({ message: buildHelp() });
+export async function handleHelp(message: Api.Message, buttons?: Api.TypeReplyMarkup): Promise<void> {
+    await message.reply({ message: buildHelp(), buttons });
+}
+
+function buildNotificationSettingsKeyboard(current: Awaited<ReturnType<typeof getTelegramNotificationPreferences>>): Api.ReplyInlineMarkup {
+    return new Api.ReplyInlineMarkup({
+        rows: buildNotificationSettingsButtonRows(current).map(row => new Api.KeyboardButtonRow({
+            buttons: row.map(button => new Api.KeyboardButtonCallback({
+                text: button.text,
+                data: Buffer.from(button.data),
+            })),
+        })),
+    });
 }
 
 export async function handleNotifications(message: Api.Message, args: string[] = []): Promise<void> {
@@ -534,32 +542,79 @@ export async function handleNotifications(message: Api.Message, args: string[] =
     const chatId = canonicalTelegramChatKey(message.chatId?.toString() || userId);
     const current = await getTelegramNotificationPreferences(userId, chatId);
     if (args.length === 0) {
-        await message.reply({ message: [
-            '🔔 **通知偏好**',
-            `失败：${current.failureImmediate ? '即时' : '摘要'}`,
-            `成功：${current.successMode}`,
-            `安全：始终即时（不可关闭）`,
-            `订阅：${current.subscriptionDigest ? '摘要' : '即时'}`,
-            `时区：${current.timezone}`,
-            `安静时段：${current.quietStart && current.quietEnd ? `${current.quietStart}-${current.quietEnd}` : '关闭'}`,
-            '',
-            '用法：/notifications timezone Asia/Shanghai；/notifications quiet 22:00-07:00；/notifications success digest|immediate|off；/notifications failure immediate|digest；/notifications subscription digest|immediate',
-        ].join('\n') });
+        await message.reply({
+            message: buildNotificationSettingsText(current),
+            buttons: buildNotificationSettingsKeyboard(current),
+        });
         return;
     }
-    const [key, value = ''] = args;
-    const update: Record<string, unknown> = { ...current };
-    if (key === 'timezone') update.timezone = value;
-    else if (key === 'quiet') {
-        const match = value.match(/^([0-2]\d:[0-5]\d)-([0-2]\d:[0-5]\d)$/);
-        if (!match) throw new Error('安静时段格式必须是 HH:MM-HH:MM');
-        update.quietStart = match[1]; update.quietEnd = match[2];
-    } else if (key === 'success') update.successMode = value;
-    else if (key === 'failure') update.failureImmediate = value === 'immediate';
-    else if (key === 'subscription') update.subscriptionDigest = value !== 'immediate';
-    else throw new Error('未知通知设置');
-    const saved = await setTelegramNotificationPreferences(userId, chatId, update);
-    await message.reply({ message: `✅ 通知偏好已更新。安全告警仍始终即时。\n时区：${saved.timezone}；安静时段：${saved.quietStart || '-'}-${saved.quietEnd || '-'}` });
+
+    try {
+        const saved = await setTelegramNotificationPreferences(
+            userId,
+            chatId,
+            updateNotificationPreference(current, args),
+        );
+        await message.reply({
+            message: `${buildNotificationSettingsText(saved)}\n\n✅ 设置已保存。`,
+            buttons: buildNotificationSettingsKeyboard(saved),
+        });
+    } catch (error) {
+        await message.reply({
+            message: `❌ ${(error as Error).message}\n\n发送 /notifications 可重新查看说明和快捷按钮。`,
+        });
+    }
+}
+
+export async function handleNotificationsCallback(
+    client: TelegramClient,
+    update: Api.UpdateBotCallbackQuery,
+    data: string,
+): Promise<void> {
+    const userId = update.userId.toJSNumber();
+    if (!(await isAuthenticatedAsync(userId))) {
+        await client.invoke(new Api.messages.SetBotCallbackAnswer({
+            queryId: update.queryId,
+            message: MSG.AUTH_REQUIRED,
+            alert: true,
+        }));
+        return;
+    }
+
+    try {
+        const args = notificationCallbackArgs(data);
+        if (!args) return;
+        const chatId = getCallbackChatKey(update);
+        const current = await getTelegramNotificationPreferences(userId, chatId);
+        const next = updateNotificationPreference(current, args);
+        if (JSON.stringify(next) === JSON.stringify(current)) {
+            await client.invoke(new Api.messages.SetBotCallbackAnswer({
+                queryId: update.queryId,
+                message: '已是当前设置',
+            }));
+            return;
+        }
+        const saved = await setTelegramNotificationPreferences(
+            userId,
+            chatId,
+            next,
+        );
+        await client.editMessage(update.peer, {
+            message: Number(update.msgId),
+            text: buildNotificationSettingsText(saved),
+            buttons: buildNotificationSettingsKeyboard(saved),
+        });
+        await client.invoke(new Api.messages.SetBotCallbackAnswer({
+            queryId: update.queryId,
+            message: '通知设置已更新',
+        }));
+    } catch (error) {
+        await client.invoke(new Api.messages.SetBotCallbackAnswer({
+            queryId: update.queryId,
+            message: `设置失败：${(error as Error).message}`,
+            alert: true,
+        }));
+    }
 }
 
 export async function handleStatus(message: Api.Message): Promise<void> {
@@ -653,6 +708,20 @@ export async function handleStorage(message: Api.Message): Promise<void> {
     }
 }
 
+function buildTargetKeyboard(): Api.ReplyInlineMarkup {
+    return new Api.ReplyInlineMarkup({
+        rows: [
+            new Api.KeyboardButtonRow({ buttons: [
+                new Api.KeyboardButtonCallback({ text: '📌 下一次使用当前存储', data: Buffer.from('target_once_active') }),
+                new Api.KeyboardButtonCallback({ text: '📍 本聊天使用当前存储', data: Buffer.from('target_session_active') }),
+            ] }),
+            new Api.KeyboardButtonRow({ buttons: [
+                new Api.KeyboardButtonCallback({ text: '🧹 恢复系统默认', data: Buffer.from('target_clear') }),
+            ] }),
+        ],
+    });
+}
+
 export async function handleTarget(message: Api.Message, args: string[] = []): Promise<void> {
     const senderId = message.senderId?.toJSNumber();
     if (!senderId || !(await isAuthenticatedAsync(senderId))) {
@@ -673,17 +742,21 @@ export async function handleTarget(message: Api.Message, args: string[] = []): P
         await message.reply({
             message: [
                 '🎯 **当前聊天存储目标**',
-                `下一次：${once ? `${once.provider} / ${once.accountId || 'local'}` : '未设置'}`,
-                `会话：${session ? `${session.provider} / ${session.accountId || 'local'}` : '未设置'}`,
-                `系统默认：${active.provider.name} / ${active.accountId || 'local'}`,
+                `下一次：${once ? `${getProviderDisplayName(once.provider)}（已设置）` : '系统默认'}`,
+                `本聊天：${session ? `${getProviderDisplayName(session.provider)}（已设置）` : '系统默认'}`,
+                `系统默认：${getProviderDisplayName(active.provider.name)}`,
                 '',
-                '用法：`/target once <local|账户ID>`、`/target session <local|账户ID>`、`/target clear`',
+                '👇 点击按钮，用当前系统存储设置临时目标。',
             ].join('\n'),
+            buttons: buildTargetKeyboard(),
         });
         return;
     }
     if (!['once', 'session'].includes(modeInput) || !args[1]) {
-        await message.reply({ message: '❌ 用法：/target once <local|账户ID>、/target session <local|账户ID>、/target clear' });
+        await message.reply({
+            message: '❌ 无法识别这个存储目标。请使用下方按钮。',
+            buttons: buildTargetKeyboard(),
+        });
         return;
     }
     const mode = modeInput as TelegramTargetMode;
@@ -706,6 +779,49 @@ export async function handleTarget(message: Api.Message, args: string[] = []): P
     const expiresAt = new Date(Date.now() + (mode === 'once' ? 24 * 60 * 60 * 1000 : 7 * 24 * 60 * 60 * 1000));
     await setTelegramTargetState(undefined, chatId, mode, provider, accountId, expiresAt);
     await message.reply({ message: `✅ 已设置${mode === 'once' ? '下一次' : '当前聊天会话'}目标：${provider} / ${accountName}\n不会修改系统全局默认。` });
+}
+
+export async function handleTargetCallback(
+    client: TelegramClient,
+    update: Api.UpdateBotCallbackQuery,
+    data: string,
+): Promise<void> {
+    const userId = update.userId.toJSNumber();
+    if (!(await isAuthenticatedAsync(userId))) {
+        await client.invoke(new Api.messages.SetBotCallbackAnswer({ queryId: update.queryId, message: MSG.AUTH_REQUIRED, alert: true }));
+        return;
+    }
+    const chatId = getCallbackChatKey(update);
+    if (data === 'target_clear') {
+        await clearTelegramTargetState(chatId);
+        await client.invoke(new Api.messages.SetBotCallbackAnswer({ queryId: update.queryId, message: '已恢复系统默认' }));
+    } else {
+        const mode: TelegramTargetMode = data === 'target_once_active' ? 'once' : 'session';
+        const active = storageManager.getActiveTarget();
+        const expiresAt = new Date(Date.now() + (mode === 'once' ? 24 * 60 * 60 * 1000 : 7 * 24 * 60 * 60 * 1000));
+        await setTelegramTargetState(undefined, chatId, mode, active.provider.name, active.accountId, expiresAt);
+        await client.invoke(new Api.messages.SetBotCallbackAnswer({
+            queryId: update.queryId,
+            message: mode === 'once' ? '已设置下一次存储' : '已设置本聊天存储',
+        }));
+    }
+    const once = await getTelegramTargetState(undefined, chatId, 'once');
+    const session = await getTelegramTargetState(undefined, chatId, 'session');
+    const active = storageManager.getActiveTarget();
+    await client.editMessage(update.peer, {
+        message: Number(update.msgId),
+        text: [
+            '🎯 **当前聊天存储目标**',
+            `下一次：${once ? `${getProviderDisplayName(once.provider)}（已设置）` : '系统默认'}`,
+            `本聊天：${session ? `${getProviderDisplayName(session.provider)}（已设置）` : '系统默认'}`,
+            `系统默认：${getProviderDisplayName(active.provider.name)}`,
+            '',
+            '👇 点击按钮，用当前系统存储设置临时目标。',
+        ].join('\n'),
+        buttons: buildTargetKeyboard(),
+    }).catch(error => {
+        if (!isTelegramMessageNotModified(error)) throw error;
+    });
 }
 
 export async function handleStorageSwitch(message: Api.Message): Promise<void> {
@@ -926,8 +1042,8 @@ export async function handleList(message: Api.Message, args: string[]): Promise<
         let page = 1;
         if (args.length > 0) {
             const parsed = parseInt(args[0]);
-            if (!isNaN(parsed) && parsed > 0 && parsed <= 50) {
-                limit = parsed;
+            if (!isNaN(parsed) && parsed > 0) {
+                limit = Math.min(parsed, 12);
             }
         }
         if (args.length > 1) {
@@ -1059,9 +1175,7 @@ export async function applyPendingTelegramFileMutation(message: Api.Message, act
 
 export async function handleDelete(message: Api.Message, args: string[]): Promise<void> {
     if (args.length === 0) {
-        await message.reply({
-            message: '❌ 请提供要删除的文件 ID 前缀\n\n用法：/delete <至少 8 位 ID 前缀>\n提示：发送 /list 可查看最近文件及 ID，也可从 Web 文件预览复制完整 ID。'
-        });
+        await message.reply({ message: '请从“搜索和操作文件”中选择文件，然后点击“删除”。' });
         return;
     }
 
@@ -1888,7 +2002,7 @@ export async function handleDownloadWorkers(message: Api.Message): Promise<void>
         });
     } catch (error) {
         console.error('🤖 获取分片并发设置失败:', error);
-        await message.reply({ message: `❌ 获取分片并发设置失败: ${(error as Error).message}` });
+        await message.reply({ message: '❌ 暂时无法读取单文件分片并发，请稍后重试。' });
     }
 }
 
@@ -1902,7 +2016,7 @@ export async function handleFileConcurrency(message: Api.Message): Promise<void>
         });
     } catch (error) {
         console.error('🤖 获取文件级并发设置失败:', error);
-        await message.reply({ message: `❌ 获取文件级并发设置失败: ${(error as Error).message}` });
+        await message.reply({ message: '❌ 暂时无法读取文件并发设置，请稍后重试。' });
     }
 }
 
@@ -1917,7 +2031,7 @@ export async function handlePathRules(message: Api.Message): Promise<void> {
 export async function handlePathOnce(message: Api.Message, args: string[]): Promise<void> {
     const folder = args.join(' ').trim();
     if (!folder) {
-        await message.reply({ message: '❌ 用法：/p <目录>\n例如：/p PIXIV/每日Top50' });
+        await message.reply({ message: '请直接发送下一次要使用的目录名称。' });
         return;
     }
     try {
@@ -1931,12 +2045,12 @@ export async function handlePathOnce(message: Api.Message, args: string[]): Prom
 export async function handlePathSession(message: Api.Message, args: string[]): Promise<void> {
     const folder = args.join(' ').trim();
     if (!folder) {
-        await message.reply({ message: '❌ 用法：/ps <目录>\n例如：/ps 相册/2026-07' });
+        await message.reply({ message: '请直接发送本聊天要持续使用的目录名称。' });
         return;
     }
     try {
         const normalized = await setSessionTelegramPathPersistent(message.chatId?.toString() || 'unknown', folder);
-        await message.reply({ message: `📍 已设置本会话下载目录：\`${normalized}\`\n${buildPathPreviewLine(normalized)}\n\n后续此聊天中的下载会优先保存到该目录，发送 /pc 可清除。` });
+        await message.reply({ message: `📍 已设置本会话下载目录：\`${normalized}\`\n${buildPathPreviewLine(normalized)}\n\n后续此聊天中的下载会优先保存到该目录；可在“保存位置”中清除。` });
     } catch (error) {
         await message.reply({ message: `❌ 路径无效：${(error as Error).message}` });
     }
@@ -1963,8 +2077,8 @@ export async function handlePathRulesCallback(client: TelegramClient, update: Ap
             const recent = await getRecentTelegramPathsPersistent(chatKey);
             await client.sendMessage(update.peer, {
                 message: recent.length > 0
-                    ? ['🕘 **最近使用目录**', '', ...recent.map((item, index) => `${index + 1}. ${item}`), '', '要使用其中一个目录，请直接复制发送，或发送 `/p <目录>` / `/ps <目录>`。'].join('\n')
-                    : '🕘 暂无最近使用目录。设置过 `/p`、`/ps`、订阅专属目录或下载任务专属目录后会自动记录。'
+                    ? ['🕘 **最近使用目录**', '', ...recent.map((item, index) => `${index + 1}. ${item}`), '', '如需使用某个目录，请在“保存位置”中选择下一次或本聊天目录，然后发送目录名称。'].join('\n')
+                    : '🕘 暂无最近使用目录。设置目录后会自动记录。'
             });
             await client.invoke(new Api.messages.SetBotCallbackAnswer({ queryId: update.queryId, message: '已发送最近目录' }));
             return;
@@ -1984,7 +2098,7 @@ export async function handlePathRulesCallback(client: TelegramClient, update: Ap
         await client.invoke(new Api.messages.SetBotCallbackAnswer({ queryId: update.queryId, message: '保存位置已更新' }));
     } catch (error) {
         console.error('🤖 设置保存位置失败:', error);
-        await client.invoke(new Api.messages.SetBotCallbackAnswer({ queryId: update.queryId, message: `设置失败: ${(error as Error).message}`, alert: true }));
+        await client.invoke(new Api.messages.SetBotCallbackAnswer({ queryId: update.queryId, message: '设置失败，请稍后重试', alert: true }));
     }
 }
 
@@ -2016,7 +2130,7 @@ export async function handleDuplicateModeCallback(client: TelegramClient, update
         await client.invoke(new Api.messages.SetBotCallbackAnswer({ queryId: update.queryId, message: `已设置为${mode === 'skip' ? '跳过重复' : '生成副本'}` }));
     } catch (error) {
         console.error('🤖 设置重复文件处理失败:', error);
-        await client.invoke(new Api.messages.SetBotCallbackAnswer({ queryId: update.queryId, message: `设置失败: ${(error as Error).message}`, alert: true }));
+        await client.invoke(new Api.messages.SetBotCallbackAnswer({ queryId: update.queryId, message: '设置失败，请稍后重试', alert: true }));
     }
 }
 
@@ -2052,7 +2166,7 @@ export async function handleCleanupSettingsCallback(client: TelegramClient, upda
         await client.invoke(new Api.messages.SetBotCallbackAnswer({ queryId: update.queryId, message: enabled ? '已开启自动清理' : '已关闭自动清理' }));
     } catch (error) {
         console.error('🤖 设置自动清理失败:', error);
-        await client.invoke(new Api.messages.SetBotCallbackAnswer({ queryId: update.queryId, message: `设置失败: ${(error as Error).message}`, alert: true }));
+        await client.invoke(new Api.messages.SetBotCallbackAnswer({ queryId: update.queryId, message: '设置失败，请稍后重试', alert: true }));
     }
 }
 
@@ -2086,12 +2200,12 @@ export async function handleDownloadWorkersCallback(client: TelegramClient, upda
                 await client.editMessage(update.peer, {
                     message: Number(update.msgId),
                     text: [
-                        `⚠️ **确认使用 ${workers} workers？**`,
+                        `⚠️ **确认使用 ${workers} 个分片？**`,
                         '',
                         '这是激进分片并发模式，可能出现：',
                         '- Telegram 风控或限流',
                         '- 下载断流 / 重试增多',
-                        '- user session 账号风险，极端情况下可能影响账号',
+                        '- Telegram 用户账号可能被限流，极端情况下会影响账号',
                         '',
                         '如果只是日常下载，建议使用 4 或 8。',
                     ].join('\n'),
@@ -2104,7 +2218,7 @@ export async function handleDownloadWorkersCallback(client: TelegramClient, upda
             await setSetting('telegram_download_workers', String(workers));
             await client.editMessage(update.peer, {
                 message: Number(update.msgId),
-                text: `${buildDownloadWorkersText(workers)}\n\n✅ 已切换为 ${workers} workers，后续新下载任务立即生效。`,
+                text: `${buildDownloadWorkersText(workers)}\n\n✅ 已切换为 ${workers} 个分片，后续新下载任务立即生效。`,
                 buttons: buildDownloadWorkersKeyboard(workers),
             });
             await client.invoke(new Api.messages.SetBotCallbackAnswer({ queryId: update.queryId, message: `已设置为 ${workers}` }));
@@ -2117,7 +2231,7 @@ export async function handleDownloadWorkersCallback(client: TelegramClient, upda
             await setSetting('telegram_download_workers', String(workers));
             await client.editMessage(update.peer, {
                 message: Number(update.msgId),
-                text: `${buildDownloadWorkersText(workers)}\n\n⚠️ 已确认并切换为 ${workers} workers。若出现断流、限速、风控提示，请立即降回 4 或 8。`,
+                text: `${buildDownloadWorkersText(workers)}\n\n⚠️ 已确认并切换为 ${workers} 个分片。若出现断流、限速、风控提示，请立即降回 4 或 8。`,
                 buttons: buildDownloadWorkersKeyboard(workers),
             });
             await client.invoke(new Api.messages.SetBotCallbackAnswer({ queryId: update.queryId, message: `已确认 ${workers} workers`, alert: true }));
@@ -2126,7 +2240,7 @@ export async function handleDownloadWorkersCallback(client: TelegramClient, upda
         console.error('🤖 设置并发下载 worker 失败:', error);
         await client.invoke(new Api.messages.SetBotCallbackAnswer({
             queryId: update.queryId,
-            message: `设置失败: ${(error as Error).message}`,
+            message: '设置失败，请稍后重试',
             alert: true,
         }));
     }
@@ -2204,7 +2318,7 @@ export async function handleFileConcurrencyCallback(client: TelegramClient, upda
         console.error('🤖 设置文件级并发失败:', error);
         await client.invoke(new Api.messages.SetBotCallbackAnswer({
             queryId: update.queryId,
-            message: `设置失败: ${(error as Error).message}`,
+            message: '设置失败，请稍后重试',
             alert: true,
         }));
     }

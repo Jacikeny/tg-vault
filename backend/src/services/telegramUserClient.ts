@@ -6,6 +6,15 @@ import { getEffectiveTelegramBotConfig } from './telegramBotConfig.js';
 import { TelegramUserWebLoginFlows, type TelegramUserLoginAccount, type TelegramUserLoginClient } from './telegramUserWebLogin.js';
 import { deleteSettings, getSetting, setSetting, setSettings } from '../utils/settings.js';
 import { recordTelegramUserClientFailure, recordTelegramUserClientReady } from './telegramUserClientStatus.js';
+import {
+    deleteTelegramUserAccount,
+    listTelegramUserAccounts,
+    reloadTelegramUserClientPool,
+    setTelegramUserAccountEnabled,
+    telegramUserClientPool,
+    upsertTelegramUserAccount,
+} from './telegramUserClientPool.js';
+import { initializeTelegramMultiAccountRuntime } from './telegramMultiAccountRuntime.js';
 
 export const TELEGRAM_USER_SESSION_SETTING = 'telegram_user_session';
 const TELEGRAM_USER_ENABLED_SETTING = 'telegram_user_download_enabled';
@@ -27,12 +36,13 @@ function getSessionFilePath(): string {
     return process.env.TELEGRAM_USER_SESSION_FILE || './data/telegram_user_session.txt';
 }
 
-async function stopClient(): Promise<void> {
+async function stopLegacyClient(): Promise<void> {
     const current = userClient;
     userClient = null;
-    if (!current) return;
-    try { await current.disconnect(); } catch { /* best effort */ }
-    try { await current.destroy(); } catch { /* best effort */ }
+    if (current) {
+        try { await current.disconnect(); } catch { /* best effort */ }
+        try { await current.destroy(); } catch { /* best effort */ }
+    }
 }
 
 export async function migrateLegacyTelegramUserSession(): Promise<string> {
@@ -59,13 +69,22 @@ function makeClient(session: string, credentials: { apiId: number; apiHash: stri
 }
 
 export async function initTelegramUserClient(credentials?: { apiId: number; apiHash: string }): Promise<void> {
-    await stopClient();
+    await stopLegacyClient();
     const resolved = credentials || await getUserCredentials();
     if (!resolved) {
         recordTelegramUserClientFailure('not_configured', '未配置 Telegram API');
         return;
     }
     const sessionString = await migrateLegacyTelegramUserSession();
+    await initializeTelegramMultiAccountRuntime(resolved);
+    const pooledClient = telegramUserClientPool.getDefaultClient();
+    if (pooledClient) {
+        const me = await pooledClient.getMe();
+        recordTelegramUserClientReady({ userId: String((me as any)?.id || ''), username: (me as any)?.username || null });
+        const legacyPath = getSessionFilePath();
+        if (fs.existsSync(legacyPath)) fs.rmSync(legacyPath, { force: true });
+        return;
+    }
     if (!sessionString) {
         recordTelegramUserClientFailure('missing_session', '尚未登录 Telegram 用户账号');
         return;
@@ -99,6 +118,14 @@ async function persistAndActivate(session: string, account: TelegramUserLoginAcc
         [TELEGRAM_USER_ID_SETTING, account.userId],
         [TELEGRAM_USER_USERNAME_SETTING, account.username || ''],
     ]);
+    await upsertTelegramUserAccount({
+        telegramUserId: account.userId,
+        username: account.username,
+        displayName: account.displayName,
+        session,
+        enabled: true,
+        isLegacy: true,
+    });
     await initTelegramUserClient();
 }
 
@@ -150,23 +177,34 @@ export async function getTelegramUserAccountStatus(): Promise<{
 
 export async function disableTelegramUserAccount(): Promise<void> {
     await setSetting(TELEGRAM_USER_ENABLED_SETTING, 'false');
-    await stopClient();
+    for (const account of await listTelegramUserAccounts()) {
+        if (account.isLegacy) await setTelegramUserAccountEnabled(account.id, false);
+    }
+    await stopLegacyClient();
+    await reloadTelegramUserClientPool();
     recordTelegramUserClientFailure('disabled', '');
 }
 
 export async function enableTelegramUserAccount(): Promise<void> {
     await setSetting(TELEGRAM_USER_ENABLED_SETTING, 'true');
+    for (const account of await listTelegramUserAccounts()) {
+        if (account.isLegacy) await setTelegramUserAccountEnabled(account.id, true);
+    }
     await initTelegramUserClient();
 }
 
 export async function unlinkTelegramUserAccount(): Promise<void> {
-    await stopClient();
+    await stopLegacyClient();
+    for (const account of await listTelegramUserAccounts()) {
+        if (account.isLegacy) await deleteTelegramUserAccount(account.id);
+    }
     await deleteSettings([TELEGRAM_USER_SESSION_SETTING, TELEGRAM_USER_ENABLED_SETTING, TELEGRAM_USER_ID_SETTING, TELEGRAM_USER_USERNAME_SETTING]);
+    await reloadTelegramUserClientPool();
     const legacyPath = getSessionFilePath();
     if (fs.existsSync(legacyPath)) fs.rmSync(legacyPath, { force: true });
     recordTelegramUserClientFailure('missing_session', '尚未登录 Telegram 用户账号');
 }
 
-export function getTelegramUserClient(): TelegramClient | null { return userClient; }
-export function isTelegramUserClientReady(): boolean { return Boolean(userClient?.connected); }
+export function getTelegramUserClient(): TelegramClient | null { return telegramUserClientPool.getDefaultClient() || userClient; }
+export function isTelegramUserClientReady(): boolean { return Boolean(getTelegramUserClient()?.connected); }
 export function getTelegramUserSessionFilePath(): string { return userSessionFilePath || path.resolve(getSessionFilePath()); }

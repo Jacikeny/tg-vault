@@ -5,6 +5,7 @@ import test from 'node:test';
 const app = fs.readFileSync(new URL('../App.tsx', import.meta.url), 'utf8');
 const composer = fs.readFileSync(new URL('../components/pages/YtDlpTaskComposer.tsx', import.meta.url), 'utf8');
 const api = fs.readFileSync(new URL('./api.ts', import.meta.url), 'utf8');
+const tasksClient = fs.readFileSync(new URL('./clients/tasksClient.ts', import.meta.url), 'utf8');
 
 test('YT-DLP page exposes a focused add-task form', () => {
     assert.match(app, /currentCategory === "ytdlp"[\s\S]*<YtDlpTaskComposer/);
@@ -16,9 +17,9 @@ test('YT-DLP page exposes a focused add-task form', () => {
 
 test('YT-DLP task submission uses the authenticated task API and surfaces progress guidance', () => {
     assert.match(api, /createYtDlpTask/);
-    assert.match(api, /\/api\/tasks\/ytdlp/);
-    assert.match(api, /method: 'POST'/);
-    assert.match(api, /credentials: 'include'/);
+    assert.match(tasksClient, /\/api\/tasks\/ytdlp/);
+    assert.match(tasksClient, /method: 'POST'/);
+    assert.match(tasksClient, /credentials: 'include'/);
     assert.match(app, /fileApi\.createYtDlpTask/);
     assert.match(composer, /任务中心/);
 });

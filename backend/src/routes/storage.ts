@@ -11,6 +11,10 @@ import { rateLimit } from 'express-rate-limit';
 import { getSetting, setSetting } from '../utils/settings.js';
 import { changeTelegramPin, ensureTelegramPinConfigured, getConfiguredTelegramAllowedUsers, parseTelegramAllowedUserIds, setTelegramAllowedUsersAndReconcile, TelegramPinChangeError } from '../utils/authSettings.js';
 import { disableTelegramUserAccount, enableTelegramUserAccount, getTelegramUserAccountStatus, getTelegramUserSessionFilePath, isTelegramUserClientReady, telegramUserWebLogin, unlinkTelegramUserAccount } from '../services/telegramUserClient.js';
+import { telegramAccountRepository } from '../services/telegramAccountRepository.js';
+import { initializeTelegramMultiAccountRuntime, telegramUserClientPool } from '../services/telegramMultiAccountRuntime.js';
+import { triggerTelegramAccountAccessSweep, getTelegramAccountAccessSweepSummary } from '../services/telegramAccountAccessSweep.js';
+import { telegramMultiAccountLoginFlows } from '../services/telegramMultiAccountLogin.js';
 import { assertPublicStorageEndpoint, assertStorageEndpoint } from '../utils/networkSecurity.js';
 import { getCurrentStorageScope } from '../utils/fileScope.js';
 import { getAuthToken } from './auth.js';
@@ -23,6 +27,7 @@ import { buildStorageDeletePreviewQueries } from '../services/storageDeletePrevi
 import { StorageProbeError } from '../services/storage.js';
 import { getTelegramUserClientStatus } from '../services/telegramUserClientStatus.js';
 import { getTelegramBotStatus } from '../services/telegramBotStatus.js';
+import { formatBytes } from '../utils/fileMetadata.js';
 import {
     applyEffectiveTelegramBotConfig,
     deleteTelegramBotConfig,
@@ -66,6 +71,7 @@ const telegramPinChangeLimiter = rateLimit({
 });
 
 const telegramUserLoginLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 10, message: { error: 'Telegram 用户账号登录请求过于频繁，请稍后再试' }, standardHeaders: true, legacyHeaders: false });
+const telegramUserLoginStatusLimiter = rateLimit({ windowMs: 60 * 1000, max: 60, message: { error: 'Telegram 登录状态查询过于频繁，请稍后再试' }, standardHeaders: true, legacyHeaders: false });
 function getTelegramUserLoginSessionKey(req: Request): string { const token = getAuthToken(req); if (!token) throw new Error('UNAUTHORIZED'); return crypto.createHash('sha256').update(token).digest('base64url'); }
 function sendTelegramUserLoginError(res: Response, error: unknown): void { const candidate = error as { code?: string; message?: string }; const status = candidate.code === 'ACCOUNT_ALREADY_BOUND' ? 409 : candidate.code === 'FLOW_NOT_FOUND' || candidate.code === 'FLOW_EXPIRED' ? 404 : candidate.code === 'TOO_MANY_ERRORS' ? 429 : 400; res.status(status).json({ error: candidate.message || 'Telegram 登录失败', code: candidate.code || 'TELEGRAM_ERROR' }); }
 
@@ -241,13 +247,7 @@ router.get('/stats/types', requireAuth, async (_req: Request, res: Response) => 
     }
 });
 
-function formatBytes(bytes: number): string {
-    if (bytes === 0) return '0 B';
-    const k = 1024;
-    const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
-}
+
 
 
 // 获取存储配置
@@ -396,6 +396,7 @@ router.put('/config/telegram-bot', requireAuth, async (req: Request, res: Respon
             await applyEffectiveTelegramBotConfig();
             try {
                 if (enabled) await controls.restart(credentials); else await controls.stop();
+                await initializeTelegramMultiAccountRuntime({ apiId: credentials.apiId, apiHash: credentials.apiHash });
             } catch (activationError) {
                 await restoreTelegramBotConfig(previous);
                 const restored = await applyEffectiveTelegramBotConfig();
@@ -423,6 +424,7 @@ router.post('/config/telegram-bot/migrate', requireAuth, async (req: Request, re
                 setTelegramBotIdentity(bot);
                 await applyEffectiveTelegramBotConfig();
                 await controls.restart(credentials);
+                await initializeTelegramMultiAccountRuntime({ apiId: credentials.apiId, apiHash: credentials.apiHash });
             } catch (activationError) {
                 await restoreTelegramBotConfig(previous);
                 await applyEffectiveTelegramBotConfig();
@@ -506,6 +508,137 @@ router.post('/config/telegram-user-download', requireAuth, async (req: Request, 
 });
 
 router.get('/config/telegram-user', requireAuth, async (_req: Request, res: Response) => { noStore(res); res.json(await getTelegramUserAccountStatus()); });
+
+// Multi-account login API. Successful authorization is delegated to the
+// registered repository/pool adapter, which upserts by Telegram user id.
+router.get('/config/telegram-user/accounts', requireAuth, async (_req: Request, res: Response) => {
+    noStore(res);
+    const accounts = await telegramAccountRepository.listAccounts();
+    const publicAccounts = await Promise.all(accounts.map(async account => {
+    const permissions = await telegramAccountRepository.listAccessForAccount(account.id);
+        const permissionSummary = await telegramAccountRepository.getAccessSummaryForAccount(account.id);
+        const allowed = permissionSummary.allowed;
+        const denied = permissionSummary.denied;
+        const unknown = permissionSummary.unknown;
+        const lastCheckedAt = permissionSummary.lastCheckedAt?.toISOString?.() || null;
+        return {
+            id: account.id,
+            userId: account.telegramUserId,
+            username: account.username,
+            displayName: account.displayName,
+            enabled: account.enabled,
+            connected: Boolean(telegramUserClientPool.getAccountClient(account.id)?.connected),
+            health: !account.enabled ? 'disabled' : account.healthState === 'session_expired' ? 'expired' : account.cooldownUntil && new Date(account.cooldownUntil).getTime() > Date.now() ? 'cooldown' : telegramUserClientPool.getAccountClient(account.id) ? 'ready' : 'error',
+            checkedAt: lastCheckedAt,
+            lastError: account.lastError,
+            cooldownUntil: account.cooldownUntil ? new Date(account.cooldownUntil).toISOString() : null,
+            permissionSummary: { allowed, denied, unknown, total: permissionSummary.total, lastCheckedAt },
+            permissions: permissions.map(row => ({ sourceId: row.sourceKey, sourceName: row.sourceKey, status: row.accessState, checkedAt: row.checkedAt?.toISOString?.() || null, reason: row.lastError })),
+            scheduling: { weight: account.weight, activeDownloads: telegramUserClientPool.getActiveConnections(account.id), lastSelectedAt: null },
+        };
+    }));
+    const aggregate = publicAccounts.reduce((sum, row) => ({
+        allowed: sum.allowed + row.permissionSummary.allowed,
+        denied: sum.denied + row.permissionSummary.denied,
+        unknown: sum.unknown + row.permissionSummary.unknown,
+        total: sum.total + row.permissionSummary.total,
+        lastCheckedAt: !sum.lastCheckedAt || (row.permissionSummary.lastCheckedAt && row.permissionSummary.lastCheckedAt > sum.lastCheckedAt) ? row.permissionSummary.lastCheckedAt : sum.lastCheckedAt,
+    }), { allowed: 0, denied: 0, unknown: 0, total: 0, lastCheckedAt: null as string | null });
+    return res.json({
+        accounts: publicAccounts,
+        summary: { total: publicAccounts.length, enabled: publicAccounts.filter(row => row.enabled).length, ready: publicAccounts.filter(row => row.health === 'ready').length, coolingDown: publicAccounts.filter(row => row.health === 'cooldown').length, permissions: aggregate },
+        scheduling: { strategy: 'weighted_least_connections', description: '权限感知的加权最少连接；同等负载自动轮换账号' },
+        accessSweep: getTelegramAccountAccessSweepSummary(),
+    });
+});
+router.post('/config/telegram-user/accounts/:accountId/enable', requireAuth, async (req: Request, res: Response) => { noStore(res); const ok = await telegramAccountRepository.setEnabled(req.params.accountId, true); if (!ok) return res.status(404).json({ error: '账号不存在' }); await telegramUserClientPool.refresh(); return res.json({ success: true, enabled: true }); });
+router.post('/config/telegram-user/accounts/:accountId/disable', requireAuth, async (req: Request, res: Response) => { noStore(res); const ok = await telegramAccountRepository.setEnabled(req.params.accountId, false); if (!ok) return res.status(404).json({ error: '账号不存在' }); await telegramUserClientPool.refresh(); return res.json({ success: true, enabled: false }); });
+router.delete('/config/telegram-user/accounts/:accountId', requireAuth, async (req: Request, res: Response) => { noStore(res); await telegramUserClientPool.expireAccount(req.params.accountId); const ok = await telegramAccountRepository.deleteAccount(req.params.accountId); return ok ? res.json({ success: true }) : res.status(404).json({ error: '账号不存在' }); });
+router.post('/config/telegram-user/accounts/:accountId/check', requireAuth, async (req: Request, res: Response) => { noStore(res); const summary = await triggerTelegramAccountAccessSweep({ accountIds: [req.params.accountId], reason: 'manual' }); return res.json({ success: true, summary }); });
+router.post('/config/telegram-user/accounts/:accountId/permissions/check', requireAuth, async (req: Request, res: Response) => { noStore(res); const summary = await triggerTelegramAccountAccessSweep({ accountIds: [req.params.accountId], reason: 'manual' }); return res.json({ success: true, summary }); });
+router.post('/config/telegram-user/access/check-all', requireAuth, async (_req: Request, res: Response) => { noStore(res); return res.json({ success: true, summary: await triggerTelegramAccountAccessSweep({ reason: 'manual' }) }); });
+router.post('/config/telegram-user/accounts/permissions/check-all', requireAuth, async (_req: Request, res: Response) => { noStore(res); return res.json({ success: true, summary: await triggerTelegramAccountAccessSweep({ reason: 'manual' }) }); });
+
+function normalizeMultiAccountLoginPayload(payload: any): any {
+    if (!payload || typeof payload !== 'object') return payload;
+    const status = payload.status === 'pending' ? 'waiting_for_scan' : payload.status;
+    const stepStatus = payload.step === 'password_required' ? 'password_required' : payload.step === 'complete' ? 'complete' : undefined;
+    return {
+        ...payload,
+        status: stepStatus || status,
+        qrCode: payload.qrCode || payload.qrData || undefined,
+        qrExpiresAt: payload.qrExpiresAt || payload.expiresAt,
+        message: payload.message || payload.error || undefined,
+    };
+}
+
+// QR/phone aliases consumed by the current Web multi-account panel.
+router.post('/config/telegram-user/accounts/login/qr', requireAuth, telegramUserLoginLimiter, async (req: Request, res: Response) => { noStore(res); try { return res.json(normalizeMultiAccountLoginPayload(await telegramMultiAccountLoginFlows.startQr(getTelegramUserLoginSessionKey(req)))); } catch (error) { return sendTelegramUserLoginError(res, error); } });
+router.post('/config/telegram-user/login/qr', requireAuth, telegramUserLoginLimiter, async (req: Request, res: Response) => { noStore(res); try { return res.json(normalizeMultiAccountLoginPayload(await telegramMultiAccountLoginFlows.startQr(getTelegramUserLoginSessionKey(req)))); } catch (error) { return sendTelegramUserLoginError(res, error); } });
+router.get('/config/telegram-user/login/:flowId', requireAuth, telegramUserLoginStatusLimiter, async (req: Request, res: Response) => { noStore(res); try { return res.json(normalizeMultiAccountLoginPayload(await telegramMultiAccountLoginFlows.getQrStatus(getTelegramUserLoginSessionKey(req), req.params.flowId))); } catch (error) { return sendTelegramUserLoginError(res, error); } });
+router.delete('/config/telegram-user/login/:flowId', requireAuth, telegramUserLoginLimiter, async (req: Request, res: Response) => { noStore(res); try { return res.json(await telegramMultiAccountLoginFlows.cancel(getTelegramUserLoginSessionKey(req), req.params.flowId)); } catch (error) { return sendTelegramUserLoginError(res, error); } });
+router.post('/config/telegram-user/login/phone', requireAuth, telegramUserLoginLimiter, async (req: Request, res: Response) => { noStore(res); try { const started = await telegramMultiAccountLoginFlows.startPhone(getTelegramUserLoginSessionKey(req), req.body?.phone); return res.json({ ...started, status: 'code_required', message: started.delivery === 'app' ? '验证码已发送到 Telegram 应用' : '验证码已通过短信发送' }); } catch (error) { return sendTelegramUserLoginError(res, error); } });
+router.post('/config/telegram-user/login/:flowId/code', requireAuth, telegramUserLoginLimiter, async (req: Request, res: Response) => { noStore(res); try { return res.json(normalizeMultiAccountLoginPayload(await telegramMultiAccountLoginFlows.submitCode(getTelegramUserLoginSessionKey(req), req.params.flowId, req.body?.code))); } catch (error) { return sendTelegramUserLoginError(res, error); } });
+router.post('/config/telegram-user/login/:flowId/password', requireAuth, telegramUserLoginLimiter, async (req: Request, res: Response) => { noStore(res); try { return res.json(normalizeMultiAccountLoginPayload(await telegramMultiAccountLoginFlows.submitPassword(getTelegramUserLoginSessionKey(req), req.params.flowId, req.body?.password))); } catch (error) { return sendTelegramUserLoginError(res, error); } });
+
+router.post('/config/telegram-accounts/login/phone', requireAuth, telegramUserLoginLimiter, async (req: Request, res: Response) => {
+    noStore(res);
+    try {
+        return res.json(await telegramMultiAccountLoginFlows.startPhone(getTelegramUserLoginSessionKey(req), req.body?.phone));
+    } catch (error) {
+        return sendTelegramUserLoginError(res, error);
+    }
+});
+router.post('/config/telegram-accounts/login/code', requireAuth, telegramUserLoginLimiter, async (req: Request, res: Response) => {
+    noStore(res);
+    try {
+        return res.json(await telegramMultiAccountLoginFlows.submitCode(getTelegramUserLoginSessionKey(req), req.body?.flowId, req.body?.code));
+    } catch (error) {
+        return sendTelegramUserLoginError(res, error);
+    }
+});
+router.post('/config/telegram-accounts/login/password', requireAuth, telegramUserLoginLimiter, async (req: Request, res: Response) => {
+    noStore(res);
+    try {
+        return res.json(await telegramMultiAccountLoginFlows.submitPassword(getTelegramUserLoginSessionKey(req), req.body?.flowId, req.body?.password));
+    } catch (error) {
+        return sendTelegramUserLoginError(res, error);
+    }
+});
+router.post('/config/telegram-accounts/login/qr', requireAuth, telegramUserLoginLimiter, async (req: Request, res: Response) => {
+    noStore(res);
+    try {
+        return res.json(await telegramMultiAccountLoginFlows.startQr(getTelegramUserLoginSessionKey(req)));
+    } catch (error) {
+        return sendTelegramUserLoginError(res, error);
+    }
+});
+router.get('/config/telegram-accounts/login/qr/:flowId', requireAuth, telegramUserLoginStatusLimiter, async (req: Request, res: Response) => {
+    noStore(res);
+    try {
+        return res.json(await telegramMultiAccountLoginFlows.getQrStatus(getTelegramUserLoginSessionKey(req), req.params.flowId));
+    } catch (error) {
+        return sendTelegramUserLoginError(res, error);
+    }
+});
+router.post('/config/telegram-accounts/login/qr/:flowId/refresh', requireAuth, telegramUserLoginLimiter, async (req: Request, res: Response) => {
+    noStore(res);
+    try {
+        return res.json(await telegramMultiAccountLoginFlows.refreshQr(getTelegramUserLoginSessionKey(req), req.params.flowId));
+    } catch (error) {
+        return sendTelegramUserLoginError(res, error);
+    }
+});
+router.delete('/config/telegram-accounts/login/:flowId', requireAuth, telegramUserLoginLimiter, async (req: Request, res: Response) => {
+    noStore(res);
+    try {
+        return res.json(await telegramMultiAccountLoginFlows.cancel(getTelegramUserLoginSessionKey(req), req.params.flowId));
+    } catch (error) {
+        return sendTelegramUserLoginError(res, error);
+    }
+});
+
+// Legacy single-account login API remains available for deployed clients.
 router.post('/config/telegram-user/login/phone', requireAuth, telegramUserLoginLimiter, async (req: Request, res: Response) => {
     noStore(res);
     try {

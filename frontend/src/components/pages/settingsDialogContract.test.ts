@@ -7,4 +7,5 @@ const source = fs.readFileSync(new URL('./SettingsPage.tsx', import.meta.url), '
 test('settings uses product dialogs instead of browser alert, confirm, or prompt', () => {
     assert.doesNotMatch(source, /\b(?:window\.)?(?:alert|confirm|prompt)\s*\(/);
     assert.match(source, /ActionDialog/);
+    assert.match(source, /<Dialog open onClose=\{onCancel\}/);
 });

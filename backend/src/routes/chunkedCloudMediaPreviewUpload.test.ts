@@ -2,18 +2,16 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import test from 'node:test';
 
-const source = fs.readFileSync(new URL('./chunkedUpload.ts', import.meta.url), 'utf8');
+const route = fs.readFileSync(new URL('./chunkedUpload.ts', import.meta.url), 'utf8');
+const worker = fs.readFileSync(new URL('../services/mediaDerivatives.ts', import.meta.url), 'utf8');
 
-test('chunked cloud media generates local thumbnail and image preview before remote save', () => {
-    assert.match(source, /if \(session\.mimeType\.startsWith\('image\/'\) \|\| session\.mimeType\.startsWith\('video\/'\)\)/);
-    assert.match(source, /if \(session\.mimeType\.startsWith\('image\/'\)\)[\s\S]*generateMediaPreview\(tempMergedPath/);
+test('chunked cloud media enqueues local thumbnail and preview work after index completion', () => {
+    assert.match(route, /markChunkReconciliationIndexPresent[\s\S]*enqueueMediaDerivatives/);
+    assert.match(worker, /generateThumbnail\(job\.sourcePath/);
+    assert.match(worker, /generateMediaPreview\(job\.sourcePath/);
 });
 
-test('chunked cloud video keeps merged source until preview generation settles', () => {
-    assert.match(source, /const previewSource = target\.provider\.name === 'local' \? storedPath : tempMergedPath/);
-    assert.match(source, /generateMediaPreview\(previewSource[\s\S]*\.finally\(async \(\) => \{[\s\S]*fsPromises\.rm\(tempMergedPath/);
-    const completedAt = source.indexOf('if (!completed)');
-    const videoAt = source.indexOf("if (type === 'video')", completedAt);
-    assert.ok(completedAt >= 0 && videoAt > completedAt);
-    assert.doesNotMatch(source.slice(completedAt, videoAt), /fsPromises\.rm\(tempMergedPath/);
+test('chunked cloud media source is retained until the derivative worker settles', () => {
+    assert.match(route, /cleanupSource: target\.provider\.name !== 'local'/);
+    assert.match(worker, /finally \{[\s\S]*if \(job\.cleanupSource\) await fs\.rm\(job\.sourcePath/);
 });

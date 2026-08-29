@@ -1,6 +1,6 @@
 import React, { useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Cloud, CheckCircle, Info, XCircle } from 'lucide-react';
+import { Cloud, CheckCircle, Info, X, XCircle } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { IndeterminateSpinner } from './IndeterminateSpinner';
 
@@ -53,7 +53,11 @@ export const Notification: React.FC<NotificationProps> = ({
                     exit={{ opacity: 0, y: -20, scale: 0.95 }}
                     className="fixed top-12 inset-x-0 z-[100] flex justify-center pointer-events-none px-4"
                 >
-                    <div className={cn(
+                    <div
+                        role={type === 'error' ? 'alert' : 'status'}
+                        aria-live={type === 'error' ? 'assertive' : 'polite'}
+                        aria-atomic="true"
+                        className={cn(
                         "flex items-center gap-3 px-6 py-4 rounded-2xl border shadow-2xl backdrop-blur-xl pointer-events-auto w-max max-w-[90vw]",
                         bgColors[type]
                     )}>
@@ -63,6 +67,11 @@ export const Notification: React.FC<NotificationProps> = ({
                         <p className="text-sm font-medium text-foreground pr-2">
                             {message}
                         </p>
+                        {type !== 'loading' && (
+                            <button type="button" onClick={onClose} className="-mr-2 rounded-md p-2 text-muted-foreground hover:bg-background/60 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50" aria-label="关闭通知" title="关闭通知">
+                                <X className="h-4 w-4" />
+                            </button>
+                        )}
                     </div>
                 </motion.div>
             )}

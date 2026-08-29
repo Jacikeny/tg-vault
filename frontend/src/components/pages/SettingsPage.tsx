@@ -12,8 +12,10 @@ import { monitorOAuthPopup } from "../../services/oauthPopupFlow";
 import { synchronizeStorageConfig } from "../../services/storageConfigSynchronization";
 import { authService } from "../../services/auth";
 import { SETTINGS_SECTIONS, type SettingsSectionId } from "./settingsSections";
-import { useRuntimeUiLocalization } from "./useRuntimeUiLocalization";
 import { IndeterminateSpinner } from "../ui/IndeterminateSpinner";
+import { errorCode, errorMessage } from "../../services/unknownError";
+import { Dialog } from "../ui/Dialog";
+import { TelegramUserAccountsPanel } from "./TelegramUserAccountsPanel";
 
 interface SettingsPageProps {
     storageStats?: StorageStats | null;
@@ -158,15 +160,12 @@ const ActionDialog = ({ state, input, onInput, onCancel, onConfirm }: {
     onConfirm: () => void;
 }) => {
     const danger = state.tone === 'danger';
-    return createPortal(
-        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/65 p-4 backdrop-blur-[2px]" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) onCancel(); }}>
+    return (
+        <Dialog open onClose={onCancel} labelledBy="settings-action-title" describedBy="settings-action-message" alert={danger} className="w-full max-w-lg">
             <motion.div
                 initial={{ opacity: 0, y: 12, scale: 0.97 }}
                 animate={{ opacity: 1, y: 0, scale: 1 }}
-                className={cn("w-full max-w-lg overflow-hidden rounded-2xl border bg-background shadow-2xl", danger ? "border-destructive/40" : "border-border")}
-                role="dialog"
-                aria-modal="true"
-                aria-labelledby="settings-action-title"
+                className={cn("w-full overflow-hidden rounded-2xl border bg-background shadow-2xl", danger ? "border-destructive/40" : "border-border")}
             >
                 <div className={cn("flex items-start gap-3 border-b px-5 py-4 sm:px-6", danger ? "border-destructive/20 bg-destructive/10" : "border-border bg-muted/30")}>
                     <div className={cn("mt-0.5 rounded-full p-2", danger ? "bg-destructive/15 text-destructive" : "bg-primary/10 text-primary")}>
@@ -179,14 +178,14 @@ const ActionDialog = ({ state, input, onInput, onCancel, onConfirm }: {
                     <button type="button" onClick={onCancel} className="rounded-lg p-1.5 text-muted-foreground transition-colors hover:bg-background/70 hover:text-foreground" aria-label="关闭确认弹窗"><X className="h-4 w-4" /></button>
                 </div>
                 <div className="max-h-[min(60vh,32rem)] overflow-y-auto px-5 py-5 sm:px-6">
-                    <p className="whitespace-pre-line text-sm leading-6 text-muted-foreground">{state.message}</p>
+                    <p id="settings-action-message" className="whitespace-pre-line text-sm leading-6 text-muted-foreground">{state.message}</p>
                     {state.mode === 'prompt' && (
                         <input
                             autoFocus
                             type={state.inputType || 'text'}
                             value={input}
                             onChange={event => onInput(event.target.value)}
-                            onKeyDown={event => { if (event.key === 'Enter') onConfirm(); if (event.key === 'Escape') onCancel(); }}
+                            onKeyDown={event => { if (event.key === 'Enter') onConfirm(); }}
                             className="mt-4 h-11 w-full rounded-lg border border-border bg-background px-3 outline-none focus:ring-2 focus:ring-primary/20"
                         />
                     )}
@@ -196,18 +195,15 @@ const ActionDialog = ({ state, input, onInput, onCancel, onConfirm }: {
                     <Button variant={danger ? 'destructive' : 'default'} onClick={onConfirm}>{state.confirmLabel || '确认'}</Button>
                 </div>
             </motion.div>
-        </div>,
-        document.body,
+        </Dialog>
     );
 };
 
 export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount, onStorageConfigChanged, onStorageStatsRefresh, activeSection, onSectionChange }: SettingsPageProps) => {
     const { t } = useTranslation();
 
-    const pageRef = useRef<HTMLDivElement>(null);
     const oauthPopupCleanupRef = useRef<(() => void) | null>(null);
     const oauthPopupRef = useRef<Window | null>(null);
-    useRuntimeUiLocalization(pageRef);
     const [actionDialog, setActionDialog] = useState<ActionDialogState | null>(null);
     const [actionNotice, setActionNotice] = useState<ActionNoticeState | null>(null);
     const [actionDialogInput, setActionDialogInput] = useState('');
@@ -325,12 +321,6 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
     const [confirmNewTelegramPin, setConfirmNewTelegramPin] = useState("");
     const [isChangingTelegramPin, setIsChangingTelegramPin] = useState(false);
     const [showTelegramUserDownload, setShowTelegramUserDownload] = useState(false);
-    const [telegramUserLoginStep, setTelegramUserLoginStep] = useState<'phone' | 'code' | 'password' | 'complete'>('phone');
-    const [telegramUserPhone, setTelegramUserPhone] = useState('');
-    const [telegramUserCode, setTelegramUserCode] = useState('');
-    const [telegramUserPassword, setTelegramUserPassword] = useState('');
-    const [telegramUserFlowId, setTelegramUserFlowId] = useState('');
-    const [isTelegramUserLoginBusy, setIsTelegramUserLoginBusy] = useState(false);
     const [telegramAllowedUserIdsInput, setTelegramAllowedUserIdsInput] = useState("");
     const [isSavingTelegramAllowedUsers, setIsSavingTelegramAllowedUsers] = useState(false);
     const [cleanupRetentionDays, setCleanupRetentionDays] = useState(7);
@@ -347,8 +337,8 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
         let result: { success: boolean; deletedCount?: number };
         try {
             result = await fileApi.updateAdvancedTaskSetting(patch);
-        } catch (error: any) {
-            if (error?.code !== 'CONFIRMATION_REQUIRED') throw error;
+        } catch (error: unknown) {
+            if (errorCode(error) !== 'CONFIRMATION_REQUIRED') throw error;
             if (!(await requestConfirmation('该并发值可能触发 Telegram 限流、断流或账号风控。确认继续吗？', '高并发二次确认'))) return;
             result = await fileApi.updateAdvancedTaskSetting(patch, true);
         }
@@ -368,8 +358,8 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
         try {
             const result = await fileApi.cleanupDownloadItems(cleanupRetentionDays);
             await showNotice(`已删除 ${result.deletedCount} 条已完成下载任务历史。`);
-        } catch (error: any) {
-            await showNotice(error.message || '删除下载任务历史失败', '操作失败');
+        } catch (error: unknown) {
+            await showNotice(errorMessage(error) || '删除下载任务历史失败', '操作失败');
         } finally {
             setIsCleaningDownloadItems(false);
         }
@@ -427,8 +417,8 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
             handleCancelTelegramPinChange();
             await reloadTelegramBotConfig();
             await showNotice(result.message || 'Telegram Bot PIN 已修改');
-        } catch (error: any) {
-            await showNotice(error.message || '修改 Telegram Bot PIN 失败', '修改失败');
+        } catch (error: unknown) {
+            await showNotice(errorMessage(error) || '修改 Telegram Bot PIN 失败', '修改失败');
         } finally {
             setIsChangingTelegramPin(false);
         }
@@ -439,8 +429,8 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
         try {
             const result = await fileApi.testTelegramBotConfig({ botToken: telegramBotToken, apiId: telegramApiId, apiHash: telegramApiHash });
             await showNotice(`连接成功${result.bot.username ? `：@${result.bot.username}` : ''}`);
-        } catch (error: any) {
-            await showNotice(error.message || 'Telegram Bot 凭证测试失败', '测试失败');
+        } catch (error: unknown) {
+            await showNotice(errorMessage(error) || 'Telegram Bot 凭证测试失败', '测试失败');
         } finally { setIsSavingTelegramBot(false); }
     };
 
@@ -456,8 +446,8 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
             clearTelegramBotInputs();
             setShowTelegramBotForm(false);
             await showNotice('Telegram Bot 凭证已安全保存并启用');
-        } catch (error: any) {
-            await showNotice(error.message || '保存 Telegram Bot 配置失败', '保存失败');
+        } catch (error: unknown) {
+            await showNotice(errorMessage(error) || '保存 Telegram Bot 配置失败', '保存失败');
         } finally { setIsSavingTelegramBot(false); }
     };
 
@@ -473,7 +463,7 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
             setTelegramBotConfig(result.config);
             setTelegramPin('');
             await showNotice('已迁移到网页加密管理；确认运行正常后可从 .env 删除旧凭证');
-        } catch (error: any) { await showNotice(error.message || '迁移失败', '迁移失败'); }
+        } catch (error: unknown) { await showNotice(errorMessage(error) || '迁移失败', '迁移失败'); }
         finally { setIsSavingTelegramBot(false); }
     };
 
@@ -485,7 +475,7 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
         ))) return;
         setIsSavingTelegramBot(true);
         try { const result = await fileApi.deleteTelegramBotConfig(); setTelegramBotConfig(result.config); clearTelegramBotInputs(); setShowTelegramBotForm(true); await showNotice('Telegram Bot 配置已删除'); }
-        catch (error: any) { await showNotice(error.message || '删除失败', '操作失败'); }
+        catch (error: unknown) { await showNotice(errorMessage(error) || '删除失败', '操作失败'); }
         finally { setIsSavingTelegramBot(false); }
     };
 
@@ -497,8 +487,8 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
             setTelegramAllowedUserIdsInput(result.userIds.join(', '));
             await reloadStorageConfig();
             await showNotice('Telegram 允许用户列表已保存');
-        } catch (error: any) {
-            await showNotice(error.message || '更新 Telegram 允许用户列表失败', '保存失败');
+        } catch (error: unknown) {
+            await showNotice(errorMessage(error) || '更新 Telegram 允许用户列表失败', '保存失败');
         } finally {
             setIsSavingTelegramAllowedUsers(false);
         }
@@ -543,8 +533,8 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
             await showNotice(status.updateAvailable
                 ? t('updates.found', { version: status.latestVersion })
                 : t('updates.alreadyLatest', { version: status.currentVersion }));
-        } catch (error: any) {
-            await showNotice(error?.message || '检查版本失败', '检查失败');
+        } catch (error: unknown) {
+            await showNotice(errorMessage(error) || '检查版本失败', '检查失败');
         } finally {
             setIsCheckingUpdates(false);
         }
@@ -564,9 +554,9 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
             await fileApi.probeStorageAccount(account.id);
             await reloadStorageConfig();
             setProbeFeedback(previous => ({ accountId: account.id, tone: 'success', message: '连接测试成功', sequence: (previous?.sequence ?? 0) + 1 }));
-        } catch (error: any) {
+        } catch (error: unknown) {
             await reloadStorageConfig().catch(() => undefined);
-            setProbeFeedback(previous => ({ accountId: account.id, tone: 'error', message: error?.message || '连接测试失败，请稍后重试', sequence: (previous?.sequence ?? 0) + 1 }));
+            setProbeFeedback(previous => ({ accountId: account.id, tone: 'error', message: errorMessage(error) || '连接测试失败，请稍后重试', sequence: (previous?.sequence ?? 0) + 1 }));
         } finally {
             setProbingAccountId(null);
         }
@@ -654,16 +644,16 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
 
         setIsSaving(true);
         try {
-            await fileApi.switchStorageProvider(provider as any, accountId);
+            await fileApi.switchStorageProvider(provider, accountId);
             const data = await reloadStorageConfig();
             const statisticsFresh = await refreshStorageStats(data);
             await showNotice(statisticsFresh
                 ? `已成功切换到 ${providerName}`
                 : `已成功切换到 ${providerName}，但容量统计刷新失败，请稍后手动刷新`,
             statisticsFresh ? '操作结果' : '切换完成');
-        } catch (error: any) {
+        } catch (error: unknown) {
             await reloadStorageConfig().catch(() => undefined);
-            await showNotice(error.message, '操作失败');
+            await showNotice(errorMessage(error), '操作失败');
         } finally {
             setIsSaving(false);
         }
@@ -686,11 +676,11 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
             const result = await fileApi.setUnsafeWebdavEndpointsAllowed(enabled, confirmed);
             setConfig(previous => previous ? { ...previous, allowUnsafeWebdavEndpoints: result.allowUnsafeWebdavEndpoints } : previous);
             await showNotice(enabled ? '已允许内网和不安全的 WebDAV 地址' : '已恢复 WebDAV 安全限制');
-        } catch (error: any) {
-            if (error?.code === 'CONFIRMATION_REQUIRED') {
+        } catch (error: unknown) {
+            if (errorCode(error) === 'CONFIRMATION_REQUIRED') {
                 await showNotice('服务端要求二次确认，请重新操作。', '未完成确认');
             } else {
-                await showNotice(error?.message || '更新 WebDAV 安全设置失败', '操作失败');
+                await showNotice(errorMessage(error) || '更新 WebDAV 安全设置失败', '操作失败');
             }
         } finally {
             setIsSavingWebdavSecurity(false);
@@ -768,9 +758,9 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
                     statisticsFresh ? '操作结果' : '授权完成');
                 },
             });
-        } catch (error: any) {
+        } catch (error: unknown) {
             setIsSaving(false);
-            await showNotice('发起授权失败: ' + error.message, '授权失败');
+            await showNotice('发起授权失败: ' + errorMessage(error), '授权失败');
         }
     };
 
@@ -806,8 +796,8 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
                 ? result.message
                 : `${result.message}；但容量统计刷新失败，请稍后手动刷新`,
             statisticsFresh ? '操作结果' : '删除完成');
-        } catch (error: any) {
-            await showNotice(error.message, '操作失败');
+        } catch (error: unknown) {
+            await showNotice(errorMessage(error), '操作失败');
         }
     };
 
@@ -882,9 +872,9 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
                     statisticsFresh ? '操作结果' : '授权完成');
                 },
             });
-        } catch (error: any) {
+        } catch (error: unknown) {
             setIsSaving(false);
-            await showNotice('发起授权失败: ' + error.message, '授权失败');
+            await showNotice('发起授权失败: ' + errorMessage(error), '授权失败');
         }
     };
 
@@ -899,8 +889,8 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
             await reloadStorageConfig();
             await showNotice('阿里云 OSS 账户添加成功！');
             setShowOSSForm(false);
-        } catch (error: any) {
-            await showNotice('添加阿里云 OSS 账户失败: ' + error.message, '添加失败');
+        } catch (error: unknown) {
+            await showNotice('添加阿里云 OSS 账户失败: ' + errorMessage(error), '添加失败');
         } finally {
             setIsSaving(false);
         }
@@ -917,8 +907,8 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
             await reloadStorageConfig();
             await showNotice('S3 兼容存储账户添加成功！');
             setShowS3Form(false);
-        } catch (error: any) {
-            await showNotice('添加 S3 兼容存储账户失败: ' + error.message, '添加失败');
+        } catch (error: unknown) {
+            await showNotice('添加 S3 兼容存储账户失败: ' + errorMessage(error), '添加失败');
         } finally {
             setIsSaving(false);
         }
@@ -935,8 +925,8 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
             await reloadStorageConfig();
             await showNotice('WebDAV 存储账户添加成功！');
             setShowWebDAVForm(false);
-        } catch (error: any) {
-            await showNotice('添加 WebDAV 存储账户失败: ' + error.message, '添加失败');
+        } catch (error: unknown) {
+            await showNotice('添加 WebDAV 存储账户失败: ' + errorMessage(error), '添加失败');
         } finally {
             setIsSaving(false);
         }
@@ -954,8 +944,8 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
             setOpenlistPassword('');
             setShowOpenListForm(false);
             await showNotice(t('settings.openlist.success'));
-        } catch (error: any) {
-            await showNotice(t('settings.openlist.failure', { message: error.message }), t('settings.openlist.incomplete'));
+        } catch (error: unknown) {
+            await showNotice(t('settings.openlist.failure', { message: errorMessage(error) }), t('settings.openlist.incomplete'));
         } finally {
             setIsSaving(false);
         }
@@ -974,8 +964,8 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
             setTwoFAQrCode(data.qrDataUrl);
             setIs2FAActivated(data.enabled);
             setShow2FA(true);
-        } catch (error: any) {
-            setTwoFAError(error.message);
+        } catch (error: unknown) {
+            setTwoFAError(errorMessage(error));
         } finally {
             setIsLoading2FA(false);
         }
@@ -993,8 +983,8 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
             } else {
                 setTwoFAError(result.error || "验证失败");
             }
-        } catch (error: any) {
-            setTwoFAError(error.message);
+        } catch (error: unknown) {
+            setTwoFAError(errorMessage(error));
         } finally {
             setIsActivating2FA(false);
         }
@@ -1013,8 +1003,8 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
             } else {
                 await showNotice(result.error || '禁用失败', '操作失败');
             }
-        } catch (error: any) {
-            await showNotice(error.message, '操作失败');
+        } catch (error: unknown) {
+            await showNotice(errorMessage(error), '操作失败');
         } finally {
             setIsLoading2FA(false);
         }
@@ -1050,7 +1040,6 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
     return (
         <motion.div
             data-testid="settings-page"
-            ref={pageRef}
             initial={{ opacity: 0, y: 10 }}
             animate={{ opacity: 1, y: 0 }}
             className="mx-auto mt-6 w-full min-w-0 max-w-5xl space-y-8 pb-10"
@@ -1137,7 +1126,8 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
 
             {activeSection === 'security' && <>
             {/* Security Section */}
-            <SettingsSection title="安全设置">
+            {/* i18n source: 安全设置 */}
+            <SettingsSection title={t('settings.security.title')}>
                 <div className="border-b border-border/50 p-4 space-y-4">
                     <div className="flex items-start gap-3">
                         <div className="p-2 rounded-lg bg-muted text-muted-foreground"><KeyRound className="h-4 w-4" /></div>
@@ -1273,7 +1263,8 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
                     )}
                 </AnimatePresence>
             </SettingsSection>
-            <SettingsSection title="网络与存储安全">
+            {/* i18n source: 网络与存储安全 */}
+            <SettingsSection title={t('settings.security.networkTitle')}>
                 <div className={cn("p-4 sm:p-5", config?.allowUnsafeWebdavEndpoints && "bg-destructive/[0.035]")}>
                     <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
                         <div className="flex min-w-0 items-start gap-3">
@@ -1311,7 +1302,8 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
             </>}
 
             {activeSection === 'maintenance' && <>
-            <SettingsSection title="高级任务设置">
+            {/* i18n source: 高级任务设置 */}
+            <SettingsSection title={t('settings.maintenance.advancedTasks')}>
                 {advancedTasks ? <div className="divide-y divide-border/50">
                     <SettingsRow icon={Gauge} label="单文件分片并发" description="与 Bot /download_workers 共用；12/16 需要二次确认。" action={
                         <select className="h-10 rounded-lg border border-border bg-background px-3" value={advancedTasks.telegramDownloadWorkers} onChange={event => void updateAdvancedTask({ telegramDownloadWorkers: Number(event.target.value) })}>
@@ -1335,7 +1327,8 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
                     } />
                 </div> : <div className="p-6 text-sm text-muted-foreground">正在加载高级任务设置…</div>}
             </SettingsSection>
-            <SettingsSection title="数据维护">
+            {/* i18n source: 数据维护 */}
+            <SettingsSection title={t('settings.maintenance.title')}>
                 <SettingsRow
                     icon={Database}
                     label="下载明细记录"
@@ -1344,7 +1337,7 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
                     action={advancedTasks ? (
                         <select
                             value={advancedTasks.telegramDownloadHistoryPolicy}
-                            onChange={(event) => void updateAdvancedTask({ telegramDownloadHistoryPolicy: event.target.value as AdvancedTaskSettings['telegramDownloadHistoryPolicy'] }).catch((error: any) => showNotice(error.message || '更新下载明细记录失败', '操作失败'))}
+                            onChange={(event) => void updateAdvancedTask({ telegramDownloadHistoryPolicy: event.target.value as AdvancedTaskSettings['telegramDownloadHistoryPolicy'] }).catch((error: any) => showNotice(errorMessage(error) || '更新下载明细记录失败', '操作失败'))}
                             className="h-10 w-full rounded-lg border border-border bg-background px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-primary/40 sm:w-auto sm:min-w-48"
                             aria-label="下载明细记录策略"
                         >
@@ -1388,7 +1381,8 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
 
             {activeSection === 'telegram' && <>
             {/* Telegram Download Section */}
-            <SettingsSection title="Telegram Bot 连接">
+            {/* i18n source: Telegram Bot 连接 */}
+            <SettingsSection title={t('settings.telegram.botConnection')}>
                 <div className="p-4 space-y-4">
                     <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                         <div className="flex min-w-0 items-start gap-3">
@@ -1454,7 +1448,7 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
                 </div>
             </SettingsSection>
 
-            <SettingsSection title="Telegram Bot 用户权限">
+            <SettingsSection title={t('settings.telegram.permissions')}>
                 <div className="p-4 bg-muted/20 border-b border-border/50">
                     <div className="flex items-start justify-between gap-4">
                         <div className="flex items-start gap-3">
@@ -1504,7 +1498,7 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
                 </div>
             </SettingsSection>
 
-            <SettingsSection title="Telegram 下载设置">
+            <SettingsSection title={t('settings.telegram.downloadSettings')}>
                 <div className="p-4 bg-muted/20 border-b border-border/50">
                     <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
                         <div className="flex min-w-0 items-start gap-3">
@@ -1522,7 +1516,7 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
                                         <span className="px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-700 dark:text-amber-400 text-[11px] font-semibold">session 未就绪</span>
                                     )}
                                 </div>
-                                <p className="mt-1 max-w-xl text-xs leading-5 text-muted-foreground">开启后，文件下载优先使用已登录的 Telegram 用户账号</p>
+                                <p className="mt-1 max-w-xl text-xs leading-5 text-muted-foreground">开启后，文件下载由已启用的 Telegram 用户账号按权限、健康状态和负载智能调度</p>
                             </div>
                         </div>
                         <Button
@@ -1532,87 +1526,36 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
                             onClick={async () => {
                                 if (isSaving) return;
                                 const nextEnabled = !showTelegramUserDownload;
-                                if (nextEnabled && !config?.telegramUserClientStatus?.userId) {
-                                    setTelegramUserLoginStep('phone');
-                                    return;
-                                }
                                 setIsSaving(true);
                                 try {
                                     await fileApi.setTelegramUserDownloadEnabled(nextEnabled);
                                     const refreshedConfig = await fileApi.getStorageConfig();
                                     setConfig(refreshedConfig);
                                     setShowTelegramUserDownload(!!refreshedConfig.telegramUserDownloadEnabled);
-                                } catch (error: any) {
-                                    await showNotice(error.message || '更新 Telegram 下载设置失败', '保存失败');
+                                } catch (error: unknown) {
+                                    await showNotice(errorMessage(error) || '更新 Telegram 下载设置失败', '保存失败');
                                 } finally {
                                     setIsSaving(false);
                                 }
                             }}
                         >
-                            {showTelegramUserDownload ? "停用账号级下载" : (config?.telegramUserClientStatus?.userId ? "启用账号级下载" : "登录并启用")}
+                            {showTelegramUserDownload ? "停用账号级下载" : "启用账号级下载"}
                         </Button>
                     </div>
                 </div>
 
-                <AnimatePresence>
-                    {(
-                        <motion.div
-                            initial={{ height: 0, opacity: 0 }}
-                            animate={{ height: "auto", opacity: 1 }}
-                            exit={{ height: 0, opacity: 0 }}
-                            className="bg-muted/30 border-t border-border/50 overflow-hidden"
-                        >
-                            <div className="p-6 space-y-5">
-                                {!config?.telegramUserClientStatus?.userId && <div className="p-4 rounded-xl border border-amber-500/20 bg-amber-500/5 space-y-3">
-                                    <p className="text-sm font-medium text-amber-700 dark:text-amber-400">登录 Telegram 用户账号</p>
-                                    <p className="text-xs text-muted-foreground">手机号 → 验证码 → 可选两步验证密码。登录信息只会加密保存在服务端。</p>
-                                    {telegramUserLoginStep === 'phone' && <div className="flex flex-col gap-2 sm:flex-row"><input aria-label="手机号" value={telegramUserPhone} onChange={e => setTelegramUserPhone(e.target.value)} placeholder="手机号（含国家区号，如 +86…）" className="min-w-0 flex-1 rounded-lg border border-border bg-background px-3 py-2 text-sm" /><Button className="w-full sm:w-auto sm:shrink-0" disabled={isTelegramUserLoginBusy} onClick={async () => { setIsTelegramUserLoginBusy(true); try { const result = await fileApi.startTelegramUserLogin(telegramUserPhone); setTelegramUserFlowId(result.flowId); setTelegramUserLoginStep('code'); await showNotice('验证码已发送'); } catch (error: any) { await showNotice(error.message, '登录失败'); } finally { setIsTelegramUserLoginBusy(false); } }}>发送验证码</Button></div>}
-                                    {telegramUserLoginStep === 'code' && <div className="flex flex-col gap-2 sm:flex-row"><input aria-label="验证码" autoComplete="one-time-code" inputMode="numeric" value={telegramUserCode} onChange={e => setTelegramUserCode(e.target.value)} placeholder="验证码" className="min-w-0 flex-1 rounded-lg border border-border bg-background px-3 py-2 text-sm" /><Button className="w-full sm:w-auto sm:shrink-0" disabled={isTelegramUserLoginBusy} onClick={async () => { setIsTelegramUserLoginBusy(true); try { const result = await fileApi.submitTelegramUserCode(telegramUserFlowId, telegramUserCode); if (result.step === 'password_required') setTelegramUserLoginStep('password'); else { setTelegramUserLoginStep('complete'); await reloadStorageConfig(); await showNotice('账号已绑定并自动启用'); } } catch (error: any) { await showNotice(error.message, '登录失败'); } finally { setIsTelegramUserLoginBusy(false); } }}>验证</Button></div>}
-                                    {telegramUserLoginStep === 'password' && <div className="flex flex-col gap-2 sm:flex-row"><input aria-label="两步验证密码" type="password" autoComplete="current-password" value={telegramUserPassword} onChange={e => setTelegramUserPassword(e.target.value)} placeholder="两步验证密码" className="min-w-0 flex-1 rounded-lg border border-border bg-background px-3 py-2 text-sm" /><Button className="w-full sm:w-auto sm:shrink-0" disabled={isTelegramUserLoginBusy} onClick={async () => { setIsTelegramUserLoginBusy(true); try { await fileApi.submitTelegramUserPassword(telegramUserFlowId, telegramUserPassword); setTelegramUserPassword(''); setTelegramUserLoginStep('complete'); await reloadStorageConfig(); await showNotice('账号已绑定并自动启用'); } catch (error: any) { await showNotice(error.message, '登录失败'); } finally { setIsTelegramUserLoginBusy(false); } }}>登录</Button></div>}
-                                </div>}
-                                    {config?.telegramUserClientStatus && <div className="mt-3 rounded-lg border border-border bg-background/70 p-3 text-xs leading-5">
-                                        <p>状态：{{ ready: '已连接', disabled: '已停用', missing_session: '未绑定', expired: '登录已失效', not_configured: 'API 未配置', error: '连接失败', permission_denied: '无频道权限' }[config.telegramUserClientStatus.status] || config.telegramUserClientStatus.status}</p>
-                                        {config.telegramUserClientStatus.username && <p>账号：@{config.telegramUserClientStatus.username}（ID {config.telegramUserClientStatus.userId}）</p>}
-                                        {config.telegramUserClientStatus.checkedAt && <p>最近检查：{new Date(config.telegramUserClientStatus.checkedAt).toLocaleString()}</p>}
-                                        {config.telegramUserClientStatus.status === 'disabled' && <p className="text-muted-foreground">已停用，不会执行账号级下载；登录信息仍安全保留。</p>}
-                                        {config.telegramUserClientStatus.status !== 'disabled' && config.telegramUserClientStatus.lastError && <p className="text-destructive">最近错误：{config.telegramUserClientStatus.lastError}</p>}
-                                        {config.telegramUserClientStatus.status !== 'disabled' && config.telegramUserClientStatus.action && <p className="text-amber-700">下一步：{config.telegramUserClientStatus.action}</p>}
-                                    </div>}
-                                    {config?.telegramUserClientStatus?.userId && <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap">{config.telegramUserClientStatus?.status !== 'disabled' && <Button className="w-full sm:w-auto" variant="outline" onClick={async () => { try { await fileApi.disableTelegramUserAccount(); await reloadStorageConfig(); } catch (error: any) { await showNotice(error.message || '停用失败', '操作失败'); } }}>停用（保留登录）</Button>}<Button className="w-full sm:w-auto" variant="destructive" onClick={async () => { if (!(await requestConfirmation('解除绑定将永久删除已加密保存的登录信息，确认继续吗？', '解除绑定'))) return; try { await fileApi.unlinkTelegramUserAccount(); setTelegramUserLoginStep('phone'); await reloadStorageConfig(); } catch (error: any) { await showNotice(error.message || '解除绑定失败', '操作失败'); } }}>解除绑定</Button><span className="self-center text-xs text-muted-foreground">停用会保留已加密保存的登录信息</span></div>}
-
-                                <div className="rounded-xl border border-border bg-background/60 p-4 text-sm">
-                                    <p className="font-medium">Telegram API 凭证：{telegramBotConfig?.configured ? '已就绪' : '未配置'}</p>
-                                    <p className="mt-1 text-xs text-muted-foreground">账号级下载器会复用 Telegram Bot 的 API ID 与 API Hash；敏感凭证和 session 均不会回显到浏览器。</p>
-                                </div>
-
-                                <div className="flex flex-wrap gap-3">
-                                    <Button
-                                        variant="outline"
-                                        onClick={() => window.open('https://my.telegram.org', '_blank', 'noopener,noreferrer')}
-                                    >
-                                        打开 Telegram API 页面
-                                    </Button>
-                                    <Button
-                                        variant="outline"
-                                        onClick={() => window.open('https://core.telegram.org/bots/api#getfile', '_blank', 'noopener,noreferrer')}
-                                    >
-                                        查看参考文档
-                                    </Button>
-                                </div>
-
-                                <p className="text-xs text-muted-foreground">
-                                    提示：启用后，只有已登录的用户账号 session 会参与下载；如果 session 未准备好，下载会报错并停止，避免悄悄回退到旧逻辑。
-                                </p>
-                            </div>
-                        </motion.div>
-                    )}
-                </AnimatePresence>
+                <TelegramUserAccountsPanel
+                    configured={!!telegramBotConfig?.configured}
+                    onNotice={showNotice}
+                    requestConfirmation={requestConfirmation}
+                />
             </SettingsSection>
             </>}
 
             {activeSection === 'storage' && <>
             {/* Storage Configuration Section (New) */}
-            <SettingsSection title="存储源设置">
+            {/* i18n source: 存储源设置 */}
+            <SettingsSection title={t('settings.storageSources.title')}>
                 <div className="mx-4 mt-3 mb-4 p-3 rounded-lg border border-blue-500/20 bg-blue-500/5 flex items-center gap-3">
                     <BookOpen className="h-4 w-4 text-blue-500 flex-shrink-0" />
                     <p className="text-xs text-muted-foreground">
@@ -1757,7 +1700,7 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
                                     <p className="text-xs text-muted-foreground leading-relaxed">
                                         前往 <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noreferrer" className="text-blue-500 hover:underline">Google Cloud Console</a> 创建 <b>OAuth 2.0 客户端 ID</b>。
                                         应用类型选择 <code>Web 应用程序</code>，并添加以下<b>已授权的重定向 URI</b>：
-                                        <code className="block mt-1 p-1 bg-muted rounded text-primary">{(config as any)?.googleDriveRedirectUri || `${window.location.origin}/api/storage/google-drive/callback`}</code>
+                                        <code className="block mt-1 p-1 bg-muted rounded text-primary">{config?.googleDriveRedirectUri || `${window.location.origin}/api/storage/google-drive/callback`}</code>
                                     </p>
                                 </div>
 
@@ -1938,7 +1881,7 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
                                     <p className="text-xs text-muted-foreground leading-relaxed">
                                         前往 <a href="https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade" target="_blank" rel="noreferrer" className="text-blue-500 hover:underline">Microsoft Entra ID 控制台</a> 并登录。授权账号可与最终存储账号不同。
                                         注册应用时，<b>重定向 URI</b> 请选择 <code>Web</code>，并填写：
-                                        <code className="block mt-1 p-1 bg-muted rounded text-primary">{(config as any)?.redirectUri || `${(window as any)._env_?.VITE_API_URL || import.meta.env.VITE_API_URL || window.location.origin}/api/storage/onedrive/callback`}</code>
+                                        <code className="block mt-1 p-1 bg-muted rounded text-primary">{config?.redirectUri || `${import.meta.env.VITE_API_URL || window.location.origin}/api/storage/onedrive/callback`}</code>
                                     </p>
                                     <p className="text-xs text-amber-600 dark:text-amber-400 leading-relaxed rounded-lg border border-amber-500/20 bg-amber-500/5 p-3">
                                         如果填写客户端密码，请复制 Azure「证书和密码」里新建密码后的<b>值 Value</b>；不要复制“机密 ID/Secret ID”。复制错会导致 Microsoft 返回 <code>AADSTS7000215 Invalid client secret</code>。
@@ -2016,7 +1959,7 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
             </SettingsSection>
 
             {/* Aliyun OSS Configuration Section */}
-            <SettingsSection title="阿里云 OSS 设置">
+            <SettingsSection title={t('settings.storageSources.aliyunTitle')}>
                 <div className="p-4 bg-muted/20 border-b border-border/50">
                     <div className="flex items-center justify-between mb-4">
                         <div className="flex items-center gap-3">
@@ -2202,7 +2145,7 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
             </SettingsSection>
 
             {/* S3 Configuration Section */}
-            <SettingsSection title="S3 兼容存储设置">
+            <SettingsSection title={t('settings.storageSources.s3Title')}>
                 <div className="p-4 bg-muted/20 border-b border-border/50">
                     <div className="flex items-center justify-between mb-4">
                         <div className="flex items-center gap-3">
@@ -2410,7 +2353,7 @@ export const SettingsPage = ({ storageStats, onSignedOut, onOpenTasksForAccount,
             </SettingsSection>
 
             {/* WebDAV Configuration Section */}
-            <SettingsSection title="WebDAV 存储设置">
+            <SettingsSection title={t('settings.storageSources.webdavTitle')}>
                 <div className="p-4 bg-muted/20 border-b border-border/50">
                     <div className="flex items-center justify-between mb-4">
                         <div className="flex items-center gap-3">

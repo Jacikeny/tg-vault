@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Trash2, X, CheckSquare, Share2, Copy, Calendar, Lock, Check } from "lucide-react";
 import { Button } from "./Button";
+import { errorMessage } from "../../services/unknownError";
 import { DatePicker } from "./DatePicker";
 import { IndeterminateSpinner } from "./IndeterminateSpinner";
 
@@ -137,9 +138,9 @@ export const BulkActionToolbar = ({
                     // Don't show error message, just let user see the link
                 }
             }
-        } catch (err: any) {
+        } catch (err: unknown) {
             console.error("Copy failed", err);
-            setErrorMsg(err.message || "创建链接失败");
+            setErrorMsg(errorMessage(err, "创建链接失败"));
         } finally {
             setIsCopying(false);
         }

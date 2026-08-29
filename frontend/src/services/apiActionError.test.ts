@@ -6,7 +6,7 @@ const response = (status: number, headers: Record<string,string> = {}, body: Rec
 test('401 expires session with actionable sign-in copy', async () => {
     const error = await apiActionErrorFromResponse(response(401), '下载失败');
     assert.equal(error.kind, 'unauthorized');
-    assert.equal(describeActionFailure('下载', error), '登录会话已失效，已为你退出，请重新登录后下载');
+    assert.equal(describeActionFailure('下载', error), '登录会话已失效，请重新登录后下载');
 });
 test('429 parses Retry-After', async () => {
     const error = await apiActionErrorFromResponse(response(429, { 'Retry-After': '90' }), '分享失败');

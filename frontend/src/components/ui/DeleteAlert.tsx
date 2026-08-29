@@ -1,9 +1,9 @@
 import { useState } from "react";
-import { motion, AnimatePresence } from "framer-motion";
+import { motion } from "framer-motion";
 import { Trash2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { Button } from "./Button";
-import { createPortal } from "react-dom";
+import { Dialog } from "./Dialog";
 import type { BatchDeleteResult } from "../../services/api";
 import { formatDeleteSize } from "./deletePresentation";
 
@@ -49,31 +49,20 @@ export const DeleteAlert = ({
 
     const isPartial = result?.status === 'partial';
     const modalContent = (
-        <AnimatePresence>
-            <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
-                <motion.div
-                    initial={{ opacity: 0 }}
-                    animate={{ opacity: 1 }}
-                    exit={{ opacity: 0 }}
-                    transition={{ duration: 0.2 }}
-                    className="absolute inset-0 bg-black/50 backdrop-blur-sm"
-                    onClick={isDeleting ? undefined : onClose}
-                />
-
+        <Dialog open={isOpen} onClose={onClose} labelledBy="delete-alert-title" alert closeOnEscape={!isDeleting} closeOnBackdrop={!isDeleting} className="w-full max-w-md">
                 <motion.div
                     initial={{ scale: 0.95, opacity: 0, y: 10 }}
                     animate={{ scale: 1, opacity: 1, y: 0 }}
                     exit={{ scale: 0.95, opacity: 0, y: 10 }}
                     transition={{ type: "spring", stiffness: 350, damping: 25 }}
-                    className="relative w-full max-w-md bg-background border border-border rounded-xl shadow-2xl overflow-hidden z-[70] flex flex-col"
-                    onClick={(e) => e.stopPropagation()}
+                    className="w-full overflow-hidden rounded-xl border border-border bg-background shadow-2xl"
                 >
                     <div className="flex items-center gap-3 px-6 py-4 border-b border-border bg-muted/30">
                         <div className="h-10 w-10 rounded-full bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 flex items-center justify-center shrink-0">
                             <Trash2 className="h-5 w-5" />
                         </div>
                         <div className="flex flex-col">
-                            <h3 className="font-semibold text-lg leading-none tracking-tight">
+                            <h3 id="delete-alert-title" className="font-semibold text-lg leading-none tracking-tight">
                                 {isPartial ? "部分删除完成" : (t("delete.title") || "确认删除")}
                             </h3>
                             <p className="text-sm text-muted-foreground mt-1.5">
@@ -150,9 +139,8 @@ export const DeleteAlert = ({
                         )}
                     </div>
                 </motion.div>
-            </div>
-        </AnimatePresence>
+        </Dialog>
     );
 
-    return createPortal(modalContent, document.body);
+    return modalContent;
 };

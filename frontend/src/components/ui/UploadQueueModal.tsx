@@ -7,6 +7,7 @@ import { getUploadQueueOutcome } from "./uploadQueueOutcome";
 import type { ChunkUploadSession } from "../../services/api";
 import type { UploadTelemetry } from "../../services/uploadTelemetry";
 import { IndeterminateSpinner } from "./IndeterminateSpinner";
+import { formatBytes } from "../../services/formatBytes";
 
 export interface QueueItem {
     id: string;
@@ -35,13 +36,6 @@ interface UploadQueueModalProps {
     onTogglePause?: () => void;
     onResumeSession?: (session: ChunkUploadSession, file: File) => void;
     onCancelSession?: (session: ChunkUploadSession) => void;
-}
-
-function formatBytes(bytes: number): string {
-    if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
-    const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
-    const unit = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
-    return `${(bytes / (1024 ** unit)).toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`;
 }
 
 function formatDuration(seconds: number | null | undefined): string | null {

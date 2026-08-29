@@ -1,34 +1,31 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import test from 'node:test';
+import en from '../locales/en.json' with { type: 'json' };
+import zh from '../locales/zh.json' with { type: 'json' };
 
 const loginPage = fs.readFileSync(new URL('../components/pages/LoginPage.tsx', import.meta.url), 'utf8');
-const runtimeEnglish = JSON.parse(fs.readFileSync(new URL('../locales/runtime-en.json', import.meta.url), 'utf8')) as Record<string, string>;
 
-const loginCopy = [
-    '首次启动，请创建唯一管理员密码',
-    '请输入访问密码',
-    '双重身份验证',
-    '网页管理员密码',
-    '访问密码',
-    '登录',
-    '登录状态将保留 7 天',
-];
+function resolve(catalog: Record<string, unknown>, path: string): unknown {
+    return path.split('.').reduce<unknown>((value, key) => value && typeof value === 'object' ? (value as Record<string, unknown>)[key] : undefined, catalog);
+}
 
 test('the public login screen exposes a language switch before authentication', () => {
     assert.match(loginPage, /<LanguageToggle\s*\/>/);
 });
 
-test('the English runtime catalog covers the public login journey', () => {
-    for (const text of loginCopy) {
-        assert.equal(typeof runtimeEnglish[text], 'string', `missing English login copy: ${text}`);
+test('the public login journey uses stable locale keys in both languages', () => {
+    const keys = [
+        'login.setupTitle', 'login.passwordTitle', 'login.totpTitle',
+        'login.adminPasswordLabel', 'login.passwordLabel', 'login.signIn',
+        'login.sessionFooter', 'login.telegramPinHint',
+    ];
+    for (const key of keys) {
+        assert.equal(typeof resolve(en as Record<string, unknown>, key), 'string', `missing English login key: ${key}`);
+        assert.equal(typeof resolve(zh as Record<string, unknown>, key), 'string', `missing Chinese login key: ${key}`);
+        assert.match(loginPage, new RegExp(key.replaceAll('.', '\\.')));
     }
-    const chineseLiterals = [...loginPage.matchAll(/["'`]([^"'`\r\n]*[\u3400-\u9fff][^"'`\r\n]*)["'`]/g)]
-        .map(match => match[1])
-        .filter(text => !text.includes('请求失败，状态码'));
-    for (const text of chineseLiterals) {
-        assert.equal(typeof runtimeEnglish[text], 'string', `missing English login literal: ${text}`);
-    }
+    assert.doesNotMatch(loginPage, /useRuntimeUiLocalization|MutationObserver/);
 });
 
 test('login credential fields declare password-manager autocomplete semantics', () => {

@@ -3,14 +3,16 @@ import test from 'node:test';
 import fs from 'node:fs';
 
 const api = fs.readFileSync(new URL('./api.ts', import.meta.url), 'utf8');
+const apiTypes = fs.readFileSync(new URL('./apiTypes.ts', import.meta.url), 'utf8');
+const tasksClient = fs.readFileSync(new URL('./clients/tasksClient.ts', import.meta.url), 'utf8');
 const page = fs.readFileSync(new URL('../components/pages/TasksPage.tsx', import.meta.url), 'utf8');
 
 test('task API exposes terminal dismissal preview and confirm contracts', () => {
-    assert.match(api, /dismissible: boolean/);
+    assert.match(apiTypes, /dismissible: boolean/);
     assert.match(api, /prepareTaskDismissal/);
     assert.match(api, /confirmTaskDismissal/);
-    assert.match(api, /dismissals\/prepare/);
-    assert.match(api, /dismissals\/confirm/);
+    assert.match(tasksClient, /dismissals\/prepare/);
+    assert.match(tasksClient, /dismissals\/confirm/);
 });
 
 test('task center supports single, multi-select, and filter-scoped cleanup', () => {

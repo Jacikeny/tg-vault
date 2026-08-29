@@ -1,5 +1,4 @@
 import fs from 'fs';
-import path from 'path';
 import axios from 'axios';
 import OSS from 'ali-oss';
 import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand, HeadObjectCommand, ListObjectsV2Command } from '@aws-sdk/client-s3';
@@ -7,9 +6,12 @@ import { getSignedUrl as getS3SignedUrl } from '@aws-sdk/s3-request-presigner';
 import { createClient, WebDAVClient } from 'webdav';
 import { google } from 'googleapis';
 import { query, pool } from '../db/index.js';
-import { safeJoin } from '../utils/localPath.js';
 import { summarizeStorageProbeFailure } from '../utils/storageProbe.js';
 import { MediaSourceMissingError } from './mediaProxyError.js';
+import { type IStorageProvider, type StorageTargetSnapshot, StorageProbeError } from './storage/contracts.js';
+import { LocalStorageProvider } from './storage/localStorageProvider.js';
+export { type IStorageProvider, type StorageTargetSnapshot, StorageProbeError } from './storage/contracts.js';
+export { LocalStorageProvider } from './storage/localStorageProvider.js';
 import {
     decryptSettingValue,
     decryptStorageConfig,
@@ -67,76 +69,6 @@ function isGoogleDriveDailyUploadLimitError(error: any): boolean {
     return /Drive upload limit|exceeded their Drive upload limit|exceeded.*upload limit|upload limit exceeded|upload limit/i.test(text);
 }
 
-// 接口定义
-export interface IStorageProvider {
-    id?: string; // 对于云盘，这是账户 ID
-    name: string;
-    /** Performs a read-only connectivity and authorization check. */
-    probe(): Promise<void>;
-    /**
-     * 保存文件
-     * @param tempPath 临时文件路径
-     * @param fileName 目标文件名
-     * @param mimeType 文件类型
-     * @returns 存储后的路径或标识符
-     */
-    saveFile(tempPath: string, fileName: string, mimeType: string, folder?: string | null): Promise<string>;
-
-    /**
-     * 获取文件流（用于下载）
-     * @param storedPath 存储路径或标识符
-     */
-    getFileStream(storedPath: string, options?: { range?: string }): Promise<NodeJS.ReadableStream>;
-
-    /** Checks whether a remote media source still exists without downloading its bytes. */
-    getFileAvailability?(storedPath: string): Promise<{ available: true }>;
-
-    /** Probes whether the source bytes can be read without downloading the whole object. */
-    probeFileReadable?(storedPath: string): Promise<{ available: true }>;
-
-    /**
-     * 获取预览URL（可能是临时的）
-     * @param storedPath 存储路径或标识符
-     */
-    getPreviewUrl(storedPath: string): Promise<string>;
-
-    /**
-     * 删除文件
-     * @param storedPath 存储路径或标识符
-     */
-    deleteFile(storedPath: string): Promise<void>;
-
-    /**
-     * 获取文件大小（可选）
-     */
-    getFileSize?(storedPath: string): Promise<number>;
-
-    /** Returns remote account quota when the provider exposes it. */
-    getQuota?(): Promise<{ totalBytes: number; usedBytes: number } | null>;
-
-
-    /**
-     * 创建分享链接
-     * @param storedPath 存储路径或标识符
-     * @param password 访问密码（可选）
-     * @param expiration 过期时间 ISO 字符串（可选）
-     */
-    createShareLink?(storedPath: string, password?: string, expiration?: string): Promise<{ link: string; error?: string }>;
-}
-
-export interface StorageTargetSnapshot {
-    provider: IStorageProvider;
-    accountId: string | null;
-    providerKey: string;
-}
-
-export class StorageProbeError extends Error {
-    constructor(public readonly provider: string, message: string, public readonly causeCode?: string) {
-        super(message);
-        this.name = 'StorageProbeError';
-    }
-}
-
 function storageProbeError(provider: string, error: unknown): StorageProbeError {
     if (error instanceof StorageProbeError) return error;
     const { reason, code } = summarizeStorageProbeFailure(error);
@@ -157,80 +89,6 @@ async function withStorageProbeDeadline<T>(operation: Promise<T>, provider: stri
         return await Promise.race([operation, deadline]);
     } finally {
         clearTimeout(timeout!);
-    }
-}
-
-// 本地存储实现
-export class LocalStorageProvider implements IStorageProvider {
-    name = 'local';
-    private uploadDir: string;
-
-    constructor(uploadDir: string = process.env.UPLOAD_DIR || './data/uploads') {
-        this.uploadDir = path.resolve(uploadDir);
-        if (!fs.existsSync(this.uploadDir)) {
-            fs.mkdirSync(this.uploadDir, { recursive: true });
-        }
-    }
-
-    async probe(): Promise<void> {
-        const stats = await fs.promises.stat(this.uploadDir);
-        if (!stats.isDirectory()) throw new StorageProbeError(this.name, '本地存储路径不是目录');
-        await fs.promises.access(this.uploadDir, fs.constants.R_OK | fs.constants.W_OK);
-    }
-
-    async saveFile(tempPath: string, fileName: string, _mimeType?: string, folder?: string | null): Promise<string> {
-        const destDir = folder ? safeJoin(this.uploadDir, folder) : this.uploadDir;
-        if (!fs.existsSync(destDir)) {
-            fs.mkdirSync(destDir, { recursive: true });
-        }
-        const destPath = safeJoin(destDir, fileName);
-        try {
-            await fs.promises.rename(tempPath, destPath);
-        } catch (error: any) {
-            // 如果是跨设备移动 (EXDEV)，则使用复制+删除
-            if (error.code === 'EXDEV') {
-                await fs.promises.copyFile(tempPath, destPath);
-                await fs.promises.unlink(tempPath);
-            } else {
-                throw error;
-            }
-        }
-        return destPath; // 返回绝对路径
-    }
-
-    async getFileStream(storedPath: string): Promise<NodeJS.ReadableStream> {
-        const safePath = safeJoin(this.uploadDir, path.relative(this.uploadDir, storedPath));
-        if (safePath !== path.resolve(storedPath)) {
-            throw new Error('Unsafe local file path');
-        }
-        if (!fs.existsSync(safePath)) {
-            throw new Error(`File not found: ${safePath}`);
-        }
-        return fs.createReadStream(safePath);
-    }
-
-    async getPreviewUrl(storedPath: string): Promise<string> {
-        // 本地文件通过现有的 serve-static 或 API 路由提供服务
-        // 这里我们返回文件名，让上层路由处理
-        // 注意：目前架构是 controller 层组装 URL，这里其实可能不需要具体 URL
-        // 或者我们可以返回 null，让上层使用默认逻辑
-        return '';
-    }
-
-    async deleteFile(storedPath: string): Promise<void> {
-        const safePath = safeJoin(this.uploadDir, path.relative(this.uploadDir, storedPath));
-        if (safePath !== path.resolve(storedPath)) {
-            throw new Error('Unsafe local file path');
-        }
-        if (fs.existsSync(safePath)) {
-            await fs.promises.unlink(safePath);
-        }
-    }
-
-    async createShareLink(storedPath: string, password?: string, expiration?: string): Promise<{ link: string; error?: string }> {
-        // 本地存储暂不支持生成外部访问链接，除非我们自己实现一个分享页面
-        // 这里返回错误提示
-        return { link: '', error: '本地存储暂不支持生成分享链接，请使用 OneDrive 存储。' };
     }
 }
 

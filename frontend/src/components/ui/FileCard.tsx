@@ -57,7 +57,7 @@ export const FileCard = ({
             await fileApi.downloadFile(file.id, file.name);
         } catch (error: unknown) {
             console.error("下载失败", error);
-            if (error instanceof ApiActionError && error.kind === 'unauthorized') authService.clearToken();
+            if (error instanceof ApiActionError && error.kind === 'unauthorized') authService.invalidateSession(error.status);
             setDownloadError(describeActionFailure('下载', error));
         }
     };

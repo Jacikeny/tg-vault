@@ -3,31 +3,36 @@ import fs from 'node:fs';
 import test from 'node:test';
 
 const settings = fs.readFileSync(new URL('../components/pages/SettingsPage.tsx', import.meta.url), 'utf8');
+const panel = fs.readFileSync(new URL('../components/pages/TelegramUserAccountsPanel.tsx', import.meta.url), 'utf8');
 const api = fs.readFileSync(new URL('./api.ts', import.meta.url), 'utf8');
 
-test('Settings provides a Chinese phone -> code -> optional 2FA account login wizard', () => {
-    for (const copy of ['登录 Telegram 用户账号', '手机号', '验证码', '两步验证密码', '验证码已发送', '账号已绑定并自动启用']) {
-        assert.match(settings, new RegExp(copy));
+const loginUi = settings + panel;
+
+test('Settings provides a login-method choice before QR or phone authentication', () => {
+    for (const copy of ['添加 Telegram 用户账号', '选择登录方式', '下一步', '二维码登录', '改用手机号', '手机号', '验证码', '两步验证密码', '验证码已发送', '账号已绑定并自动启用']) {
+        assert.match(loginUi, new RegExp(copy));
     }
-    assert.match(settings, /telegramUserLoginStep/);
-    assert.match(settings, /autoComplete="one-time-code"/);
-    assert.match(settings, /autoComplete="current-password"/);
-    assert.match(settings, /type="password"/);
+    assert.match(panel, /QRCodeSVG/);
+    assert.match(panel, /autoComplete="one-time-code"/);
+    assert.match(panel, /autoComplete="current-password"/);
+    assert.match(panel, /type="password"/);
 });
 
-test('bound accounts hide the login form, keep mobile actions readable, and disabled state is not presented as an error', () => {
-    assert.match(settings, /!config\?\.telegramUserClientStatus\?\.userId &&/);
-    assert.match(settings, /flex-col\s+gap-2\s+sm:flex-row/);
-    assert.match(settings, /w-full\s+sm:w-auto/);
-    assert.match(settings, /telegramUserClientStatus\?\.status !== 'disabled' && <Button/);
-    assert.match(settings, /已停用，不会执行账号级下载/);
+test('multi-account rows keep mobile actions readable and disabled state is not presented as an error', () => {
+    assert.match(settings, /TelegramUserAccountsPanel/);
+    assert.match(panel, /flex-col\s+gap-2\s+sm:flex-row/);
+    assert.match(panel, /w-full\s+sm:w-auto/);
+    assert.match(panel, /account\.enabled\s*\?/);
+    assert.match(panel, /已停用，不会执行账号级下载/);
 });
-test('frontend exposes status, disable-retaining-session and destructive unlink without secret response fields', () => {
-    for (const method of ['getTelegramUserAccount', 'startTelegramUserLogin', 'submitTelegramUserCode', 'submitTelegramUserPassword', 'disableTelegramUserAccount', 'unlinkTelegramUserAccount']) {
+
+test('frontend exposes account status, retaining disable and destructive unlink without account secret fields', () => {
+    for (const method of ['getTelegramUserAccounts', 'startTelegramUserQrLogin', 'startTelegramUserPhoneLogin', 'submitTelegramUserLoginCode', 'submitTelegramUserLoginPassword', 'setTelegramUserAccountEnabled', 'unlinkTelegramUserAccountById']) {
         assert.match(api, new RegExp(method));
     }
-    assert.match(settings, /停用（保留登录）/);
-    assert.match(settings, /解除绑定/);
-    assert.match(settings, /保留已加密保存的登录信息/);
-    assert.doesNotMatch(api.slice(api.indexOf('async getTelegramUserAccount'), api.indexOf('async setTelegramUserDownloadEnabled')), /phoneCodeHash|StringSession|apiHash/);
+    assert.match(panel, /停用（保留登录）/);
+    assert.match(panel, /解除绑定/);
+    assert.match(panel, /已加密保存的登录信息/);
+    const accountMethods = api.slice(api.indexOf('async getTelegramUserAccounts'), api.indexOf('async getTelegramUserAccount'));
+    assert.doesNotMatch(accountMethods, /phoneCodeHash|StringSession|apiHash/);
 });

@@ -41,6 +41,47 @@
     "loading": "加载中…",
     "noOtherFolders": "暂无其它文件夹"
   },
+  "login": {
+    "setupTitle": "首次启动，请创建管理员账户",
+    "passwordTitle": "请输入访问密码",
+    "totpTitle": "双重身份验证",
+    "passwordLabel": "访问密码",
+    "adminPasswordLabel": "网页管理员密码",
+    "passwordPlaceholder": "请输入密码",
+    "adminPasswordPlaceholder": "至少 8 位，建议使用强密码",
+    "confirmPasswordLabel": "确认网页密码",
+    "confirmPasswordPlaceholder": "再次输入网页管理员密码",
+    "telegramPinLabel": "Telegram Bot PIN（4 位数字）",
+    "telegramPinHint": "Bot 已配置，PIN 必须正好是 4 位数字，并会加密保存。",
+    "create": "创建管理员并进入",
+    "signIn": "登录",
+    "signingIn": "正在登录",
+    "creating": "正在创建管理员",
+    "totpHeading": "输入身份验证码",
+    "totpHint": "请输入身份验证器 App 生成的 6 位数字。",
+    "verify": "验证并登录",
+    "verifying": "正在验证身份验证码",
+    "back": "返回修改密码",
+    "setupFooter": "生产环境首次访问必须先创建网页密码；Bot 已配置时还需创建 Telegram Bot 4 位 PIN。",
+    "sessionFooter": "登录状态将保留 7 天。",
+    "showPassword": "显示密码",
+    "hidePassword": "隐藏密码",
+    "errors": {
+      "passwordLength": "网页管理员密码至少需要 8 位",
+      "passwordMismatch": "两次输入的网页密码不一致",
+      "pinFormat": "Telegram Bot PIN 必须是 4 位数字",
+      "pinMatchesPassword": "网页密码不能与 Telegram Bot 4 位 PIN 相同",
+      "setupUnavailable": "初始化接口未就绪",
+      "setupFailed": "初始化失败",
+      "setupRequestFailed": "初始化请求失败",
+      "passwordRequired": "请输入密码",
+      "loginFailed": "登录失败",
+      "loginRequestFailed": "登录请求失败",
+      "totpFormat": "请输入 6 位数字验证码",
+      "totpFailed": "验证失败",
+      "totpRequestFailed": "验证请求失败"
+    }
+  },
   "sidebar": {
     "uploadCenter": "上传中心",
     "files": "我的文件",
@@ -107,13 +148,34 @@
   "empty": {
     "title": "未找到文件",
     "description": "尝试拖拽文件到这里，或检查筛选条件。",
-    "root": { "title": "这里还没有文件", "description": "上传文件或创建文件夹，开始整理您的数字资产。" },
-    "folder": { "title": "此文件夹为空", "description": "上传到当前位置，或返回上一级目录。" },
-    "search": { "title": "没有匹配的文件", "description": "换个关键词，或清除搜索条件。" },
-    "filter": { "title": "此分类暂无文件", "description": "切换分类或上传对应类型的文件。" },
-    "offline": { "title": "无法连接服务器", "description": "检查网络连接后重试。" },
-    "error": { "title": "文件列表加载失败", "description": "服务暂时不可用，请稍后重试。" },
-    "stale": { "title": "正在显示上次的数据", "description": "刷新失败；当前内容可能不是最新状态。" },
+    "root": {
+      "title": "这里还没有文件",
+      "description": "上传文件或创建文件夹，开始整理您的数字资产。"
+    },
+    "folder": {
+      "title": "此文件夹为空",
+      "description": "上传到当前位置，或返回上一级目录。"
+    },
+    "search": {
+      "title": "没有匹配的文件",
+      "description": "换个关键词，或清除搜索条件。"
+    },
+    "filter": {
+      "title": "此分类暂无文件",
+      "description": "切换分类或上传对应类型的文件。"
+    },
+    "offline": {
+      "title": "无法连接服务器",
+      "description": "检查网络连接后重试。"
+    },
+    "error": {
+      "title": "文件列表加载失败",
+      "description": "服务暂时不可用，请稍后重试。"
+    },
+    "stale": {
+      "title": "正在显示上次的数据",
+      "description": "刷新失败；当前内容可能不是最新状态。"
+    },
     "clearSearch": "清除搜索",
     "clearFilter": "查看全部文件",
     "retry": "重试"
@@ -201,6 +263,153 @@
       "notTested": "尚未测试",
       "testing": "正在测试存储连接",
       "test": "测试连接"
+    },
+    "security": {
+      "title": "安全设置",
+      "networkTitle": "网络与存储安全"
+    },
+    "maintenance": {
+      "title": "数据维护",
+      "advancedTasks": "高级任务设置"
+    },
+    "telegram": {
+      "botConnection": "Telegram Bot 连接",
+      "permissions": "Telegram Bot 用户权限",
+      "downloadSettings": "Telegram 下载设置"
+    },
+    "storageSources": {
+      "title": "存储源设置",
+      "aliyunTitle": "阿里云 OSS 设置",
+      "s3Title": "S3 兼容存储设置",
+      "webdavTitle": "WebDAV 存储设置"
+    }
+  },
+  "tasks": {
+    "title": "任务中心",
+    "subtitle": "查看和管理 Web、Telegram、频道订阅及 yt-dlp 任务。",
+    "subtitleScoped": "仅显示仍引用所选存储账户的任务或 Telegram 目标。",
+    "showAll": "显示全部任务",
+    "updated": "更新：{{time}}",
+    "runningNotDismissible": "任务运行中，暂不可删除记录",
+    "sources": {
+      "all": "全部来源",
+      "webUpload": "Web 上传",
+      "telegramFile": "Telegram 文件",
+      "channelDownload": "频道下载",
+      "telegramTarget": "Telegram 会话目标",
+      "ytdlp": "yt-dlp",
+      "subscription": "频道订阅"
+    },
+    "statuses": {
+      "all": "全部状态",
+      "pending": "等待中",
+      "running": "运行中",
+      "paused": "已暂停",
+      "waiting": "等待恢复",
+      "failed": "失败",
+      "interrupted": "已中断",
+      "retryRequired": "需要重试",
+      "completed": "已完成",
+      "cancelled": "已取消",
+      "scheduled": "已计划",
+      "disabled": "已停用"
+    },
+    "stages": {
+      "queued": "排队等待",
+      "scanning": "扫描消息",
+      "downloading": "下载源文件",
+      "uploading": "上传到存储",
+      "processing": "服务器处理中",
+      "awaitingFile": "等待重新选择原文件",
+      "resumable": "上传会话可续传",
+      "waitingForNextScan": "等待下次扫描",
+      "waitingForNextTask": "等待后续任务",
+      "completed": "处理完成",
+      "failed": "处理失败",
+      "interrupted": "服务重启时中断",
+      "retryRequired": "需要人工重试"
+    },
+    "target": {
+      "path": "{{storage}} / {{folder}}",
+      "unknownStorage": "未记录存储",
+      "root": "根目录",
+      "label": "目标：{{target}}"
+    },
+    "quickFilters": {
+      "all": "全部",
+      "active": "进行中",
+      "attention": "需处理",
+      "completed": "已完成"
+    },
+    "filters": {
+      "sourceAria": "按任务来源筛选",
+      "statusAria": "按任务状态筛选"
+    },
+    "selection": {
+      "enter": "选择任务",
+      "exit": "退出选择",
+      "count": "已选择 {{count}} 条",
+      "selectAll": "全选可删除",
+      "clear": "清空",
+      "delete": "删除所选",
+      "selectAria": "选择任务",
+      "deselectAria": "取消选择任务"
+    },
+    "actions": {
+      "resume": "续传",
+      "retry": "重试",
+      "followDefault": "改为跟随默认",
+      "clearTarget": "清除目标",
+      "cancel": "取消",
+      "cleanTerminal": "清理终态记录",
+      "refreshAria": "刷新任务",
+      "refresh": "刷新",
+      "closeNotice": "关闭提示",
+      "deleteRecord": "删除记录",
+      "copyId": "复制任务 ID",
+      "back": "返回",
+      "close": "关闭",
+      "confirmDeleteRecord": "确认删除记录"
+    },
+    "loading": {
+      "refresh": "正在刷新任务",
+      "initial": "正在加载任务",
+      "running": "任务正在运行",
+      "action": "正在执行任务操作"
+    },
+    "empty": {
+      "title": "没有符合条件的任务",
+      "description": "调整来源或状态筛选后再查看。"
+    },
+    "progress": {
+      "speed": "速度 {{speed}}",
+      "eta": "ETA {{eta}}",
+      "items": "条目 {{completed}}/{{total}}",
+      "failed": "，失败 {{count}}",
+      "data": "数据 {{transferred}} / {{total}}"
+    },
+    "dialogs": {
+      "confirmAction": "确认{{action}}",
+      "retryTitle": "确认重试任务",
+      "targetUnchanged": "目标保持为：{{target}}",
+      "confirmRetry": "确认重试",
+      "dismissTitle": "确认从任务中心删除",
+      "dismissCount": "将删除 {{count}} 条终态记录。",
+      "dismissDescription": "只会从任务中心隐藏记录，不会删除任何文件、云端对象、订阅配置或底层任务数据。任务状态再次变化后会重新出现。"
+    },
+    "notices": {
+      "subscriptionDefault": "频道订阅已改为跟随系统默认存储",
+      "targetCleared": "Telegram 会话目标已清除",
+      "cancelled": "任务已取消",
+      "resubmitted": "任务已重新提交",
+      "dismissPartial": "已删除 {{dismissed}} 条，{{failed}} 条因状态变化未删除",
+      "dismissed": "已从任务中心删除 {{count}} 条记录"
+    },
+    "errors": {
+      "load": "获取任务列表失败",
+      "action": "任务操作失败",
+      "preview": "无法创建删除预览",
+      "dismiss": "删除任务记录失败"
     }
   }
 }

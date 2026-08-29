@@ -1,10 +1,11 @@
-import { useRef, useState, type FormEvent } from 'react';
+import { useState, type FormEvent } from 'react';
+import { useTranslation } from 'react-i18next';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Eye, EyeOff, LogIn, AlertCircle, ShieldCheck, ArrowLeft } from 'lucide-react';
 import { authService } from '../../services/auth';
 import { IndeterminateSpinner } from '../ui/IndeterminateSpinner';
 import { LanguageToggle } from '../ui/LanguageToggle';
-import { useRuntimeUiLocalization } from './useRuntimeUiLocalization';
+
 
 interface LoginPageProps {
     onLogin: (password: string) => Promise<{ success: boolean; error?: string; requiresTOTP?: boolean }>;
@@ -14,8 +15,7 @@ interface LoginPageProps {
 }
 
 export const LoginPage = ({ onLogin, setupRequired = false, telegramPinRequired = false, onSetup }: LoginPageProps) => {
-    const rootRef = useRef<HTMLDivElement>(null);
-    useRuntimeUiLocalization(rootRef);
+    const { t } = useTranslation();
     const [password, setPassword] = useState('');
     const [confirmPassword, setConfirmPassword] = useState('');
     const [telegramPin, setTelegramPin] = useState('');
@@ -30,23 +30,23 @@ export const LoginPage = ({ onLogin, setupRequired = false, telegramPinRequired 
 
         if (setupRequired) {
             if (!password || password.length < 8) {
-                setError('网页管理员密码至少需要 8 位');
+                setError(t('login.errors.passwordLength'));
                 return;
             }
             if (password !== confirmPassword) {
-                setError('两次输入的网页密码不一致');
+                setError(t('login.errors.passwordMismatch'));
                 return;
             }
             if (telegramPinRequired && !/^\d{4}$/.test(telegramPin)) {
-                setError('Telegram Bot 密码必须是 4 位数字');
+                setError(t('login.errors.pinFormat'));
                 return;
             }
             if (telegramPinRequired && password === telegramPin) {
-                setError('网页密码不能与 Telegram Bot 4 位密码相同');
+                setError(t('login.errors.pinMatchesPassword'));
                 return;
             }
             if (!onSetup) {
-                setError('初始化接口未就绪');
+                setError(t('login.errors.setupUnavailable'));
                 return;
             }
             setLoading(true);
@@ -54,18 +54,18 @@ export const LoginPage = ({ onLogin, setupRequired = false, telegramPinRequired 
             try {
                 const result = await onSetup(password, telegramPinRequired ? telegramPin : undefined);
                 if (!result.success) {
-                    setError(result.error || '初始化失败');
+                    setError(result.error || t('login.errors.setupFailed'));
                     setLoading(false);
                 }
             } catch {
-                setError('初始化请求失败');
+                setError(t('login.errors.setupRequestFailed'));
                 setLoading(false);
             }
             return;
         }
 
         if (!password.trim()) {
-            setError('请输入密码');
+            setError(t('login.errors.passwordRequired'));
             return;
         }
 
@@ -76,7 +76,7 @@ export const LoginPage = ({ onLogin, setupRequired = false, telegramPinRequired 
             const result = await onLogin(password);
 
             if (!result.success) {
-                setError(result.error || '登录失败');
+                setError(result.error || t('login.errors.loginFailed'));
                 setLoading(false);
             } else if (result.requiresTOTP) {
                 setStep('totp');
@@ -84,7 +84,7 @@ export const LoginPage = ({ onLogin, setupRequired = false, telegramPinRequired 
             }
             // 如果成功且不需要 TOTP，App.tsx 会处理状态跳转
         } catch {
-            setError('登录请求失败');
+            setError(t('login.errors.loginRequestFailed'));
             setLoading(false);
         }
     };
@@ -93,7 +93,7 @@ export const LoginPage = ({ onLogin, setupRequired = false, telegramPinRequired 
         e.preventDefault();
 
         if (!totpToken.trim() || totpToken.length !== 6) {
-            setError('请输入 6 位数字验证码');
+            setError(t('login.errors.totpFormat'));
             return;
         }
 
@@ -104,20 +104,20 @@ export const LoginPage = ({ onLogin, setupRequired = false, telegramPinRequired 
             const result = await authService.verifyTOTP(password, totpToken);
 
             if (!result.success) {
-                setError(result.error || '验证失败');
+                setError(result.error || t('login.errors.totpFailed'));
                 setLoading(false);
             } else {
                 // 验证成功，页面会自动因为认证状态改变而卸载
                 window.location.reload(); // 简单处理，或者在 App.tsx 中通过状态流转
             }
         } catch {
-            setError('验证请求失败');
+            setError(t('login.errors.totpRequestFailed'));
             setLoading(false);
         }
     };
 
     return (
-        <div ref={rootRef} className="relative min-h-screen flex items-center justify-center bg-gradient-to-br from-background via-background to-muted/30 p-4">
+        <div className="relative min-h-screen flex items-center justify-center bg-gradient-to-br from-background via-background to-muted/30 p-4">
             <div className="absolute right-4 top-4">
                 <LanguageToggle />
             </div>
@@ -136,14 +136,19 @@ export const LoginPage = ({ onLogin, setupRequired = false, telegramPinRequired 
                         className="inline-block mb-4"
                     >
                         <img
-                            src="/logo.png?v=tg-vault"
+                            src="/logo-160.webp?v=tg-vault"
+                            srcSet="/logo-80.webp?v=tg-vault 80w, /logo-160.webp?v=tg-vault 160w"
+                            sizes="80px"
                             alt="TG Vault Logo"
+                            width="80"
+                            height="80"
+                            decoding="async"
                             className="w-20 h-20 rounded-2xl shadow-lg shadow-black/10"
                         />
                     </motion.div>
                     <h1 className="text-2xl font-bold tracking-tight text-foreground">TG Vault</h1>
                     <p className="text-muted-foreground mt-1">
-                        {setupRequired ? '首次启动，请创建唯一管理员密码' : (step === 'password' ? '请输入访问密码' : '双重身份验证')}
+                        {setupRequired ? t('login.setupTitle') : (step === 'password' ? t('login.passwordTitle') : t('login.totpTitle'))}
                     </p>
                 </div>
 
@@ -172,7 +177,7 @@ export const LoginPage = ({ onLogin, setupRequired = false, telegramPinRequired 
                             {/* Password Input */}
                             <div className="space-y-2">
                                 <label htmlFor="password" className="text-sm font-medium text-foreground">
-                                    {setupRequired ? '网页管理员密码' : '访问密码'}
+                                    {setupRequired ? t('login.adminPasswordLabel') : t('login.passwordLabel')}
                                 </label>
                                 <div className="relative">
                                     <input
@@ -180,7 +185,7 @@ export const LoginPage = ({ onLogin, setupRequired = false, telegramPinRequired 
                                         type={showPassword ? 'text' : 'password'}
                                         value={password}
                                         onChange={(e) => setPassword(e.target.value)}
-                                        placeholder={setupRequired ? '至少 8 位，建议使用强密码' : '请输入密码'}
+                                        placeholder={setupRequired ? t('login.adminPasswordPlaceholder') : t('login.passwordPlaceholder')}
                                         className="w-full h-12 px-4 pr-12 rounded-xl border border-border bg-background text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary transition-all"
                                         autoFocus
                                         autoComplete={setupRequired ? 'new-password' : 'current-password'}
@@ -190,8 +195,8 @@ export const LoginPage = ({ onLogin, setupRequired = false, telegramPinRequired 
                                         type="button"
                                         onClick={() => setShowPassword(!showPassword)}
                                         className="absolute right-3 top-1/2 -translate-y-1/2 p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
-                                        aria-label={showPassword ? '隐藏密码' : '显示密码'}
-                                        title={showPassword ? '隐藏密码' : '显示密码'}
+                                        aria-label={showPassword ? t('login.hidePassword') : t('login.showPassword')}
+                                        title={showPassword ? t('login.hidePassword') : t('login.showPassword')}
                                     >
                                         {showPassword ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
                                     </button>
@@ -202,14 +207,14 @@ export const LoginPage = ({ onLogin, setupRequired = false, telegramPinRequired 
                                 <div className="space-y-4 mt-4">
                                     <div className="space-y-2">
                                         <label htmlFor="confirm-password" className="text-sm font-medium text-foreground">
-                                            确认网页密码
+                                            {t('login.confirmPasswordLabel')}
                                         </label>
                                         <input
                                             id="confirm-password"
                                             type={showPassword ? 'text' : 'password'}
                                             value={confirmPassword}
                                             onChange={(e) => setConfirmPassword(e.target.value)}
-                                            placeholder="再次输入网页管理员密码"
+                                            placeholder={t('login.confirmPasswordPlaceholder')}
                                             autoComplete="new-password"
                                             className="w-full h-12 px-4 rounded-xl border border-border bg-background text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary transition-all"
                                             disabled={loading}
@@ -217,7 +222,7 @@ export const LoginPage = ({ onLogin, setupRequired = false, telegramPinRequired 
                                     </div>
                                     {telegramPinRequired && <div className="space-y-2">
                                         <label htmlFor="telegram-pin" className="text-sm font-medium text-foreground">
-                                            Telegram Bot 密码（4 位数字）
+                                            {t('login.telegramPinLabel')}
                                         </label>
                                         <input
                                             id="telegram-pin"
@@ -232,7 +237,7 @@ export const LoginPage = ({ onLogin, setupRequired = false, telegramPinRequired 
                                             className="w-full h-12 px-4 rounded-xl border border-border bg-background text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary transition-all"
                                             disabled={loading}
                                         />
-                                        <p className="text-xs text-muted-foreground">Bot 已配置，PIN 必须正好是 4 位数字，并会加密保存。</p>
+                                        <p className="text-xs text-muted-foreground">{t('login.telegramPinHint')}</p>
                                     </div>}
                                 </div>
                             )}
@@ -245,11 +250,11 @@ export const LoginPage = ({ onLogin, setupRequired = false, telegramPinRequired 
                                 className="w-full h-12 mt-6 rounded-xl bg-primary text-primary-foreground font-medium flex items-center justify-center gap-2 hover:opacity-90 transition-opacity disabled:opacity-50 disabled:cursor-not-allowed"
                             >
                                 {loading ? (
-                                    <IndeterminateSpinner label={setupRequired ? "正在创建管理员" : "正在登录"} size="md" tone="current" />
+                                    <IndeterminateSpinner label={setupRequired ? t('login.creating') : t('login.signingIn')} size="md" tone="current" />
                                 ) : (
                                     <>
                                         <LogIn className="w-5 h-5" />
-                                        <span>{setupRequired ? '创建管理员并进入' : '登录'}</span>
+                                        <span>{setupRequired ? t('login.create') : t('login.signIn')}</span>
                                     </>
                                 )}
                             </motion.button>
@@ -268,7 +273,7 @@ export const LoginPage = ({ onLogin, setupRequired = false, telegramPinRequired 
                                 onClick={() => { setStep('password'); setError(''); }}
                                 className="mb-4 flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
                             >
-                                <ArrowLeft className="w-3 h-3" /> 返回修改密码
+                                <ArrowLeft className="w-3 h-3" /> {t('login.back')}
                             </button>
 
                             {/* Error Message */}
@@ -287,8 +292,8 @@ export const LoginPage = ({ onLogin, setupRequired = false, telegramPinRequired 
                             <div className="space-y-4">
                                 <div className="text-center">
                                     <ShieldCheck className="w-12 h-12 text-primary mx-auto mb-2 opacity-80" />
-                                    <h3 className="text-sm font-medium">输入身份验证码</h3>
-                                    <p className="text-xs text-muted-foreground mt-1">请输入您身份验证器 App 生成的 6 位数字</p>
+                                    <h3 className="text-sm font-medium">{t('login.totpHeading')}</h3>
+                                    <p className="text-xs text-muted-foreground mt-1">{t('login.totpHint')}</p>
                                 </div>
                                 <input
                                     id="totp"
@@ -314,11 +319,11 @@ export const LoginPage = ({ onLogin, setupRequired = false, telegramPinRequired 
                                 className="w-full h-12 mt-6 rounded-xl bg-primary text-primary-foreground font-medium flex items-center justify-center gap-2 hover:opacity-90 transition-opacity disabled:opacity-50 disabled:cursor-not-allowed"
                             >
                                 {loading ? (
-                                    <IndeterminateSpinner label="正在验证身份验证码" size="md" tone="current" />
+                                    <IndeterminateSpinner label={t('login.verifying')} size="md" tone="current" />
                                 ) : (
                                     <>
                                         <ShieldCheck className="w-5 h-5" />
-                                        <span>验证并登录</span>
+                                        <span>{t('login.verify')}</span>
                                     </>
                                 )}
                             </motion.button>
@@ -328,7 +333,7 @@ export const LoginPage = ({ onLogin, setupRequired = false, telegramPinRequired 
 
                 {/* Footer */}
                 <p className="text-center text-xs text-muted-foreground mt-6">
-                    {setupRequired ? '生产环境首次访问必须先创建网页密码和 Telegram Bot 4 位密码' : '登录状态将保留 7 天'}
+                    {setupRequired ? t('login.setupFooter') : t('login.sessionFooter')}
                 </p>
             </motion.div>
         </div>

@@ -1,4 +1,5 @@
-import { TelegramClient, Api } from 'telegram';
+import { Api, TelegramClient } from 'telegram';
+import { classifyTelegramDownloadAccountError, finishTelegramDownloadAttempt, markTelegramAccountCooldown, markTelegramAccountSessionExpired, markTelegramAccountSourceAccess, selectTelegramDownloadAccount, startTelegramDownloadAttempt, telegramFloodWaitSeconds } from './telegramMultiAccountRuntime.js';
 import { NewMessageEvent } from 'telegram/events/index.js';
 import fs from 'fs';
 import path from 'path';
@@ -1593,6 +1594,26 @@ export async function waitForStorageCooldownRetry(
     return signal.aborted ? 'cancelled' : 'success';
 }
 
+interface TelegramDownloadAccountFailure extends Error {
+    telegramAccountFailure: true;
+    accountId: string;
+    sourceKey: string;
+    cause?: unknown;
+}
+
+function createTelegramDownloadAccountFailure(accountId: string, sourceKey: string, error: unknown): TelegramDownloadAccountFailure {
+    const failure = new Error(error instanceof Error ? error.message : String(error)) as TelegramDownloadAccountFailure;
+    failure.telegramAccountFailure = true;
+    failure.accountId = accountId;
+    failure.sourceKey = sourceKey;
+    failure.cause = error;
+    return failure;
+}
+
+function isTelegramDownloadAccountFailure(error: unknown): error is TelegramDownloadAccountFailure {
+    return Boolean((error as TelegramDownloadAccountFailure | null)?.telegramAccountFailure);
+}
+
 // 处理单个文件上传（带重试机制）
 async function processFileUpload(
     client: TelegramClient,
@@ -1810,6 +1831,9 @@ async function processFileUpload(
 
         } catch (error) {
             if ((error as Error)?.name === 'TelegramDownloadLeaseLostError') throw error;
+            if (file.persistentRef && classifyTelegramDownloadAccountError(error) !== 'retryable') {
+                throw createTelegramDownloadAccountFailure(String((client as any).__tgVaultAccountId || ''), String(file.persistentRef.source || ''), error);
+            }
             console.error('🤖 文件上传失败:', error);
             if (isStorageQuotaCooldownError(error)) {
                 await markStorageAccountCooldown(error.storageAccountId || file.storageTarget?.accountId, error.provider, error.reason, error.cooldownUntil, error.message);
@@ -2223,11 +2247,29 @@ export async function downloadTelegramChannelRange(
     storageTarget: StorageTargetSnapshot = storageManager.getActiveTarget(),
     withItemLease?: <T>(ref: TelegramDownloadMessageRef, operation: () => Promise<T>) => Promise<T>,
 ): Promise<{ requested: number; found: number; skipped: number; failed: number; successful: number; successfulMessageIds: number[]; failedMessageIds: number[]; skippedMessageIds: number[]; firstId: number; lastId: number }> {
-    const userClient = getTelegramUserClient();
-    if (!userClient || !isTelegramUserClientReady()) {
-        throw new Error('Telegram 用户账号下载器未就绪：请先配置 TELEGRAM_API_ID / TELEGRAM_API_HASH 并生成 user session');
+    const selectedDownloadAccount = await selectTelegramDownloadAccount(String(source));
+    if (selectedDownloadAccount) (selectedDownloadAccount.client as any).__tgVaultAccountId = selectedDownloadAccount.accountId;
+    const userClient: TelegramClient | null = (selectedDownloadAccount?.client as TelegramClient | undefined) || getTelegramUserClient();
+    if (!userClient || (!selectedDownloadAccount && !isTelegramUserClientReady())) {
+        selectedDownloadAccount?.release();
+        throw new Error('Telegram 用户账号下载器未就绪：请先配置 Telegram API 并至少登录一个可用账号');
     }
 
+    let telegramDownloadAttemptId: string | null = null;
+    if (selectedDownloadAccount) {
+        if (executionGroupKey) {
+            await query(
+                `UPDATE telegram_background_jobs SET assigned_account_id = $2, updated_at = NOW() WHERE id = $1`,
+                [executionGroupKey, selectedDownloadAccount.accountId],
+            );
+        }
+        telegramDownloadAttemptId = await startTelegramDownloadAttempt({
+            accountId: selectedDownloadAccount.accountId,
+            sourceKey: String(source),
+            jobId: executionGroupKey || null,
+        });
+    }
+    try {
     const safeLimit = Math.max(1, Math.floor(limit || TG_BATCH_DEFAULT_LIMIT));
     const sourceEntity = source.startsWith('@') || /^-?\d+$/.test(source) || /^https?:\/\//i.test(source)
         ? source
@@ -2557,6 +2599,30 @@ export async function downloadTelegramChannelRange(
         firstId: ids[0],
         lastId: ids[ids.length - 1],
     };
+    } catch (error) {
+        if (telegramDownloadAttemptId) {
+            await finishTelegramDownloadAttempt(telegramDownloadAttemptId, 'failed', error instanceof Error ? error.message : String(error)).catch(() => undefined);
+            telegramDownloadAttemptId = null;
+        }
+        const accountError = isTelegramDownloadAccountFailure(error) ? (error.cause || error) : error;
+        if (selectedDownloadAccount) {
+            const classification = classifyTelegramDownloadAccountError(accountError);
+            const text = accountError instanceof Error ? accountError.message : String(accountError);
+            if (classification === 'flood_wait') {
+                await markTelegramAccountCooldown(selectedDownloadAccount.accountId, telegramFloodWaitSeconds(accountError), text);
+            } else if (classification === 'session_expired') {
+                await markTelegramAccountSessionExpired(selectedDownloadAccount.accountId, text);
+            } else if (classification === 'permission_denied') {
+                await markTelegramAccountSourceAccess(selectedDownloadAccount.accountId, String(source), 'download', 'denied', text);
+            }
+        }
+        throw accountError;
+    } finally {
+        if (telegramDownloadAttemptId) {
+            await finishTelegramDownloadAttempt(telegramDownloadAttemptId, 'succeeded').catch(() => undefined);
+        }
+        selectedDownloadAccount?.release();
+    }
 }
 
 // Main handler for file uploads

@@ -1,11 +1,5 @@
 import * as React from "react";
-import { motion } from "framer-motion";
 import { cn } from "../../lib/utils";
-
-// Note: I'm not installing cva, I'll just manual class logic for now or quick-install it.
-// Actually, using CVA is cleaner but I didn't install it. I'll use simple string maps or cn logic.
-// Simulating CVA behavior for simplicity or I should install cva. 
-// "class-variance-authority" is lightweight. I'll add it to next install batch if needed, but for now I'll just use simple props.
 
 interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
     variant?: "default" | "destructive" | "outline" | "secondary" | "ghost" | "link";
@@ -32,9 +26,7 @@ const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
         };
 
         return (
-            <motion.button
-                whileHover={{ scale: 1.02 }}
-                whileTap={{ scale: 0.98 }}
+            <button
                 className={cn(
                     "inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50",
                     variants[variant],
@@ -42,7 +34,7 @@ const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
                     className
                 )}
                 ref={ref}
-                {...props as any}
+                {...props}
             />
         );
     }

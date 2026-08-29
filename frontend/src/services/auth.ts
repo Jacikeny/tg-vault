@@ -6,7 +6,19 @@ export interface AuthStatus {
     telegramPinRequired: boolean;
 }
 
+export const AUTH_SESSION_INVALIDATED_EVENT = 'tgvault:auth-session-invalidated';
+
+export interface AuthSessionInvalidatedDetail {
+    status: number;
+}
+
 class AuthService {
+    private invalidateForAuthStatus(response: Response): boolean {
+        if (response.status !== 401 && response.status !== 428) return false;
+        this.invalidateSession(response.status);
+        return true;
+    }
+
     constructor() {
         // Cookie-only auth: clear legacy localStorage tokens if present.
         this.clearToken();
@@ -23,6 +35,17 @@ class AuthService {
     clearToken() {
         localStorage.removeItem('tg_vault_token');
         localStorage.removeItem('tg_vault_token_expiry');
+    }
+
+    invalidateSession(status: number) {
+        this.clearToken();
+        window.dispatchEvent(new CustomEvent<AuthSessionInvalidatedDetail>(AUTH_SESSION_INVALIDATED_EVENT, { detail: { status } }));
+    }
+
+    onSessionInvalidated(listener: (detail: AuthSessionInvalidatedDetail) => void): () => void {
+        const handle = (event: Event) => listener((event as CustomEvent<AuthSessionInvalidatedDetail>).detail);
+        window.addEventListener(AUTH_SESSION_INVALIDATED_EVENT, handle);
+        return () => window.removeEventListener(AUTH_SESSION_INVALIDATED_EVENT, handle);
     }
 
     isAuthenticated(): boolean {
@@ -170,6 +193,7 @@ class AuthService {
                 body: JSON.stringify({ currentPassword, newPassword }),
             });
             const data = await response.json().catch(() => ({}));
+            if (this.invalidateForAuthStatus(response)) return { success: false, error: '登录会话已失效，请重新登录' };
             if (!response.ok) return { success: false, error: data.error || '修改密码失败' };
             this.clearToken();
             return { success: true };
@@ -186,6 +210,7 @@ class AuthService {
                 headers: this.getAuthHeaders(),
             });
             const data = await response.json().catch(() => ({}));
+            if (this.invalidateForAuthStatus(response)) return { success: false, error: '登录会话已失效，请重新登录' };
             if (!response.ok) return { success: false, error: data.error || '退出所有设备失败' };
             this.clearToken();
             return { success: true };
@@ -203,6 +228,7 @@ class AuthService {
             });
 
             if (!response.ok) {
+                if (this.invalidateForAuthStatus(response)) throw new Error('登录会话已失效，请重新登录');
                 const data = await response.json();
                 throw new Error(data.error || '获取 2FA 信息失败');
             }
@@ -227,6 +253,7 @@ class AuthService {
             });
 
             const data = await response.json();
+            if (this.invalidateForAuthStatus(response)) return { success: false, error: '登录会话已失效，请重新登录' };
             if (!response.ok) {
                 return { success: false, error: data.error || '激活失败' };
             }
@@ -251,6 +278,7 @@ class AuthService {
             });
 
             const data = await response.json();
+            if (this.invalidateForAuthStatus(response)) return { success: false, error: '登录会话已失效，请重新登录' };
             if (!response.ok) {
                 return { success: false, error: data.error || '禁用失败' };
             }

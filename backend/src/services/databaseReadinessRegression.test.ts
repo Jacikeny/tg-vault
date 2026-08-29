@@ -20,12 +20,14 @@ test('local storage fails closed when a cloud account is still marked active', (
     assert.throws(() => validateConfiguredStorageTarget('local', [{ id: 'drive-id', type: 'google_drive' }]), /local/);
 });
 
-test('application explicitly awaits schema initialization before storage init and readiness revalidates it', () => {
+test('application initializes dependencies once and readiness serves the refreshed memory snapshot', () => {
     const db = fs.readFileSync(new URL('../db/index.ts', import.meta.url), 'utf8');
     const app = fs.readFileSync(new URL('../index.ts', import.meta.url), 'utf8');
     assert.match(db, /export function ensureDatabaseInitialized/);
     assert.doesNotMatch(db, /pool\.on\('connect', async/);
     assert.match(app, /await ensureDatabaseInitialized\(\)[\s\S]*await storageManager\.init\(\)/);
-    assert.match(app, /\/readyz[\s\S]*await ensureDatabaseInitialized\(\)/);
-    assert.match(app, /\/readyz[\s\S]*await storageManager\.assertReady\(\)/);
+    const readyRoute = app.slice(app.indexOf("app.get('/readyz'"), app.indexOf("app.get('/deepz'"));
+    assert.match(readyRoute, /dependencyReadiness/);
+    assert.doesNotMatch(readyRoute, /pool\.query|assertReady|get2FAReadiness/);
+    assert.match(app, /app\.get\('\/deepz'[\s\S]*refreshDependencyReadiness/);
 });

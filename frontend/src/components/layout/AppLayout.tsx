@@ -43,14 +43,17 @@ interface SidebarItemProps {
     icon: React.ElementType;
     label: string;
     isActive?: boolean;
-    onClick?: () => void;
+    href: string;
+    onNavigate?: () => void;
     collapsed?: boolean;
 }
 
-const SidebarItem = ({ icon: Icon, label, isActive, onClick, collapsed }: SidebarItemProps) => {
+const SidebarItem = ({ icon: Icon, label, isActive, href, onNavigate, collapsed }: SidebarItemProps) => {
     return (
-        <button
-            onClick={onClick}
+        <a
+            href={href}
+            aria-current={isActive ? 'page' : undefined}
+            onClick={(event) => { if (onNavigate) { event.preventDefault(); onNavigate(); } }}
             className={cn(
                 "flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-all group relative",
                 isActive
@@ -61,7 +64,7 @@ const SidebarItem = ({ icon: Icon, label, isActive, onClick, collapsed }: Sideba
         >
             <Icon className={cn("h-4 w-4 shrink-0 transition-transform duration-300", isActive && "scale-110")} />
             {!collapsed && <span className="flex-1 text-left truncate">{label}</span>}
-        </button>
+        </a>
     );
 };
 
@@ -120,12 +123,12 @@ export const AppLayout = ({ children, activeCategory, onCategoryChange, storageS
     };
 
     const categories = [
-        { id: "upload", icon: UploadCloud, label: t("sidebar.uploadCenter") },
-        { id: "all", icon: Folder, label: t("sidebar.files") },
-        { id: "ytdlp", icon: Download, label: "YT-DLP" },
-        { id: "favorites", icon: Star, label: t("sidebar.favorites") },
-        { id: "tasks", icon: ListChecks, label: t("sidebar.tasks") },
-        { id: "settings", icon: Settings, label: t("sidebar.settings") },
+        { id: "upload", href: "/", icon: UploadCloud, label: t("sidebar.uploadCenter") },
+        { id: "all", href: "/files", icon: Folder, label: t("sidebar.files") },
+        { id: "ytdlp", href: "/files/ytdlp", icon: Download, label: "YT-DLP" },
+        { id: "favorites", href: "/files/favorites", icon: Star, label: t("sidebar.favorites") },
+        { id: "tasks", href: "/tasks", icon: ListChecks, label: t("sidebar.tasks") },
+        { id: "settings", href: "/settings/general", icon: Settings, label: t("sidebar.settings") },
     ];
 
     const renderSidebarContent = (mobile = false) => {
@@ -139,8 +142,9 @@ export const AppLayout = ({ children, activeCategory, onCategoryChange, storageS
                             key={cat.id}
                             icon={cat.icon}
                             label={cat.label}
+                            href={cat.href}
                             isActive={activeCategory === cat.id}
-                            onClick={() => handleTabClick(cat.id)}
+                            onNavigate={() => handleTabClick(cat.id)}
                             collapsed={collapsed}
                         />
                     ))}
@@ -181,7 +185,7 @@ export const AppLayout = ({ children, activeCategory, onCategoryChange, storageS
             >
                 <div className="flex h-[72px] items-center border-b border-border/40 px-5 gap-3 justify-between shrink-0">
                     <div className={cn("flex items-center gap-3 overflow-hidden", !isSidebarOpen && "justify-center w-full")}>
-                        <img src="/logo.png?v=tg-vault" alt="Logo" className="h-10 w-10 rounded-xl object-contain shadow-sm" />
+                        <img src="/logo-80.webp?v=tg-vault" alt="TG Vault" width="40" height="40" decoding="async" className="h-10 w-10 rounded-xl object-contain shadow-sm" />
                         {isSidebarOpen && (
                             <motion.span
                                 initial={{ opacity: 0 }}
@@ -228,7 +232,7 @@ export const AppLayout = ({ children, activeCategory, onCategoryChange, storageS
                         >
                             <div className="flex items-center justify-between mb-8">
                                 <div className="flex items-center gap-2">
-                                    <img src="/logo.png?v=tg-vault" alt="Logo" className="h-10 w-10 rounded-xl object-contain shadow-sm" />
+                                    <img src="/logo-80.webp?v=tg-vault" alt="TG Vault" width="40" height="40" decoding="async" className="h-10 w-10 rounded-xl object-contain shadow-sm" />
                                     <span className="font-bold text-xl">{t("app.title")}</span>
                                 </div>
                                 <Button size="icon" variant="ghost" onClick={() => setIsMobileMenuOpen(false)} aria-label="关闭导航菜单" title="关闭导航菜单">
@@ -243,10 +247,10 @@ export const AppLayout = ({ children, activeCategory, onCategoryChange, storageS
             </AnimatePresence>
 
             {/* Main Content */}
-            <main className="flex-1 flex flex-col h-full overflow-hidden relative bg-gradient-to-br from-background to-muted/20">
+            <main className="flex-1 flex flex-col h-full min-h-0 overflow-hidden relative bg-gradient-to-br from-background to-muted/20">
                 <header className="h-[72px] px-4 sm:px-8 flex items-center justify-between bg-background border-b border-border/40 transition-all">
                     <div className="flex items-center gap-3 md:hidden">
-                        <img src="/logo.png?v=tg-vault" alt="Logo" className="h-10 w-10 rounded-xl object-contain shadow-sm" />
+                        <img src="/logo-80.webp?v=tg-vault" alt="TG Vault" width="40" height="40" decoding="async" className="h-10 w-10 rounded-xl object-contain shadow-sm" />
                         <div className="flex flex-col justify-center h-full pt-4 pb-4">
                             <h1 className="text-xl font-bold tracking-tight text-foreground">{t("app.title")}</h1>
                             <p className="text-xs text-muted-foreground">{categories.find(c => c.id === activeCategory)?.label || activeCategory}</p>

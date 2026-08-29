@@ -1,339 +1,64 @@
 import { authService } from './auth';
+import { ApiActionError } from './apiActionError';
+import { apiRequest } from './httpClient';
 import { sha256Hex } from './chunkHash';
 
 import { API_BASE } from './config';
-import { classifyBatchDeleteResponse, type BatchDeleteResult } from './batchDeleteContract';
+import { classifyBatchDeleteResponse } from './batchDeleteContract';
 import { chunkBounds, parseChunkUploadInit } from './chunkUploadProtocol';
 import { apiActionErrorFromResponse } from './apiActionError';
 import { parseXhrError } from './xhrError';
+import { getApiHeaders } from './clients/clientHeaders';
+import { systemClient } from './clients/systemClient';
+import { tasksClient } from './clients/tasksClient';
+import type {
+    AdvancedTaskSettings,
+    BatchDeletePreview,
+    BatchDeleteResult,
+    ChunkUploadCancelStatus,
+    ChunkUploadSession,
+    CreateYtDlpTaskResult,
+    FileData,
+    FileQueryOptions,
+    FilesPage,
+    FolderAggregation,
+    FolderMovePreview,
+    MediaStatus,
+    OAuthStartResult,
+    StorageAccount,
+    StorageConfig,
+    StorageDeleteImpact,
+    StorageStats,
+    TaskDismissalInput,
+    TaskDismissalPreview,
+    TaskDismissalResult,
+    TaskFilters,
+    TelegramBotPublicConfig,
+    TelegramPermissionCheckResult,
+    TelegramUserAccountStatus,
+    TelegramUserAccountsOverview,
+    TelegramUserLoginComplete,
+    TelegramUserLoginStatus,
+    TelegramUserPhoneLoginStarted,
+    TelegramUserQrLoginStarted,
+    UnifiedTaskList,
+    UnifiedTaskSource,
+    UpdateStatus,
+    UploadCapabilities,
+    UploadProgress,
+    UploadTargetSnapshot,
+} from './apiTypes';
 
-export interface FileData {
-    id: string;
-    name: string;
-    stored_name: string;
-    type: 'image' | 'video' | 'audio' | 'document' | 'other';
-    mime_type: string;
-    size: string;
-    date: string;
-    thumbnailUrl?: string;
-    previewUrl: string;
-    width?: number;
-    height?: number;
-    source?: string;
-    folder?: string;
-    created_at: string;
-    is_favorite?: boolean;
-}
+export type * from './apiTypes';
 
-export interface MediaStatus {
-    available: boolean;
-    source?: string;
-    code?: 'MEDIA_SOURCE_MISSING' | 'MEDIA_QUOTA_EXCEEDED' | 'MEDIA_RATE_LIMITED' | 'MEDIA_UPSTREAM_UNAVAILABLE' | 'FILE_NOT_FOUND';
-    error?: string;
-    reason?: 'not_found' | 'trashed';
-}
-
-export interface StorageCapabilities {
-    share: boolean;
-    sharePassword: boolean;
-    shareExpiration: boolean;
-    quota: boolean;
-    userDelete: boolean;
-}
-
-export interface StorageStats {
-    provider: string;
-    accountId: string | null;
-    capabilities: StorageCapabilities;
-    temporary: { totalBytes: number; usedBytes: number; freeBytes: number; usedPercent: number };
-    indexed: { usedBytes: number; fileCount: number };
-    remoteQuota: { totalBytes: number; usedBytes: number; freeBytes: number; usedPercent: number } | null;
-    health: { probeStatus: 'available' | 'failed' | null; lastProbedAt: string | null; cooldownUntil: string | null; cooldownReason: string | null };
-    server: {
-        total: string;
-        totalBytes: number;
-        used: string;
-        usedBytes: number;
-        free: string;
-        freeBytes: number;
-        usedPercent: number;
-    };
-    tgvault: {
-        used: string;
-        usedBytes: number;
-        fileCount: number;
-        usedPercent?: number;
-    };
-}
-
-export interface UploadProgress {
-    loaded: number;
-    total: number;
-    percent: number;
-}
-
-export interface UploadCapabilities {
-    acceptsAnyFile: boolean;
-    simpleUploadThresholdBytes: number;
-    simpleUploadMaxBytes: number;
-    chunkBytes: number;
-    maxChunkUploadBytes: number;
-    globalSessionBudgetBytes: number;
-    maxChunks: number;
-    sessionTtlMs: number;
-}
-
-export interface UploadTargetSnapshot {
-    provider: string;
-    accountId: string | null;
-    accountName?: string | null;
-    folder?: string | null;
-}
-
-export interface ChunkUploadSession {
-    uploadId: string;
-    filename: string;
-    mimeType: string;
-    folder: string | null;
-    status: 'open' | 'completing' | 'failed';
-    totalChunks: number;
-    uploadedChunks: number[];
-    uploadedChunkHashes: Record<number, string>;
-    receivedBytes: number;
-    totalSize: number;
-    progress: number;
-    maxChunkBytes: number;
-    targetProvider: string;
-    targetAccountId: string | null;
-    targetAccountName?: string | null;
-    expiresAt: string;
-    error?: string | null;
-}
-
-export type ChunkUploadCancelStatus = 'cancelled' | 'busy' | 'terminal' | 'not_found';
-
-export type UnifiedTaskSource = 'telegram_bot' | 'telegram_channel' | 'ytdlp' | 'web_upload' | 'subscription' | 'telegram_target';
-
-export interface UnifiedTask {
-    id: string;
-    sourceType: UnifiedTaskSource;
-    kind: string;
-    title: string;
-    status: string;
-    stage: string;
-    progress: number;
-    ownerUserId: number | null;
-    chatId: string | null;
-    source: string | null;
-    target: {
-        provider: string | null;
-        accountId: string | null;
-        accountName: string | null;
-        folder: string | null;
-    };
-    counts: { total: number; completed: number; failed: number };
-    bytes: { total: number; transferred: number };
-    detail: Record<string, unknown>;
-    error: string | null;
-    retryable: boolean;
-    cancellable: boolean;
-    dismissible: boolean;
-    createdAt: string;
-    updatedAt: string;
-    finishedAt: string | null;
-}
-
-export interface UnifiedTaskList {
-    tasks: UnifiedTask[];
-    total: number;
-    returned: number;
-    generatedAt: string;
-}
-
-export interface CreateYtDlpTaskResult {
-    success: true;
-    task: UnifiedTask;
-}
-
-export interface TaskDismissalPreview {
-    confirmationToken: string;
-    snapshotId: string;
-    context: string;
-    expiresAt: number;
-    impact: {
-        count: number;
-        bySource: Record<string, number>;
-        byStatus: Record<string, number>;
-        filesDeleted: false;
-        cloudObjectsDeleted: false;
-        subscriptionsDeleted: false;
-    };
-}
-
-export interface TaskDismissalResult {
-    status: 'complete' | 'partial';
-    dismissed: Array<{ sourceType: UnifiedTaskSource; id: string }>;
-    failed: Array<{ sourceType: UnifiedTaskSource; id: string; reason: string }>;
-    filesDeleted: false;
-    cloudObjectsDeleted: false;
-}
-
-export interface StorageAccount {
-    id: string;
-    name: string;
-    type: string;
-    is_active: boolean;
-    capabilities: StorageCapabilities;
-    last_probe_status: 'available' | 'failed' | null;
-    last_probe_error: string | null;
-    last_probed_at: string | null;
-}
-
-export interface TelegramBotPublicConfig {
-    configured: boolean;
-    enabled: boolean;
-    required: boolean;
-    pinConfigured: boolean;
-    source: 'web' | 'environment' | 'none';
-    status: string;
-    bot: { username: string | null; displayName: string | null } | null;
-    lastConnectedAt: string | null;
-    lastError: string | null;
-    action: string | null;
-}
-
-export interface UpdateStatus {
-    enabled: boolean;
-    currentVersion: string;
-    latestVersion: string | null;
-    updateAvailable: boolean;
-    releaseName: string | null;
-    releaseUrl: string | null;
-    publishedAt: string | null;
-    checkedAt: string | null;
-    stale: boolean;
-    error: string | null;
-}
-
-export interface TelegramUserAccountStatus {
-    configured: boolean;
-    enabled: boolean;
-    connected: boolean;
-    account: { userId: string; username: string | null; displayName: string | null } | null;
-}
-
-export interface TelegramUserLoginComplete { step: 'complete'; account: NonNullable<TelegramUserAccountStatus['account']> }
-
-export interface StorageConfig {
-    provider: string;
-    activeAccountId: string | null;
-    activeAccountName?: string;
-    capabilities: StorageCapabilities;
-    accounts: StorageAccount[];
-    redirectUri: string;
-    googleDriveRedirectUri: string;
-    telegramUserDownloadEnabled?: boolean;
-    telegramUserSessionReady?: boolean;
-    telegramUserClientStatus?: { status: string; userId: string | null; username: string | null; checkedAt: string | null; lastError: string | null; action: string | null };
-    telegramAllowedUserIds?: number[];
-    telegramAllowedUserIdsFromEnv?: boolean;
-    allowUnsafeWebdavEndpoints: boolean;
-}
-
-export interface FolderMovePreview {
-    sourcePath: string;
-    destinationParent: string | null;
-    finalPath: string;
-    fileCount: number;
-    folderCount: number;
-    totalSizeBytes: number;
-    conflict: boolean;
-    conflictReason?: string;
-    noChange: boolean;
-}
-
-export interface FilesPage {
-    files: FileData[];
-    nextCursor: string | null;
-    hasMore: boolean;
-}
-
-export interface FileQueryOptions {
-    cursor?: string | null;
-    limit?: number;
-    q?: string;
-    type?: 'image' | 'video' | 'audio' | 'document' | 'other' | 'media';
-    folder?: string | null;
-    favorite?: boolean;
-    sort?: 'name' | 'date';
-    direction?: 'asc' | 'desc';
-    signal?: AbortSignal;
-}
-
-export interface FolderAggregation {
-    name: string;
-    fileCount: number;
-    totalSizeBytes: number;
-    latestDate: string;
-    isFavorite: boolean;
-    coverFile: FileData | null;
-}
-
-export interface BatchDeletePreview {
-    confirmationToken: string;
-    fileCount: number;
-    dataFileCount: number;
-    placeholderCount: number;
-    folderCount: number;
-    totalSizeBytes: number;
-    expiresAt: string;
-}
-
-export type { BatchDeleteResult };
-
-export interface AdvancedTaskSettings {
-    telegramDownloadWorkers: number;
-    telegramFileConcurrency: number;
-    duplicateMode: 'copy' | 'skip';
-    autoCleanupOrphans: boolean;
-    telegramDownloadHistoryPolicy: 'errors_only' | 'all';
-    highRisk: { telegramDownloadWorkers: boolean; telegramFileConcurrency: boolean };
-}
-
-export interface StorageDeleteImpact {
-    accountId: string;
-    accountName: string;
-    provider: string;
-    fileCount: number;
-    totalSizeBytes: number;
-    folderCount: number;
-    activeLeaseCount: number;
-    activeTaskCount: number;
-    activeUploadCount: number;
-    remoteObjectsDeleted: false;
-}
-
-export interface OAuthStartResult {
-    authUrl: string;
-    flowNonce: string;
-    frontendOrigin: string;
-    expiresAt: string;
-}
-
-// 获取带认证的请求头
-function getHeaders(additionalHeaders: Record<string, string> = {}): HeadersInit {
-    return {
-        ...authService.getAuthHeaders(),
-        ...additionalHeaders,
-    };
-}
+const getHeaders = getApiHeaders;
 
 async function postStorageAccount<T>(path: string, body: unknown, providerLabel: string): Promise<T> {
     const controller = new AbortController();
     const timeout = window.setTimeout(() => controller.abort(), 65_000);
     let response: Response;
     try {
-        response = await fetch(`${API_BASE}${path}`, {
+        response = await apiRequest(`${API_BASE}${path}`, {
             credentials: 'include',
             method: 'POST',
             headers: getHeaders({ 'Content-Type': 'application/json' }),
@@ -348,7 +73,6 @@ async function postStorageAccount<T>(path: string, body: unknown, providerLabel:
     } finally {
         window.clearTimeout(timeout);
     }
-    if (response.status === 401) throw new Error('UNAUTHORIZED');
     if (!response.ok) {
         const error = await response.json().catch(() => null);
         throw new Error(error?.error || `添加 ${providerLabel} 账户失败`);
@@ -361,11 +85,10 @@ class FileAPI {
 
     async getUploadCapabilities(): Promise<UploadCapabilities> {
         if (!this.uploadCapabilitiesPromise) {
-            this.uploadCapabilitiesPromise = fetch(`${API_BASE}/api/upload/capabilities`, {
+            this.uploadCapabilitiesPromise = apiRequest(`${API_BASE}/api/upload/capabilities`, {
                 credentials: 'include',
                 headers: getHeaders(),
             }).then(async response => {
-                if (response.status === 401 || response.status === 428) throw new Error('UNAUTHORIZED');
                 if (!response.ok) throw new Error('获取上传能力失败');
                 return response.json();
             }).catch(error => {
@@ -384,12 +107,11 @@ class FileAPI {
         if (options.favorite !== undefined) params.set('favorite', String(options.favorite));
         if (options.sort) params.set('sort', options.sort);
         if (options.direction) params.set('direction', options.direction);
-        const response = await fetch(`${API_BASE}/api/files?${params.toString()}`, {
+        const response = await apiRequest(`${API_BASE}/api/files?${params.toString()}`, {
             credentials: 'include',
             headers: getHeaders(),
             signal: options.signal,
         });
-        if (response.status === 401 || response.status === 428) throw new Error('UNAUTHORIZED');
         if (!response.ok) throw new Error('获取文件列表失败');
         return response.json();
     }
@@ -401,12 +123,11 @@ class FileAPI {
         if (options.favorite !== undefined) params.set('favorite', String(options.favorite));
         if (options.sort) params.set('sort', options.sort);
         if (options.direction) params.set('direction', options.direction);
-        const response = await fetch(`${API_BASE}/api/files/folders/aggregation?${params.toString()}`, {
+        const response = await apiRequest(`${API_BASE}/api/files/folders/aggregation?${params.toString()}`, {
             credentials: 'include',
             headers: getHeaders(),
             signal: options.signal,
         });
-        if (response.status === 401 || response.status === 428) throw new Error('UNAUTHORIZED');
         if (!response.ok) throw new Error('获取文件夹统计失败');
         const payload = await response.json();
         return payload.folders;
@@ -420,21 +141,20 @@ class FileAPI {
 
     // 获取单个文件
     async getFile(id: string): Promise<FileData> {
-        const response = await fetch(`${API_BASE}/api/files/${id}`, {
+        const response = await apiRequest(`${API_BASE}/api/files/${id}`, {
             credentials: 'include',
             headers: getHeaders(),
         });
-        if (response.status === 401 || response.status === 428) throw new Error('UNAUTHORIZED');
         if (!response.ok) throw new Error('获取文件信息失败');
         return response.json();
     }
 
     async getMediaStatus(fileId: string): Promise<MediaStatus> {
-        const response = await fetch(`${API_BASE}/api/files/${fileId}/media-status`, {
+        const response = await apiRequest(`${API_BASE}/api/files/${fileId}/media-status`, {
             credentials: 'include',
             headers: getHeaders(),
+            classifyErrors: false,
         });
-        if (response.status === 401 || response.status === 428) throw new Error('UNAUTHORIZED');
         const payload = await response.json().catch(() => ({}));
         return {
             available: response.ok && payload.available !== false,
@@ -458,11 +178,10 @@ class FileAPI {
     }
 
     async getIncompleteChunkUploads(): Promise<ChunkUploadSession[]> {
-        const response = await fetch(`${API_BASE}/api/chunked/sessions`, {
+        const response = await apiRequest(`${API_BASE}/api/chunked/sessions`, {
             credentials: 'include',
             headers: getHeaders(),
         });
-        if (response.status === 401 || response.status === 428) throw new Error('UNAUTHORIZED');
         if (!response.ok) throw new Error('获取未完成上传失败');
         const payload = await response.json();
         return payload.sessions || [];
@@ -490,12 +209,12 @@ class FileAPI {
     }
 
     async cancelChunkUpload(uploadId: string): Promise<ChunkUploadCancelStatus> {
-        const response = await fetch(`${API_BASE}/api/chunked/${uploadId}`, {
+        const response = await apiRequest(`${API_BASE}/api/chunked/${uploadId}`, {
             credentials: 'include',
             method: 'DELETE',
             headers: getHeaders(),
+            acceptedStatuses: [404, 409],
         });
-        if (response.status === 401 || response.status === 428) throw new Error('UNAUTHORIZED');
         const payload = await response.json().catch(() => ({}));
         if (response.status === 409 && payload.status === 'busy') return 'busy';
         if (response.status === 404) return 'not_found';
@@ -506,97 +225,23 @@ class FileAPI {
     }
 
     async createYtDlpTask(input: { url: string; format: 'best' | 'audio' }): Promise<CreateYtDlpTaskResult> {
-        const response = await fetch(`${API_BASE}/api/tasks/ytdlp`, {
-            credentials: 'include',
-            method: 'POST',
-            headers: getHeaders({ 'Content-Type': 'application/json' }),
-            body: JSON.stringify(input),
-        });
-        if (response.status === 401 || response.status === 428) throw new Error('UNAUTHORIZED');
-        const payload = await response.json().catch(() => ({}));
-        if (!response.ok) throw new Error(payload.error || '创建 yt-dlp 任务失败');
-        return payload;
+        return tasksClient.createYtDlpTask(input);
     }
 
-    async getTasks(filters: { source?: string; status?: string; accountId?: string; limit?: number } = {}): Promise<UnifiedTaskList> {
-        const params = new URLSearchParams({ limit: String(filters.limit ?? 200) });
-        if (filters.source) params.set('source', filters.source);
-        if (filters.status) params.set('status', filters.status);
-        if (filters.accountId) params.set('accountId', filters.accountId);
-        const response = await fetch(`${API_BASE}/api/tasks?${params.toString()}`, {
-            credentials: 'include',
-            headers: getHeaders(),
-        });
-        if (response.status === 401 || response.status === 428) throw new Error('UNAUTHORIZED');
-        if (!response.ok) {
-            const payload = await response.json().catch(() => ({}));
-            throw new Error(payload.error || '获取任务列表失败');
-        }
-        return response.json();
+    async getTasks(filters: TaskFilters = {}): Promise<UnifiedTaskList> {
+        return tasksClient.getTasks(filters);
     }
 
     async controlTask(sourceType: UnifiedTaskSource, id: string, action: 'cancel' | 'retry'): Promise<void> {
-        let confirmationToken: string | undefined;
-        if (action === 'cancel') {
-            const confirmation = await fetch(`${API_BASE}/api/tasks/${encodeURIComponent(sourceType)}/${encodeURIComponent(id)}/cancel-confirmation`, {
-                credentials: 'include',
-                method: 'POST',
-                headers: getHeaders(),
-            });
-            if (confirmation.status === 401 || confirmation.status === 428) throw new Error('UNAUTHORIZED');
-            const payload = await confirmation.json().catch(() => ({}));
-            if (!confirmation.ok || !payload.confirmationToken) {
-                throw new Error(payload.error || '无法创建任务取消确认');
-            }
-            confirmationToken = String(payload.confirmationToken);
-        }
-        const response = await fetch(`${API_BASE}/api/tasks/${encodeURIComponent(sourceType)}/${encodeURIComponent(id)}/${action}`, {
-            credentials: 'include',
-            method: 'POST',
-            headers: getHeaders({
-                'Content-Type': 'application/json',
-                ...(confirmationToken ? { 'X-Confirmation-Token': confirmationToken } : {}),
-            }),
-        });
-        if (response.status === 401 || response.status === 428) throw new Error('UNAUTHORIZED');
-        if (!response.ok) {
-            const payload = await response.json().catch(() => ({}));
-            throw new Error(payload.message || payload.error || '任务操作失败');
-        }
+        return tasksClient.controlTask(sourceType, id, action);
     }
 
-    async prepareTaskDismissal(input: {
-        tasks?: Array<{ sourceType: UnifiedTaskSource; id: string }>;
-        source?: string;
-        status?: string;
-        accountId?: string;
-    }): Promise<TaskDismissalPreview> {
-        const response = await fetch(`${API_BASE}/api/tasks/dismissals/prepare`, {
-            credentials: 'include',
-            method: 'POST',
-            headers: getHeaders({ 'Content-Type': 'application/json' }),
-            body: JSON.stringify(input),
-        });
-        if (response.status === 401 || response.status === 428) throw new Error('UNAUTHORIZED');
-        const payload = await response.json().catch(() => ({}));
-        if (!response.ok) throw new Error(payload.error || '无法创建任务删除预览');
-        return payload;
+    async prepareTaskDismissal(input: TaskDismissalInput): Promise<TaskDismissalPreview> {
+        return tasksClient.prepareTaskDismissal(input);
     }
 
     async confirmTaskDismissal(preview: TaskDismissalPreview): Promise<TaskDismissalResult> {
-        const response = await fetch(`${API_BASE}/api/tasks/dismissals/confirm`, {
-            credentials: 'include',
-            method: 'POST',
-            headers: getHeaders({
-                'Content-Type': 'application/json',
-                'X-Confirmation-Token': preview.confirmationToken,
-            }),
-            body: JSON.stringify({ snapshotId: preview.snapshotId, context: preview.context }),
-        });
-        if (response.status === 401 || response.status === 428) throw new Error('UNAUTHORIZED');
-        const payload = await response.json().catch(() => ({}));
-        if (!response.ok && response.status !== 207) throw new Error(payload.error || '删除任务记录失败');
-        return payload;
+        return tasksClient.confirmTaskDismissal(preview);
     }
 
     // 简单上传（适用于小文件）
@@ -632,7 +277,9 @@ class FileAPI {
                         reject(new Error('解析响应失败'));
                     }
                 } else {
-                    reject(parseXhrError(xhr.status, xhr.responseText));
+                    const error = parseXhrError(xhr.status, xhr.responseText);
+                    if (error instanceof ApiActionError && error.kind === 'unauthorized') authService.invalidateSession(error.status);
+                    reject(error);
                 }
             });
 
@@ -679,14 +326,14 @@ class FileAPI {
             maxChunkBytes = resumeSession.maxChunkBytes;
             totalChunks = resumeSession.totalChunks;
             if (resumeSession.status === 'failed') {
-                const retryResponse = await fetch(`${API_BASE}/api/chunked/${uploadId}/retry`, {
+                const retryResponse = await apiRequest(`${API_BASE}/api/chunked/${uploadId}/retry`, {
                     credentials: 'include', method: 'POST', headers: getHeaders(), signal,
                 });
                 if (!retryResponse.ok) throw new Error('服务器无法重新打开该上传会话');
             }
             onProgress?.({ loaded: uploadedBytes, total: file.size, percent: Math.round((uploadedBytes / file.size) * 100) });
         } else {
-            const initResponse = await fetch(`${API_BASE}/api/chunked/init`, {
+            const initResponse = await apiRequest(`${API_BASE}/api/chunked/init`, {
                 credentials: 'include',
                 method: 'POST',
                 headers: getHeaders({ 'Content-Type': 'application/json' }),
@@ -700,7 +347,6 @@ class FileAPI {
                 }),
                 signal,
             });
-            if (initResponse.status === 401 || initResponse.status === 428) throw new Error('UNAUTHORIZED');
             if (!initResponse.ok) {
                 const payload = await initResponse.json().catch(() => ({}));
                 throw new Error(payload.error || '初始化分块上传失败');
@@ -737,7 +383,7 @@ class FileAPI {
                 const chunk = file.slice(start, end);
                 const chunkHash = await sha256Hex(chunk);
 
-                const chunkResponse = await fetch(`${API_BASE}/api/chunked/chunk`, {
+                const chunkResponse = await apiRequest(`${API_BASE}/api/chunked/chunk`, {
                     credentials: 'include',
                     method: 'POST',
                     headers: getHeaders({
@@ -751,7 +397,6 @@ class FileAPI {
                     signal,
                 });
 
-                if (chunkResponse.status === 401 || chunkResponse.status === 428) throw new Error('UNAUTHORIZED');
                 if (!chunkResponse.ok) {
                     const payload = await chunkResponse.json().catch(() => ({}));
                     throw new Error(payload.error || `上传分块 ${chunkIndex + 1}/${totalChunks} 失败`);
@@ -768,7 +413,7 @@ class FileAPI {
                 }
             }
 
-            const completeResponse = await fetch(`${API_BASE}/api/chunked/complete`, {
+            const completeResponse = await apiRequest(`${API_BASE}/api/chunked/complete`, {
                 credentials: 'include',
                 method: 'POST',
                 headers: getHeaders({ 'Content-Type': 'application/json' }),
@@ -776,7 +421,6 @@ class FileAPI {
                 signal,
             });
 
-            if (completeResponse.status === 401 || completeResponse.status === 428) throw new Error('UNAUTHORIZED');
             if (!completeResponse.ok) {
                 const payload = await completeResponse.json().catch(() => ({}));
                 throw new Error(payload.error || '完成分块上传失败');
@@ -818,31 +462,28 @@ class FileAPI {
 
     // 删除文件
     async deleteFile(id: string): Promise<{ status: 'complete'; deletedIds: string[]; message: string }> {
-        const confirmationResponse = await fetch(`${API_BASE}/api/files/${id}/delete-confirmation`, {
+        const confirmationResponse = await apiRequest(`${API_BASE}/api/files/${id}/delete-confirmation`, {
             credentials: 'include', method: 'POST', headers: getHeaders(),
         });
-        if (confirmationResponse.status === 401 || confirmationResponse.status === 428) throw new Error('UNAUTHORIZED');
         if (!confirmationResponse.ok) throw new Error((await confirmationResponse.json().catch(() => ({}))).error || '无法创建删除确认');
         const { confirmationToken } = await confirmationResponse.json();
-        const response = await fetch(`${API_BASE}/api/files/${id}`, {
+        const response = await apiRequest(`${API_BASE}/api/files/${id}`, {
             credentials: 'include',
             method: 'DELETE',
             headers: getHeaders({ 'X-Confirmation-Token': confirmationToken }),
         });
-        if (response.status === 401 || response.status === 428) throw new Error('UNAUTHORIZED');
         const payload = await response.json().catch(() => ({}));
         if (!response.ok) throw new Error(payload.error || payload.details || '删除文件失败');
         return payload;
     }
 
     async previewBatchDelete(fileIds: string[], folderNames: string[]): Promise<BatchDeletePreview> {
-        const response = await fetch(`${API_BASE}/api/files/batch-delete/preview`, {
+        const response = await apiRequest(`${API_BASE}/api/files/batch-delete/preview`, {
             credentials: 'include',
             method: 'POST',
             headers: getHeaders({ 'Content-Type': 'application/json' }),
             body: JSON.stringify({ fileIds, folderNames }),
         });
-        if (response.status === 401 || response.status === 428) throw new Error('UNAUTHORIZED');
         if (!response.ok) {
             const error = await response.json().catch(() => ({}));
             throw new Error(error.error || '获取删除影响范围失败');
@@ -852,19 +493,19 @@ class FileAPI {
 
     // 批量删除
     async batchDelete(confirmationToken: string): Promise<BatchDeleteResult> {
-        const response = await fetch(`${API_BASE}/api/files/batch-delete`, {
+        const response = await apiRequest(`${API_BASE}/api/files/batch-delete`, {
             credentials: 'include',
             method: 'POST',
             headers: getHeaders({ 'Content-Type': 'application/json' }),
             body: JSON.stringify({ confirmationToken }),
+            classifyErrors: false,
         });
-        if (response.status === 401 || response.status === 428) throw new Error('UNAUTHORIZED');
         return classifyBatchDeleteResponse(response);
     }
 
     // 创建分享链接
     async createShareLink(fileId: string, password?: string, expiration?: string): Promise<{ link: string }> {
-        const response = await fetch(`${API_BASE}/api/files/${fileId}/share`, {
+        const response = await apiRequest(`${API_BASE}/api/files/${fileId}/share`, {
             credentials: 'include',
             method: 'POST',
             headers: getHeaders({ 'Content-Type': 'application/json' }),
@@ -877,7 +518,7 @@ class FileAPI {
 
     // 获取下载 URL (直接链接或签名链接)
     async getDownloadLink(id: string): Promise<string> {
-        const response = await fetch(`${API_BASE}/api/files/${id}/download-url`, {
+        const response = await apiRequest(`${API_BASE}/api/files/${id}/download-url`, {
             credentials: 'include',
             headers: getHeaders(),
         });
@@ -891,7 +532,7 @@ class FileAPI {
     }
 
     async getOriginalFileLink(id: string): Promise<string> {
-        const response = await fetch(`${API_BASE}/api/files/${id}/original`, { credentials: 'include', headers: getHeaders(), redirect: 'manual' });
+        const response = await apiRequest(`${API_BASE}/api/files/${id}/original`, { credentials: 'include', headers: getHeaders(), redirect: 'manual', acceptedStatuses: [301, 302, 303, 307, 308] });
         if (!response.ok && response.type !== 'opaqueredirect') throw await apiActionErrorFromResponse(response, '打开原文件失败');
         return response.headers.get('Location') || `${API_BASE}/api/files/${id}/original`;
     }
@@ -919,16 +560,15 @@ class FileAPI {
 
     // 获取存储统计
     async getAdvancedTaskSettings(): Promise<AdvancedTaskSettings> {
-        const response = await fetch(`${API_BASE}/api/storage/config/advanced-tasks`, {
+        const response = await apiRequest(`${API_BASE}/api/storage/config/advanced-tasks`, {
             credentials: 'include', headers: getHeaders(),
         });
-        if (response.status === 401 || response.status === 428) throw new Error('UNAUTHORIZED');
         if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || '获取高级任务设置失败');
         return response.json();
     }
 
     async updateAdvancedTaskSetting(patch: Partial<Pick<AdvancedTaskSettings, 'telegramDownloadWorkers' | 'telegramFileConcurrency' | 'duplicateMode' | 'autoCleanupOrphans' | 'telegramDownloadHistoryPolicy'>>, confirmed = false): Promise<{ success: boolean; deletedCount?: number }> {
-        const response = await fetch(`${API_BASE}/api/storage/config/advanced-tasks`, {
+        const response = await apiRequest(`${API_BASE}/api/storage/config/advanced-tasks`, {
             credentials: 'include', method: 'PATCH',
             headers: getHeaders({ 'Content-Type': 'application/json' }),
             body: JSON.stringify({ ...patch, confirmed }),
@@ -943,35 +583,32 @@ class FileAPI {
     }
 
     async getStorageStats(): Promise<StorageStats> {
-        const response = await fetch(`${API_BASE}/api/storage/stats`, {
+        const response = await apiRequest(`${API_BASE}/api/storage/stats`, {
             credentials: 'include',
             headers: getHeaders(),
         });
-        if (response.status === 401 || response.status === 428) throw new Error('UNAUTHORIZED');
         if (!response.ok) throw new Error('获取存储统计失败');
         return response.json();
     }
 
     // 获取存储配置
     async getStorageConfig(): Promise<StorageConfig> {
-        const response = await fetch(`${API_BASE}/api/storage/config`, {
+        const response = await apiRequest(`${API_BASE}/api/storage/config`, {
             credentials: 'include',
             headers: getHeaders(),
         });
-        if (response.status === 401 || response.status === 428) throw new Error('UNAUTHORIZED');
         if (!response.ok) throw new Error('获取存储配置失败');
         return response.json();
     }
 
     async setUnsafeWebdavEndpointsAllowed(enabled: boolean, confirmed = false): Promise<{ success: boolean; allowUnsafeWebdavEndpoints: boolean }> {
-        const response = await fetch(`${API_BASE}/api/storage/config/webdav-security`, {
+        const response = await apiRequest(`${API_BASE}/api/storage/config/webdav-security`, {
             credentials: 'include',
             method: 'PATCH',
             headers: getHeaders({ 'Content-Type': 'application/json' }),
             body: JSON.stringify({ enabled, confirmed }),
         });
         const payload = await response.json().catch(() => ({}));
-        if (response.status === 401 || response.status === 428) throw new Error('UNAUTHORIZED');
         if (!response.ok) {
             const error = new Error(payload.error || '更新 WebDAV 安全设置失败') as Error & { code?: string };
             error.code = payload.code;
@@ -981,34 +618,17 @@ class FileAPI {
     }
 
     async getTelegramBotConfig(): Promise<TelegramBotPublicConfig> {
-        const response = await fetch(`${API_BASE}/api/storage/config/telegram-bot`, { credentials: 'include', headers: getHeaders() });
-        if (response.status === 401 || response.status === 428) throw new Error('UNAUTHORIZED');
+        const response = await apiRequest(`${API_BASE}/api/storage/config/telegram-bot`, { credentials: 'include', headers: getHeaders() });
         if (!response.ok) throw new Error('获取 Telegram Bot 配置失败');
         return response.json();
     }
 
     async getUpdateStatus(): Promise<UpdateStatus> {
-        const response = await fetch(`${API_BASE}/api/system/update-status`, {
-            credentials: 'include',
-            cache: 'no-store',
-            headers: getHeaders(),
-        });
-        if (response.status === 401 || response.status === 428) throw new Error('UNAUTHORIZED');
-        if (!response.ok) throw new Error('获取版本信息失败');
-        return response.json();
+        return systemClient.getUpdateStatus();
     }
 
     async checkForUpdates(): Promise<UpdateStatus> {
-        const response = await fetch(`${API_BASE}/api/system/update-check`, {
-            method: 'POST',
-            credentials: 'include',
-            cache: 'no-store',
-            headers: getHeaders(),
-        });
-        if (response.status === 401 || response.status === 428) throw new Error('UNAUTHORIZED');
-        if (response.status === 429) throw new Error('检查过于频繁，请稍后再试');
-        if (!response.ok) throw new Error('检查版本失败');
-        return response.json();
+        return systemClient.checkForUpdates();
     }
 
     async testTelegramBotConfig(input: { botToken: string; apiId: string; apiHash: string }): Promise<{ success: boolean; bot: { username: string | null; displayName: string | null } }> {
@@ -1036,15 +656,59 @@ class FileAPI {
     }
 
     private async telegramBotConfigRequest(path: string, method: string, body: unknown): Promise<any> {
-        const response = await fetch(`${API_BASE}${path}`, {
+        const response = await apiRequest(`${API_BASE}${path}`, {
             credentials: 'include', method,
             headers: getHeaders({ 'Content-Type': 'application/json' }),
             body: JSON.stringify(body),
         });
         const payload = await response.json().catch(() => ({}));
-        if (response.status === 401 || response.status === 428) throw new Error('UNAUTHORIZED');
         if (!response.ok) throw new Error(payload.error || 'Telegram Bot 配置操作失败');
         return payload;
+    }
+
+    async getTelegramUserAccounts(): Promise<TelegramUserAccountsOverview> {
+        return this.telegramUserRequest('/api/storage/config/telegram-user/accounts', 'GET');
+    }
+
+    async startTelegramUserQrLogin(): Promise<TelegramUserQrLoginStarted> {
+        const payload = await this.telegramUserRequest('/api/storage/config/telegram-user/login/qr', 'POST');
+        return this.normalizeTelegramUserLoginStatus(payload) as TelegramUserQrLoginStarted;
+    }
+
+    async getTelegramUserLoginStatus(flowId: string): Promise<TelegramUserLoginStatus> {
+        const payload = await this.telegramUserRequest(`/api/storage/config/telegram-user/login/${encodeURIComponent(flowId)}`, 'GET');
+        return this.normalizeTelegramUserLoginStatus(payload);
+    }
+
+    async cancelTelegramUserLogin(flowId: string): Promise<{ success: boolean }> {
+        return this.telegramUserRequest(`/api/storage/config/telegram-user/login/${encodeURIComponent(flowId)}`, 'DELETE');
+    }
+
+    async startTelegramUserPhoneLogin(phone: string): Promise<TelegramUserPhoneLoginStarted> {
+        const payload = await this.telegramUserRequest('/api/storage/config/telegram-accounts/login/phone', 'POST', { phone });
+        return this.normalizeTelegramUserLoginStatus(payload) as TelegramUserPhoneLoginStarted;
+    }
+
+    async submitTelegramUserLoginCode(flowId: string, code: string): Promise<TelegramUserLoginStatus> {
+        const payload = await this.telegramUserRequest('/api/storage/config/telegram-accounts/login/code', 'POST', { flowId, code });
+        return this.normalizeTelegramUserLoginStatus(payload, flowId);
+    }
+
+    async submitTelegramUserLoginPassword(flowId: string, password: string): Promise<TelegramUserLoginStatus> {
+        const payload = await this.telegramUserRequest('/api/storage/config/telegram-accounts/login/password', 'POST', { flowId, password });
+        return this.normalizeTelegramUserLoginStatus(payload, flowId);
+    }
+
+    async setTelegramUserAccountEnabled(accountId: string, enabled: boolean): Promise<{ success: boolean; enabled: boolean }> {
+        return this.telegramUserRequest(`/api/storage/config/telegram-user/accounts/${encodeURIComponent(accountId)}/${enabled ? 'enable' : 'disable'}`, 'POST');
+    }
+
+    async unlinkTelegramUserAccountById(accountId: string): Promise<{ success: boolean }> {
+        return this.telegramUserRequest(`/api/storage/config/telegram-user/accounts/${encodeURIComponent(accountId)}`, 'DELETE');
+    }
+
+    async checkTelegramUserAccountPermissions(accountId: string): Promise<TelegramPermissionCheckResult> {
+        return this.telegramUserRequest(`/api/storage/config/telegram-user/accounts/${encodeURIComponent(accountId)}/permissions/check`, 'POST');
     }
 
     async getTelegramUserAccount(): Promise<TelegramUserAccountStatus> {
@@ -1071,22 +735,42 @@ class FileAPI {
         return this.telegramUserRequest('/api/storage/config/telegram-user', 'DELETE');
     }
 
+    private normalizeTelegramUserLoginStatus(payload: any, fallbackFlowId = ''): TelegramUserLoginStatus {
+        if (payload?.step === 'complete') {
+            return { flowId: String(payload.flowId || fallbackFlowId), status: 'complete', account: payload.account };
+        }
+        if (payload?.step === 'password_required') {
+            return { flowId: String(payload.flowId || fallbackFlowId), status: 'password_required' };
+        }
+        const rawStatus = String(payload?.status || (payload?.delivery ? 'code_required' : 'error'));
+        const status = rawStatus === 'pending' ? 'waiting_for_scan' : rawStatus as TelegramUserLoginStatus['status'];
+        const qrCode = typeof payload?.qrCode === 'string'
+            ? payload.qrCode
+            : typeof payload?.qrData === 'string' ? payload.qrData : undefined;
+        return {
+            flowId: String(payload?.flowId || fallbackFlowId),
+            status,
+            ...(qrCode ? { qrCode, qrExpiresAt: String(payload?.qrExpiresAt || payload?.expiresAt || '') } : {}),
+            ...(payload?.expiresAt ? { expiresAt: String(payload.expiresAt) } : {}),
+            ...(payload?.account ? { account: payload.account } : {}),
+            ...(payload?.delivery ? { delivery: payload.delivery, message: payload.delivery === 'sms' ? '短信' : 'Telegram 应用' } : payload?.message ? { message: String(payload.message) } : {}),
+        } as TelegramUserLoginStatus;
+    }
+
     private async telegramUserRequest(path: string, method: string, body?: unknown): Promise<any> {
-        const response = await fetch(`${API_BASE}${path}`, { credentials: 'include', method, headers: getHeaders({ 'Content-Type': 'application/json' }), body: body === undefined ? undefined : JSON.stringify(body) });
+        const response = await apiRequest(`${API_BASE}${path}`, { credentials: 'include', method, headers: getHeaders({ 'Content-Type': 'application/json' }), body: body === undefined ? undefined : JSON.stringify(body) });
         const payload = await response.json().catch(() => ({}));
-        if (response.status === 401 || response.status === 428) throw new Error('UNAUTHORIZED');
         if (!response.ok) throw new Error(payload.error || 'Telegram 用户账号操作失败');
         return payload;
     }
 
     async setTelegramUserDownloadEnabled(enabled: boolean): Promise<{ success: boolean; enabled: boolean }> {
-        const response = await fetch(`${API_BASE}/api/storage/config/telegram-user-download`, {
+        const response = await apiRequest(`${API_BASE}/api/storage/config/telegram-user-download`, {
             credentials: 'include',
             method: 'POST',
             headers: getHeaders({ 'Content-Type': 'application/json' }),
             body: JSON.stringify({ enabled }),
         });
-        if (response.status === 401 || response.status === 428) throw new Error('UNAUTHORIZED');
         if (!response.ok) {
             const error = await response.json().catch(() => ({}));
             throw new Error(error.error || '更新 Telegram 用户下载设置失败');
@@ -1095,13 +779,12 @@ class FileAPI {
     }
 
     async setTelegramAllowedUserIds(userIds: string): Promise<{ success: boolean; userIds: number[] }> {
-        const response = await fetch(`${API_BASE}/api/storage/config/telegram-allowed-users`, {
+        const response = await apiRequest(`${API_BASE}/api/storage/config/telegram-allowed-users`, {
             credentials: 'include',
             method: 'POST',
             headers: getHeaders({ 'Content-Type': 'application/json' }),
             body: JSON.stringify({ userIds }),
         });
-        if (response.status === 401 || response.status === 428) throw new Error('UNAUTHORIZED');
         if (!response.ok) {
             const error = await response.json().catch(() => ({}));
             throw new Error(error.error || '更新 Telegram 允许用户列表失败');
@@ -1110,13 +793,12 @@ class FileAPI {
     }
 
     async cleanupDownloadItems(retentionDays: number = 7): Promise<{ success: boolean; deletedCount: number; retentionDays: number }> {
-        const response = await fetch(`${API_BASE}/api/storage/maintenance/download-items/cleanup`, {
+        const response = await apiRequest(`${API_BASE}/api/storage/maintenance/download-items/cleanup`, {
             credentials: 'include',
             method: 'POST',
             headers: getHeaders({ 'Content-Type': 'application/json' }),
             body: JSON.stringify({ retentionDays }),
         });
-        if (response.status === 401 || response.status === 428) throw new Error('UNAUTHORIZED');
         if (!response.ok) {
             const error = await response.json().catch(() => ({}));
             throw new Error(error.error || '清理下载任务明细失败');
@@ -1126,13 +808,12 @@ class FileAPI {
 
     // 更新 OneDrive 配置
     async updateOneDriveConfig(clientId: string, clientSecret: string, refreshToken: string, tenantId: string = 'common', name?: string): Promise<{ success: boolean; message: string }> {
-        const response = await fetch(`${API_BASE}/api/storage/config/onedrive`, {
+        const response = await apiRequest(`${API_BASE}/api/storage/config/onedrive`, {
             credentials: 'include',
             method: 'PUT',
             headers: getHeaders({ 'Content-Type': 'application/json' }),
             body: JSON.stringify({ clientId, clientSecret, refreshToken, tenantId, name }),
         });
-        if (response.status === 401 || response.status === 428) throw new Error('UNAUTHORIZED');
         if (!response.ok) throw new Error('更新配置失败');
         return response.json();
     }
@@ -1159,13 +840,12 @@ class FileAPI {
 
     // 切换存储提供商或账户
     async switchStorageProvider(provider: 'local' | 'onedrive' | 'aliyun_oss' | 's3' | 'webdav' | 'openlist' | 'google_drive', accountId?: string): Promise<{ success: boolean; message: string; scope?: string; inFlightTargetsPreserved?: boolean }> {
-        const response = await fetch(`${API_BASE}/api/storage/switch`, {
+        const response = await apiRequest(`${API_BASE}/api/storage/switch`, {
             credentials: 'include',
             method: 'POST',
             headers: getHeaders({ 'Content-Type': 'application/json' }),
             body: JSON.stringify({ provider, accountId }),
         });
-        if (response.status === 401 || response.status === 428) throw new Error('UNAUTHORIZED');
         if (!response.ok) {
             const error = await response.json();
             throw new Error(error.error || '切换存储失败');
@@ -1175,22 +855,20 @@ class FileAPI {
 
     // 获取所有账户
     async getAccounts(): Promise<StorageAccount[]> {
-        const response = await fetch(`${API_BASE}/api/storage/accounts`, {
+        const response = await apiRequest(`${API_BASE}/api/storage/accounts`, {
             credentials: 'include',
             headers: getHeaders(),
         });
-        if (response.status === 401 || response.status === 428) throw new Error('UNAUTHORIZED');
         if (!response.ok) throw new Error('获取账户列表失败');
         return response.json();
     }
 
     async probeStorageAccount(accountId: string): Promise<{ success: boolean; accountId: string; provider: string; status: 'available'; checkedAt: string }> {
-        const response = await fetch(`${API_BASE}/api/storage/accounts/${encodeURIComponent(accountId)}/probe`, {
+        const response = await apiRequest(`${API_BASE}/api/storage/accounts/${encodeURIComponent(accountId)}/probe`, {
             credentials: 'include',
             method: 'POST',
             headers: getHeaders({ 'Content-Type': 'application/json' }),
         });
-        if (response.status === 401 || response.status === 428) throw new Error('UNAUTHORIZED');
         if (!response.ok) {
             const error = await response.json().catch(() => ({}));
             throw new Error(error.error || '存储账户连接测试失败');
@@ -1200,21 +878,19 @@ class FileAPI {
 
     // 删除账户：先获取影响快照，用户确认后再传回一次性令牌执行。
     async previewAccountDeletion(accountId: string): Promise<{ confirmationToken: string; expiresAt: number; impact: StorageDeleteImpact }> {
-        const response = await fetch(`${API_BASE}/api/storage/accounts/${encodeURIComponent(accountId)}/delete-confirmation`, {
+        const response = await apiRequest(`${API_BASE}/api/storage/accounts/${encodeURIComponent(accountId)}/delete-confirmation`, {
             credentials: 'include', method: 'POST', headers: getHeaders(),
         });
-        if (response.status === 401 || response.status === 428) throw new Error('UNAUTHORIZED');
         if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || '无法创建删除确认');
         return response.json();
     }
 
     async deleteAccount(accountId: string, confirmationToken: string): Promise<{ success: boolean; message: string }> {
-        const response = await fetch(`${API_BASE}/api/storage/accounts/${encodeURIComponent(accountId)}`, {
+        const response = await apiRequest(`${API_BASE}/api/storage/accounts/${encodeURIComponent(accountId)}`, {
             credentials: 'include',
             method: 'DELETE',
             headers: getHeaders({ 'X-Confirmation-Token': confirmationToken }),
         });
-        if (response.status === 401 || response.status === 428) throw new Error('UNAUTHORIZED');
         if (!response.ok) {
             const error = await response.json();
             throw new Error(error.error || '删除账户失败');
@@ -1223,7 +899,7 @@ class FileAPI {
     }
 
     async createFolder(folderName: string): Promise<{ success: boolean; folder: string }> {
-        const response = await fetch(`${API_BASE}/api/files/folders`, {
+        const response = await apiRequest(`${API_BASE}/api/files/folders`, {
             credentials: 'include',
             method: 'POST',
             headers: {
@@ -1243,13 +919,12 @@ class FileAPI {
 
     // 重命名文件
     async renameFile(id: string, name: string): Promise<{ success: boolean; name: string }> {
-        const response = await fetch(`${API_BASE}/api/files/${id}/rename`, {
+        const response = await apiRequest(`${API_BASE}/api/files/${id}/rename`, {
             credentials: 'include',
             method: 'PATCH',
             headers: getHeaders({ 'Content-Type': 'application/json' }),
             body: JSON.stringify({ name }),
         });
-        if (response.status === 401 || response.status === 428) throw new Error('UNAUTHORIZED');
         if (!response.ok) {
             const error = await response.json();
             throw new Error(error.error || '重命名失败');
@@ -1259,13 +934,12 @@ class FileAPI {
 
     // 重命名文件夹
     async renameFolder(oldName: string, newName: string): Promise<{ success: boolean; name: string }> {
-        const response = await fetch(`${API_BASE}/api/files/rename-folder`, {
+        const response = await apiRequest(`${API_BASE}/api/files/rename-folder`, {
             credentials: 'include',
             method: 'PATCH',
             headers: getHeaders({ 'Content-Type': 'application/json' }),
             body: JSON.stringify({ oldName, newName }),
         });
-        if (response.status === 401 || response.status === 428) throw new Error('UNAUTHORIZED');
         if (!response.ok) {
             const error = await response.json();
             throw new Error(error.error || '重命名文件夹失败');
@@ -1275,13 +949,12 @@ class FileAPI {
 
     // 移动文件
     async moveFile(id: string, folder: string | null): Promise<{ success: boolean; folder: string | null }> {
-        const response = await fetch(`${API_BASE}/api/files/${id}/move`, {
+        const response = await apiRequest(`${API_BASE}/api/files/${id}/move`, {
             credentials: 'include',
             method: 'PATCH',
             headers: getHeaders({ 'Content-Type': 'application/json' }),
             body: JSON.stringify({ folder }),
         });
-        if (response.status === 401 || response.status === 428) throw new Error('UNAUTHORIZED');
         if (!response.ok) {
             const error = await response.json();
             throw new Error(error.error || '移动失败');
@@ -1291,13 +964,12 @@ class FileAPI {
 
     // 移动文件夹
     async moveFolder(oldName: string, newName: string | null): Promise<{ success: boolean; folder: string | null }> {
-        const response = await fetch(`${API_BASE}/api/files/move-folder`, {
+        const response = await apiRequest(`${API_BASE}/api/files/move-folder`, {
             credentials: 'include',
             method: 'PATCH',
             headers: getHeaders({ 'Content-Type': 'application/json' }),
             body: JSON.stringify({ oldName, newName }),
         });
-        if (response.status === 401 || response.status === 428) throw new Error('UNAUTHORIZED');
         if (!response.ok) {
             const error = await response.json();
             throw new Error(error.error || '移动文件夹失败');
@@ -1306,14 +978,13 @@ class FileAPI {
     }
 
     async previewMoveFolder(oldName: string, newName: string | null, signal?: AbortSignal): Promise<FolderMovePreview> {
-        const response = await fetch(`${API_BASE}/api/files/move-folder/preview`, {
+        const response = await apiRequest(`${API_BASE}/api/files/move-folder/preview`, {
             credentials: 'include',
             method: 'POST',
             headers: getHeaders({ 'Content-Type': 'application/json' }),
             body: JSON.stringify({ oldName, newName }),
             signal,
         });
-        if (response.status === 401 || response.status === 428) throw new Error('UNAUTHORIZED');
         const payload = await response.json().catch(() => ({}));
         if (!response.ok) throw new Error(payload.error || '获取移动影响范围失败');
         return payload;
@@ -1326,44 +997,39 @@ class FileAPI {
 
     // 切换文件收藏状态
     async toggleFavorite(fileId: string): Promise<{ success: boolean; isFavorite: boolean }> {
-        const response = await fetch(`${API_BASE}/api/files/${fileId}/favorite`, {
+        const response = await apiRequest(`${API_BASE}/api/files/${fileId}/favorite`, {
             credentials: 'include',
             method: 'POST',
             headers: getHeaders({ 'Content-Type': 'application/json' }),
         });
-        if (response.status === 401 || response.status === 428) throw new Error('UNAUTHORIZED');
         if (!response.ok) throw new Error('切换收藏状态失败');
         return response.json();
     }
 
     // 切换文件夹收藏状态
     async toggleFolderFavorite(folderName: string): Promise<{ success: boolean; isFavorite: boolean }> {
-        const response = await fetch(`${API_BASE}/api/files/folders/favorite`, {
+        const response = await apiRequest(`${API_BASE}/api/files/folders/favorite`, {
             credentials: 'include',
             method: 'POST',
             headers: getHeaders({ 'Content-Type': 'application/json' }),
             body: JSON.stringify({ folderName }),
         });
-        if (response.status === 401 || response.status === 428) throw new Error('UNAUTHORIZED');
         if (!response.ok) throw new Error('切换文件夹收藏状态失败');
         return response.json();
     }
 
     // 健康检查
     async healthCheck(): Promise<{ status: string; timestamp: string }> {
-        const response = await fetch(`${API_BASE}/health`);
-        if (!response.ok) throw new Error('健康检查失败');
-        return response.json();
+        return systemClient.healthCheck();
     }
 
     async getOneDriveAuthUrl(clientId: string, tenantId: string = 'common', clientSecret?: string, name?: string): Promise<OAuthStartResult> {
-        const response = await fetch(`${API_BASE}/api/storage/config/onedrive/auth-url`, {
+        const response = await apiRequest(`${API_BASE}/api/storage/config/onedrive/auth-url`, {
             credentials: 'include',
             method: 'POST',
             headers: getHeaders({ 'Content-Type': 'application/json' }),
             body: JSON.stringify({ clientId, tenantId, clientSecret, name }),
         });
-        if (response.status === 401 || response.status === 428) throw new Error('UNAUTHORIZED');
         if (!response.ok) {
             const error = await response.json();
             throw new Error(error.error || '获取授权地址失败');
@@ -1372,13 +1038,12 @@ class FileAPI {
     }
 
     async getGoogleDriveAuthUrl(clientId: string, clientSecret: string, name?: string, sharedDriveId?: string): Promise<OAuthStartResult> {
-        const response = await fetch(`${API_BASE}/api/storage/config/google-drive/auth-url`, {
+        const response = await apiRequest(`${API_BASE}/api/storage/config/google-drive/auth-url`, {
             credentials: 'include',
             method: 'POST',
             headers: getHeaders({ 'Content-Type': 'application/json' }),
             body: JSON.stringify({ clientId, clientSecret, name, sharedDriveId }),
         });
-        if (response.status === 401 || response.status === 428) throw new Error('UNAUTHORIZED');
         if (!response.ok) {
             const error = await response.json();
             throw new Error(error.error || '获取授权地址失败');

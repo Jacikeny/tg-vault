@@ -1,3 +1,4 @@
+import { formatBytes } from '../utils/telegramUtils.js';
 import { query } from '../db/index.js';
 import {
     buildFilePageQuery,
@@ -30,6 +31,11 @@ export function parseTelegramFileCallback(data: string): TelegramFileBrowserCall
     return match ? { action: match[1].toLowerCase() as TelegramFileBrowserAction, fileId: match[2].toLowerCase() } : null;
 }
 
+function compactText(value: unknown, maxLength: number): string {
+    const text = String(value || '').replace(/[\r\n\t]+/g, ' ').replace(/[*_`[\]\\]/g, '').trim();
+    return text.length > maxLength ? `${text.slice(0, Math.max(1, maxLength - 1))}…` : text;
+}
+
 export function buildTelegramFileActionRows(file: any): Array<Array<{ text: string; data: string }>> {
     const id = String(file.id);
     const rows: Array<Array<{ text: string; data: string }>> = [
@@ -44,11 +50,11 @@ export function buildTelegramFileActionRows(file: any): Array<Array<{ text: stri
 
 export function buildTelegramFileDetail(file: any): string {
     return [
-        `📄 **${file.name}**`,
+        `📄 **${compactText(file.name, 80) || '未命名文件'}**`,
         `🆔 ${file.id}`,
-        `📦 ${Number(file.size || 0)} bytes · ${file.type || 'other'}`,
-        `📍 ${file.source || 'local'}`,
-        `📁 ${file.folder || '根目录'}`,
+        `📦 ${formatBytes(Number(file.size || 0))} · ${compactText(file.type || '其他', 20)}`,
+        `📍 ${compactText(file.source || '本地存储', 50)}`,
+        `📁 ${compactText(file.folder || '根目录', 100)}`,
         `🕒 ${file.created_at ? new Date(file.created_at).toLocaleString('zh-CN', { hour12: false }) : '未知'}`,
     ].join('\n');
 }
@@ -85,16 +91,18 @@ export async function queryTelegramFiles(
 export function buildTelegramFileCard(file: any, index: number): string {
     const shortId = String(file.id || '').slice(0, 12);
     const createdAt = file.created_at ? new Date(file.created_at).toLocaleString('zh-CN', { hour12: false }) : '未知';
+    const name = compactText(file.name, 46) || '未命名文件';
+    const folder = compactText(file.folder || '根目录', 60);
     return [
-        `${index + 1}. ${file.is_favorite ? '⭐ ' : ''}${file.name}`,
-        `   🆔 ${shortId} · ${file.type || 'other'} · ${Number(file.size || 0)} bytes`,
-        `   📁 ${file.folder || '根目录'} · ${createdAt}`,
+        `${index + 1}. ${file.is_favorite ? '⭐ ' : ''}${name}`,
+        `   🆔 ${shortId} · ${compactText(file.type || '其他', 16)} · ${formatBytes(Number(file.size || 0))}`,
+        `   📁 ${folder} · ${createdAt}`,
     ].join('\n');
 }
 
 export function buildTelegramFileBrowserText(page: TelegramFileBrowserPage, queryText: string): string {
     return [
-        `🔎 **文件搜索**：${queryText || '最近文件'}`,
+        `🔎 **文件搜索**：${compactText(queryText || '最近文件', 80)}`,
         '',
         ...(page.files.length > 0 ? page.files.map(buildTelegramFileCard) : ['没有匹配文件。']),
         '',

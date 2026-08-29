@@ -7,21 +7,8 @@
 
 import { Api } from 'telegram';
 import { formatBytes, getTypeEmoji } from './telegramUtils.js';
-import { buildBotHelpSections, type BotCommandDefinition } from './telegramCommandRegistry.js';
-// ─── 存储提供商显示名称 ───────────────────────────────────────
-
-const PROVIDER_DISPLAY_MAP: Record<string, string> = {
-    onedrive: '☁️ OneDrive',
-    aliyun_oss: '☁️ 阿里云 OSS',
-    s3: '📦 S3 存储',
-    webdav: '🌐 WebDAV',
-    google_drive: '☁️ Google Drive',
-    local: '💾 本地存储',
-};
-
-export function getProviderDisplayName(providerName: string): string {
-    return PROVIDER_DISPLAY_MAP[providerName] || `📦 ${providerName}`;
-}
+export { getProviderDisplayName } from './providerMetadata.js';
+import { getProviderDisplayName } from './providerMetadata.js';
 
 interface TaskSystemPauseView {
     kind: 'disk_pressure' | 'storage_cooldown' | 'telegram_flood_wait';
@@ -32,34 +19,32 @@ interface TaskSystemPauseView {
 }
 
 function buildTaskControlLines(taskId?: string, queuePaused = false, pauseReason?: string, systemPause?: TaskSystemPauseView): string[] {
-    if (!taskId) return [`💡 发送 /tasks 查看实时任务状态`];
+    if (!taskId) return [];
     if (queuePaused) {
         const systemPaused = Boolean(systemPause);
         const pausing = !systemPause && /随后暂停|完成当前文件/.test(pauseReason || '');
         const recoveryLine = systemPause
             ? systemPause.autoResume
                 ? systemPause.retryAt
-                    ? `♻️ 预计在 ${systemPause.retryAt} 后自动恢复；无需手动操作`
+                    ? `♻️ 预计在 ${systemPause.retryAt} 后自动恢复`
                     : systemPause.recheckMs
-                        ? `♻️ 系统每 ${Math.max(1, Math.round(systemPause.recheckMs / 1000))} 秒重新检查，条件满足后自动恢复`
-                        : `♻️ 系统会持续检查，条件满足后自动恢复`
-                : `⚠️ 此状态不会自动恢复，请按原因处理后重试`
+                        ? `♻️ 每 ${Math.max(1, Math.round(systemPause.recheckMs / 1_000))} 秒重新检查，条件满足后自动恢复`
+                        : `♻️ 条件满足后自动恢复`
+                : `⚠️ 处理原因后可重试`
             : pausing
-                ? `▶️ 可点击“继续”撤销暂停请求`
-                : `▶️ 点击下方“继续”会恢复下载队列`;
+                ? `点击“继续”可撤销暂停`
+                : `点击“继续”恢复任务`;
         return [
-            `⏸️ **当前状态：${systemPaused ? '系统保护暂停' : pausing ? '正在暂停' : '用户暂停'}**`,
-            pauseReason ? `📌 原因：${pauseReason}` : `📌 等待中的下载任务不会继续开始`,
+            systemPaused
+                ? `当前状态：系统保护暂停`
+                : pausing
+                    ? `⏸️ 正在暂停`
+                    : `当前状态：用户暂停`,
+            pauseReason ? `原因：${pauseReason}` : '',
             recoveryLine,
-            `🛑 点击“取消”只会结束这张后台任务卡；不会再误清空其它任务`,
-        ];
+        ].filter(Boolean);
     }
-    return [
-        `💡 队列控制：按钮只对当前聊天的任务卡有效`,
-        `⏸ 暂停：完成当前文件后暂停该任务`,
-        `▶️ 继续：继续该任务；若是用户暂停，也会解除用户暂停状态`,
-        `🛑 取消：结束当前任务卡并移除按钮，不会误取消其它聊天任务`,
-    ];
+    return ['👇 使用下方按钮管理此任务。'];
 }
 
 export function buildTaskControlButtons(taskId?: string, queuePaused = false, systemPause?: TaskSystemPauseView, queuePausing = false, userPaused = queuePaused && !systemPause, failedCount = 0): Api.ReplyInlineMarkup | undefined {
@@ -206,30 +191,18 @@ export function buildStartPrompt(): string {
     return `👋 **欢迎使用 TG Vault Bot！**\n\n🔐 请使用下方键盘输入密码：`;
 }
 
-/** /help 帮助文本 */
-function formatRegistryCommand(command: BotCommandDefinition): string {
-    const usage = command.usage ? ` ${command.usage}` : '';
-    return `  /${command.command}${usage} — ${command.helpDescription}`;
-}
-
+/** /help 简洁入口 */
 export function buildHelp(): string {
-    const sections = buildBotHelpSections().flatMap(section => [
-        `**${section.title}**`,
-        ...section.commands.map(formatRegistryCommand),
-        ``,
-    ]);
     return [
-        `📖 **TG Vault Bot 帮助**`,
-        LINE,
-        ``,
-        `**📤 文件上传**`,
-        `  直接发送或转发文件即可自动上传`,
-        `  支持所有类型，最大 2 GB，账号级下载器不受此限制`,
-        `  多文件同时发送会自动归为一组`,
-        ``,
-        ...sections,
-        LINE,
-        `💡 **提示**：转发文件给 Bot 即可开始上传；自动清理临时文件、删除本地实体文件和删除任务历史是三种不同操作。`,
+        '📖 **使用帮助**',
+        '',
+        '📤 发送或转发文件：直接上传',
+        '🔗 发送视频链接：解析后选择格式',
+        '📥 任务：查看进度、暂停或取消',
+        '📁 保存位置：设置目录和存储目标',
+        '📡 频道：按日期/标签下载或管理订阅',
+        '',
+        '👇 点击下方按钮选择功能。',
     ].join('\n');
 }
 
@@ -298,13 +271,19 @@ interface FileListItem {
     created_at: string;
 }
 
+function compactTelegramText(value: unknown, maxLength: number): string {
+    const text = String(value || '').replace(/[\r\n\t]+/g, ' ').replace(/[*_`[\]\\]/g, '').trim();
+    return text.length > maxLength ? `${text.slice(0, Math.max(1, maxLength - 1))}…` : text;
+}
+
 export function buildFileList(files: FileListItem[], total: number): string {
+    const visibleFiles = files.slice(0, 12);
     const lines: string[] = [
-        `📋 **最近上传的文件** (${total} 条)`,
+        `📋 **最近上传的文件**（本页 ${visibleFiles.length} 条）`,
         LINE,
     ];
 
-    files.forEach((file, index) => {
+    visibleFiles.forEach((file, index) => {
         const typeEmoji = getTypeEmoji(
             file.type === 'image' ? 'image/' :
                 file.type === 'video' ? 'video/' :
@@ -318,20 +297,16 @@ export function buildFileList(files: FileListItem[], total: number): string {
             minute: '2-digit',
         });
 
-        let displayName = file.name;
-        if (displayName.length > 25) {
-            displayName = displayName.substring(0, 22) + '...';
-        }
+        const displayName = compactTelegramText(file.name, 36);
+        const folder = compactTelegramText(file.folder, 48);
 
-        lines.push(`${index + 1}. ${typeEmoji} **${displayName}**`);
-        lines.push(`    ${size} · ${date}${file.folder ? ` · 📁 ${file.folder}` : ''}`);
+        lines.push(`${index + 1}. ${typeEmoji} **${displayName || '未命名文件'}**`);
+        lines.push(`    ${size} · ${date}${folder ? ` · 📁 ${folder}` : ''}`);
         lines.push(`    ID: \`${file.id.substring(0, 8)}\``);
     });
 
     lines.push('');
-    lines.push(`💡 删除文件: 复制上方 ID 后发送 /delete <ID>`);
-    lines.push(`   例：/delete ${files[0]?.id?.substring(0, 8) || 'a1b2c3d4'}`);
-    lines.push(`📄 更多记录: /list 20 或 /list 20 2`);
+    lines.push('💡 需要搜索或操作文件，请打开“搜索和操作文件”。');
 
     return lines.join('\n');
 }
@@ -414,7 +389,7 @@ export function buildUploadSuccess(
         ...(fileId ? [`🆔 ${fileId.slice(0, 13)}`] : []),
         ...(duplicateOutcome === 'copied' ? ['♻️ 重复处理：已生成副本'] : duplicateOutcome === 'skipped' ? ['⏭️ 重复处理：已跳过'] : []),
         ``,
-        ...(fileId ? ['操作：/find 可搜索同目录；复制上方 ID；/delete <ID> 可进入删除确认。'] : []),
+        ...(fileId ? ['👇 可在“搜索和操作文件”中继续管理。'] : []),
     ].join('\n');
 }
 
@@ -439,7 +414,7 @@ export function buildDuplicateSkipped(fileName: string, folder: string | null | 
         ...(folder ? [`📁 ${folder}`] : []),
         ...(existingId ? [`🆔 已存在: ${existingId.substring(0, 8)}`] : []),
         ``,
-        `如需保留副本，请发送 /duplicate_mode 切换为“生成副本”。`,
+        `如需保留副本，请打开“重复文件处理”并选择“生成副本”。`,
     ].join('\n');
 }
 

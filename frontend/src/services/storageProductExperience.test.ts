@@ -6,6 +6,7 @@ const app = fs.readFileSync(new URL('../App.tsx', import.meta.url), 'utf8');
 const toolbar = fs.readFileSync(new URL('../components/ui/BulkActionToolbar.tsx', import.meta.url), 'utf8');
 const settings = fs.readFileSync(new URL('../components/pages/SettingsPage.tsx', import.meta.url), 'utf8');
 const api = fs.readFileSync(new URL('../services/api.ts', import.meta.url), 'utf8');
+const apiTypes = fs.readFileSync(new URL('../services/apiTypes.ts', import.meta.url), 'utf8');
 
 test('share UI is driven by backend capabilities and hides unsupported fields', () => {
     assert.match(app, /shareCapabilities=\{storageConfig\?\.capabilities\}/);
@@ -16,8 +17,8 @@ test('share UI is driven by backend capabilities and hides unsupported fields', 
 
 test('storage account deletion previews every server-side task reference and opens the filtered task center when blocked', () => {
     assert.match(api, /previewAccountDeletion/);
-    assert.match(api, /expiresAt: number/);
-    assert.match(api, /confirmationResponse\.status === 401 \|\| confirmationResponse\.status === 428/);
+    assert.match(apiTypes, /expiresAt: number/);
+    assert.match(api, /delete-confirmation/);
     assert.match(settings, /impact\.fileCount/);
     assert.match(settings, /impact\.folderCount/);
     assert.match(settings, /activeLeaseCount/);

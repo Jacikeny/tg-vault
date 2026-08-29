@@ -14,7 +14,8 @@ import {
     type StorageAccountCooldown,
 } from './storageCooldown.js';
 import { getTelegramUserClient, isTelegramUserClientReady } from './telegramUserClient.js';
-import { recordTelegramUserClientFailure } from './telegramUserClientStatus.js';
+import { classifyTelegramDownloadAccountError } from './telegramMultiAccountRuntime.js';
+import { triggerTelegramAccountAccessSweep } from './telegramAccountAccessSweep.js';
 import { abortChannelExecutionForLeaseLoss, downloadTelegramChannelRange, getTelegramDownloadPreview, getChannelTaskAbortSignal, releaseChannelTaskAbortSignal, type TelegramDownloadMessageRef } from './telegramUpload.js';
 import { getSetting } from '../utils/settings.js';
 import { extractFileInfo, getEstimatedFileSize, type TelegramFileInfo } from '../utils/telegramMedia.js';
@@ -766,7 +767,12 @@ export async function subscribeTelegramChannel(userId: number, chatId: string | 
          RETURNING id, source, source_original, source_type, title, last_message_id, folder_override, enabled, disabled_reason, disabled_at`,
         [userId, chatId || null, resolved.source, resolved.originalSource, resolved.sourceType, title, latestMessageId, folderOverride || null]
     );
-    return result.rows[0];
+    const subscription = result.rows[0];
+    if (subscription?.id) {
+        void triggerTelegramAccountAccessSweep({ sourceIds: [String(subscription.id)], reason: 'subscription_created' })
+            .catch(error => console.error('Telegram 新订阅权限检测失败:', error));
+    }
+    return subscription;
 }
 
 export async function listTelegramSubscriptions(userId: number, includeDisabled = false) {
@@ -1327,6 +1333,11 @@ async function downloadClaimedRefs(botClient: TelegramClient, requestMessage: Ap
             return { found: 0, skipped: 0, failed: 0, successful: 0, successfulMessageIds: [], failedMessageIds: [], skippedMessageIds: [] };
         }
         if (await handleStorageQuotaCooldownError(botClient, jobId, error)) {
+            await restoreUnfinishedClaimedRefs(jobId, refs, error instanceof Error ? error.message : String(error));
+            return { found: 0, skipped: 0, failed: 0, successful: 0, successfulMessageIds: [], failedMessageIds: [], skippedMessageIds: [] };
+        }
+        const accountFailure = classifyTelegramDownloadAccountError(error);
+        if (accountFailure !== 'retryable') {
             await restoreUnfinishedClaimedRefs(jobId, refs, error instanceof Error ? error.message : String(error));
             return { found: 0, skipped: 0, failed: 0, successful: 0, successfulMessageIds: [], failedMessageIds: [], skippedMessageIds: [] };
         }
@@ -2025,7 +2036,8 @@ async function runSubscriptionScan(botClient: TelegramClient) {
                              last_result = jsonb_build_object('status', 'failed')
                          WHERE id = $1`, [row.id, safeError]).catch(() => undefined);
             if (isTelegramSourceInaccessibleError(error)) {
-                recordTelegramUserClientFailure('permission_denied', '当前 Telegram 用户账号无法访问订阅来源');
+                // Account-scoped permission failures are persisted by the selected download/probe account.
+                // Only pause here after the subscription worker cannot find any usable account.
                 const reason = subscriptionDisabledReason(error);
                 await pauseTelegramSubscriptionForError(row.id, reason).catch(updateError => console.error('🤖 暂停不可访问的 Telegram 订阅失败:', updateError));
                 const targetChat = row.chat_id || row.user_id;

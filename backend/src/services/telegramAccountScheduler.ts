@@ -1,0 +1,54 @@
+export type TelegramAccountHealthState = 'healthy' | 'degraded' | 'session_expired';
+export type TelegramSourceAccessState = 'unknown' | 'allowed' | 'denied';
+
+export interface TelegramAccountSchedulingCandidate {
+    accountId: string;
+    enabled: boolean;
+    healthState: TelegramAccountHealthState;
+    cooldownUntil: Date | string | null;
+    weight: number;
+    priority?: number;
+    activeConnections: number;
+    maxConnections: number;
+    sourceAccessState: TelegramSourceAccessState;
+}
+
+export interface TelegramAccountSchedulingOptions {
+    now?: Date;
+    excludeAccountIds?: Iterable<string>;
+}
+
+/**
+ * Pure permission-aware weighted least-connections selection.
+ * Known source access is preferred over an unprobed account. Within the same
+ * access class, the lowest active/weight score wins. Priority and account id
+ * make ties stable, which keeps retries and tests deterministic.
+ */
+export function selectWeightedLeastConnectedTelegramAccount<T extends TelegramAccountSchedulingCandidate>(
+    candidates: readonly T[],
+    options: TelegramAccountSchedulingOptions = {},
+): T | null {
+    const now = (options.now || new Date()).getTime();
+    const excluded = new Set(options.excludeAccountIds || []);
+    const runnable = candidates.filter(candidate => {
+        const cooldownUntil = candidate.cooldownUntil ? new Date(candidate.cooldownUntil).getTime() : 0;
+        return candidate.enabled
+            && candidate.healthState !== 'session_expired'
+            && candidate.sourceAccessState !== 'denied'
+            && !excluded.has(candidate.accountId)
+            && candidate.activeConnections < Math.max(1, candidate.maxConnections)
+            && (!Number.isFinite(cooldownUntil) || cooldownUntil <= now);
+    });
+
+    runnable.sort((left, right) => {
+        const accessDifference = Number(right.sourceAccessState === 'allowed') - Number(left.sourceAccessState === 'allowed');
+        if (accessDifference) return accessDifference;
+        const leftLoad = (left.activeConnections + 1) / Math.max(Number.EPSILON, left.weight);
+        const rightLoad = (right.activeConnections + 1) / Math.max(Number.EPSILON, right.weight);
+        if (leftLoad !== rightLoad) return leftLoad - rightLoad;
+        const priorityDifference = (right.priority || 0) - (left.priority || 0);
+        if (priorityDifference) return priorityDifference;
+        return left.accountId.localeCompare(right.accountId);
+    });
+    return runnable[0] || null;
+}

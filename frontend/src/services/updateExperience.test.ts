@@ -4,7 +4,8 @@ import test from 'node:test';
 
 const layout = fs.readFileSync(new URL('../components/layout/AppLayout.tsx', import.meta.url), 'utf8');
 const settings = fs.readFileSync(new URL('../components/pages/SettingsPage.tsx', import.meta.url), 'utf8');
-const api = fs.readFileSync(new URL('./api.ts', import.meta.url), 'utf8');
+const apiTypes = fs.readFileSync(new URL('./apiTypes.ts', import.meta.url), 'utf8');
+const systemClient = fs.readFileSync(new URL('./clients/systemClient.ts', import.meta.url), 'utf8');
 
 test('authenticated app exposes a dismissible global release banner keyed by release version', () => {
     assert.match(layout, /getUpdateStatus\(\)/);
@@ -27,7 +28,7 @@ test('general settings shows current/latest versions and supports a manual check
 });
 
 test('frontend API calls authenticated no-store system update endpoints', () => {
-    assert.match(api, /\/api\/system\/update-status/);
-    assert.match(api, /\/api\/system\/update-check/);
-    assert.match(api, /export interface UpdateStatus/);
+    assert.match(systemClient, /\/api\/system\/update-status/);
+    assert.match(systemClient, /\/api\/system\/update-check/);
+    assert.match(apiTypes, /export interface UpdateStatus/);
 });

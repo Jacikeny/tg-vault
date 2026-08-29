@@ -1,12 +1,13 @@
 const getApiBase = () => {
-    // 优先使用构建时注入的变量
-    const envUrl = import.meta.env.VITE_API_URL;
+    // import.meta.env is injected by Vite; Node-based unit tests intentionally have no env object.
+    const env = (import.meta as ImportMeta & { env?: { VITE_API_URL?: string; PROD?: boolean } }).env;
+    const envUrl = env?.VITE_API_URL;
     if (envUrl && envUrl !== 'http://localhost:51947' && envUrl !== '') {
         return envUrl;
     }
 
     // 如果在生产环境且没有配置，fallback 到相对路径（同域代理模式）
-    if (import.meta.env.PROD) {
+    if (env?.PROD) {
         return '';
     }
     return 'http://localhost:51947';

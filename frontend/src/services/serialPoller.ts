@@ -3,6 +3,7 @@ export interface SerialPollerOptions {
     schedule: (callback: () => void, delayMs: number) => unknown;
     cancel: (handle: unknown) => void;
     delayMs: number;
+    nextDelayMs?: () => number;
 }
 
 export function createSerialPoller(options: SerialPollerOptions) {
@@ -17,7 +18,7 @@ export function createSerialPoller(options: SerialPollerOptions) {
             await options.run();
         } finally {
             running = false;
-            if (!stopped) timer = options.schedule(() => void tick(), options.delayMs);
+            if (!stopped) timer = options.schedule(() => void tick(), options.nextDelayMs?.() ?? options.delayMs);
         }
     };
 

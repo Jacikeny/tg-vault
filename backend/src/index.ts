@@ -17,6 +17,7 @@ import { initTelegramBot, sendUpdateNotificationToUser } from './services/telegr
 import { applyEffectiveTelegramBotConfig } from './services/telegramBotConfig.js';
 import { getTelegramBotStatus, markTelegramBotError, telegramBotBlocksReadiness } from './services/telegramBotStatus.js';
 import { initTelegramUserClient, isTelegramUserClientReady } from './services/telegramUserClient.js';
+import { initializeTelegramMultiAccountRuntime } from './services/telegramMultiAccountRuntime.js';
 import { isInitialSetupRequired } from './utils/authSettings.js';
 import { get2FAReadiness } from './utils/security.js';
 import { ensureDatabaseInitialized, pool } from './db/index.js';
@@ -25,6 +26,7 @@ import crypto from 'node:crypto';
 import { normalizeRequestId } from './services/operationalEvents.js';
 import { markTransferTasksAfterRestart } from './services/transferTasks.js';
 import { initializeYtDlpQueue } from './services/ytDlpDownload.js';
+import { recoverMediaDerivativeJobs } from './services/mediaDerivatives.js';
 import { logRuntimeConfigSummary, validateRuntimeConfig } from './utils/runtimeConfig.js';
 import { APP_VERSION } from './services/appVersion.js';
 import { createUpdateChecker } from './services/updateChecker.js';
@@ -44,6 +46,34 @@ const updateChecker = createUpdateChecker({
     sendBotMessage: sendUpdateNotificationToUser,
 });
 let updateCheckTimer: ReturnType<typeof setInterval> | null = null;
+let readinessProbeTimer: ReturnType<typeof setInterval> | null = null;
+
+interface DependencyReadinessSnapshot {
+    ready: boolean;
+    checkedAt: string | null;
+    error: string | null;
+}
+
+let dependencyReadiness: DependencyReadinessSnapshot = { ready: false, checkedAt: null, error: '依赖尚未检查' };
+
+async function refreshDependencyReadiness(): Promise<DependencyReadinessSnapshot> {
+    try {
+        await ensureDatabaseInitialized();
+        await pool.query('SELECT 1');
+        const { storageManager } = await import('./services/storage.js');
+        await storageManager.assertReady();
+        const twoFactor = await get2FAReadiness();
+        if (!twoFactor.ready) throw new Error('2FA 密钥不可读取');
+        dependencyReadiness = { ready: true, checkedAt: new Date().toISOString(), error: null };
+    } catch (error) {
+        dependencyReadiness = {
+            ready: false,
+            checkedAt: new Date().toISOString(),
+            error: error instanceof Error ? error.message : String(error),
+        };
+    }
+    return dependencyReadiness;
+}
 
 // 确保上传目录存在
 const UPLOAD_DIR = process.env.UPLOAD_DIR || './data/uploads';
@@ -163,15 +193,10 @@ let readinessError: string | null = null;
 app.get('/livez', (_req, res) => {
     res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
-app.get('/readyz', async (_req, res) => {
+app.get('/readyz', (_req, res) => {
     try {
         if (!applicationReady) throw new Error(readinessError || '应用仍在初始化');
-        await ensureDatabaseInitialized();
-        await pool.query('SELECT 1');
-        const { storageManager } = await import('./services/storage.js');
-        await storageManager.assertReady();
-        const twoFactor = await get2FAReadiness();
-        if (!twoFactor.ready) throw new Error('2FA 密钥不可读取');
+        if (!dependencyReadiness.ready) throw new Error(dependencyReadiness.error || '依赖未就绪');
         const bot = getTelegramBotStatus();
         if (telegramBotBlocksReadiness(bot)) {
             throw new Error(`Telegram Bot 未就绪：${bot.status}${bot.action ? `；${bot.action}` : ''}`);
@@ -179,11 +204,21 @@ app.get('/readyz', async (_req, res) => {
         res.json({
             status: bot.degraded ? 'degraded' : 'ready',
             timestamp: new Date().toISOString(),
-            components: { telegramBot: bot },
+            components: { dependencies: dependencyReadiness, telegramBot: bot },
         });
     } catch (error) {
         res.status(503).json({ status: 'not_ready', error: error instanceof Error ? error.message : String(error) });
     }
+});
+app.get('/deepz', async (_req, res) => {
+    const dependencies = await refreshDependencyReadiness();
+    const bot = getTelegramBotStatus();
+    const ready = dependencies.ready && !telegramBotBlocksReadiness(bot);
+    res.status(ready ? 200 : 503).json({
+        status: ready ? (bot.degraded ? 'degraded' : 'ready') : 'not_ready',
+        timestamp: new Date().toISOString(),
+        components: { dependencies, telegramBot: bot },
+    });
 });
 // Backward-compatible liveness alias. Deployments should route traffic based on /readyz.
 app.get('/health', (_req, res) => {
@@ -217,10 +252,17 @@ async function initializeApplication(): Promise<void> {
             markTelegramBotError('error', message, '检查 Telegram 凭证/网络并重启后端');
             console.warn('Telegram Bot 可选组件启动失败，应用以 degraded 状态继续:', message);
         }
+    } else if (telegramConfig.credentials) {
+        await initializeTelegramMultiAccountRuntime({ apiId: telegramConfig.credentials.apiId, apiHash: telegramConfig.credentials.apiHash });
     }
     await initializeYtDlpQueue();
+    await recoverMediaDerivativeJobs();
+    const dependencies = await refreshDependencyReadiness();
+    if (!dependencies.ready) throw new Error(dependencies.error || '依赖就绪检查失败');
     applicationReady = true;
     readinessError = null;
+    readinessProbeTimer = setInterval(() => { void refreshDependencyReadiness(); }, 60_000);
+    readinessProbeTimer.unref?.();
     if (updateCheckEnabled) {
         const configuredInitialDelayMs = Number(process.env.UPDATE_CHECK_INITIAL_DELAY_MS || 30_000);
         const configuredIntervalMs = Number(process.env.UPDATE_CHECK_INTERVAL_MS || 6 * 60 * 60 * 1000);
@@ -272,6 +314,8 @@ async function shutdown(signal: string) {
     readinessError = `正在因 ${signal} 停机`;
     if (updateCheckTimer) clearInterval(updateCheckTimer);
     updateCheckTimer = null;
+    if (readinessProbeTimer) clearInterval(readinessProbeTimer);
+    readinessProbeTimer = null;
     const forceTimer = setTimeout(() => process.exit(1), 30_000);
     forceTimer.unref();
     if (server) {

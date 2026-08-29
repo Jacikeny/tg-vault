@@ -51,3 +51,16 @@ test('file browser card includes detail and actionable-operation guidance', asyn
     assert.match(text, /移动\/重命名/);
     assert.match(text, /删除确认/);
 });
+
+test('file browser text truncates long dynamic fields and formats sizes for mobile', () => {
+    const hostile = '[name]_*'.repeat(100);
+    const text = buildTelegramFileBrowserText({
+        files: rows(8).map(file => ({ ...file, name: hostile, folder: hostile, size: 5 * 1024 * 1024 })),
+        nextCursor: null,
+        hasMore: false,
+    }, hostile);
+    assert.ok(text.length < 3900, `length=${text.length}`);
+    assert.match(text, /5 MB/);
+    assert.match(text, /…/);
+    assert.doesNotMatch(text, /\*\*\*/);
+});

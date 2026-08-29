@@ -5,6 +5,7 @@ import { UploadZone } from "../ui/UploadZone";
 import type { UploadCapabilities } from "../../services/api";
 import { Button } from "../ui/Button";
 import { cn } from "../../lib/utils";
+import { formatBytes } from "../../services/formatBytes";
 
 interface UploadCenterProps {
     onUpload: (files: File[], folder?: string) => void;
@@ -17,13 +18,6 @@ interface UploadCenterProps {
     queue: QueueItem[];
     recoveredUploadCount: number;
     onOpenQueue: () => void;
-}
-
-function formatBytes(bytes: number): string {
-    if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
-    const units = ["B", "KiB", "MiB", "GiB", "TiB"];
-    const unit = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
-    return `${(bytes / (1024 ** unit)).toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`;
 }
 
 const statusLabel: Record<QueueItem["status"], string> = {

@@ -1,5 +1,5 @@
 import { motion, AnimatePresence } from "framer-motion";
-import { MoreVertical, Trash2, Star } from "lucide-react";
+import { Download, FolderInput, MoreVertical, Pencil, Trash2, Star } from "lucide-react";
 import { useState, useRef, useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "./Button";
@@ -7,10 +7,13 @@ import { Button } from "./Button";
 interface FileMenuProps {
     onDelete?: () => void;
     onToggleFavorite?: () => void;
+    onDownload?: () => void;
+    onRename?: () => void;
+    onMove?: () => void;
     isFavorite?: boolean;
 }
 
-export const FileMenu = ({ onDelete, onToggleFavorite, isFavorite = false }: FileMenuProps) => {
+export const FileMenu = ({ onDelete, onToggleFavorite, onDownload, onRename, onMove, isFavorite = false }: FileMenuProps) => {
     const [isOpen, setIsOpen] = useState(false);
     const menuRef = useRef<HTMLDivElement>(null);
     const { t } = useTranslation();
@@ -60,6 +63,9 @@ export const FileMenu = ({ onDelete, onToggleFavorite, isFavorite = false }: Fil
                         transition={{ duration: 0.1 }}
                         className="absolute right-0 top-full mt-1 w-36 bg-white dark:bg-zinc-900 border border-border rounded-xl shadow-lg overflow-hidden z-50 p-1.5"
                     >
+                        {onDownload && <button role="menuitem" className="w-full min-h-11 flex items-center gap-2 px-3 py-2 text-sm hover:bg-muted rounded-lg text-left" onClick={e => { e.stopPropagation(); onDownload(); setIsOpen(false); }}><Download className="h-4 w-4" />{t("file.download") || "Download"}</button>}
+                        {onRename && <button role="menuitem" className="w-full min-h-11 flex items-center gap-2 px-3 py-2 text-sm hover:bg-muted rounded-lg text-left" onClick={e => { e.stopPropagation(); onRename(); setIsOpen(false); }}><Pencil className="h-4 w-4" />{t("file.rename") || "Rename"}</button>}
+                        {onMove && <button role="menuitem" className="w-full min-h-11 flex items-center gap-2 px-3 py-2 text-sm hover:bg-muted rounded-lg text-left" onClick={e => { e.stopPropagation(); onMove(); setIsOpen(false); }}><FolderInput className="h-4 w-4" />{t("file.move") || "Move"}</button>}
                         {onDelete && <button
                             role="menuitem"
                             className="w-full min-h-11 flex items-center gap-2 px-3 py-2 text-sm text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-500/10 rounded-lg transition-colors text-left font-medium touch-manipulation"

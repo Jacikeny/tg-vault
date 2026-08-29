@@ -9,5 +9,6 @@ assert.doesNotMatch(flood, /Google Drive/);
 assert.doesNotMatch(flood, /task_resume/);
 
 const paused = buildLegacyJobProgressPresentation({ jobId: '1234567890abcdef', status: 'paused', downloadStatus: 'paused' } as any);
-assert.match(paused, /task_resume/);
+assert.match(paused, /任务中心继续或取消/);
+assert.doesNotMatch(paused, /task_resume|task_cancel/);
 console.log('legacy job progress presentation truth ok');

@@ -323,12 +323,6 @@ export function buildPathSettingsText(
         '**当前路径状态**',
         ...buildTelegramPathStateLines(chatId),
         '',
-        '**快捷命令**',
-        '`/p <目录>` — 仅下一次下载使用',
-        '`/ps <目录>` — 当前会话持续使用',
-        '`/pc` — 清除下一次/会话目录',
-        '',
-        '优先级：下一次目录 > 本会话目录 > 默认自动分类目录。',
-        '路径示例：设置 `/ps book` 后，文件直接保存到 `book`。',
+        '👇 点击按钮选择保存位置。',
     ].join('\n');
 }

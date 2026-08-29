@@ -1,5 +1,4 @@
 import { motion, AnimatePresence } from "framer-motion";
-import { createPortal } from "react-dom";
 import { X, FileText, Download, Video, Music, ZoomIn, ZoomOut, ChevronLeft, ChevronRight, Maximize2, RotateCcw, Copy, Check, Info, RefreshCw } from "lucide-react";
 import type { FileData } from "./FileCard";
 import { Button } from "./Button";
@@ -9,6 +8,7 @@ import { MobileMenu } from "./MobileMenu";
 import { IndeterminateSpinner } from "./IndeterminateSpinner";
 import { ApiActionError, describeActionFailure } from "../../services/apiActionError";
 import { authService } from "../../services/auth";
+import { Dialog } from "./Dialog";
 
 interface PreviewModalProps {
     file: FileData | null;
@@ -256,7 +256,7 @@ export const PreviewModal = ({ file, onClose, onToggleFavorite, files = [], onNa
             await fileApi.downloadFile(file.id, file.name);
         } catch (error) {
             console.error("下载失败", error);
-            if (error instanceof ApiActionError && error.kind === 'unauthorized') authService.clearToken();
+            if (error instanceof ApiActionError && error.kind === 'unauthorized') authService.invalidateSession(error.status);
             setActionError(describeActionFailure('下载', error));
         }
     };
@@ -288,7 +288,7 @@ export const PreviewModal = ({ file, onClose, onToggleFavorite, files = [], onNa
             const url = await fileApi.getOriginalFileLink(file.id);
             window.open(url, '_blank', 'noopener,noreferrer');
         } catch (error) {
-            if (error instanceof ApiActionError && error.kind === 'unauthorized') authService.clearToken();
+            if (error instanceof ApiActionError && error.kind === 'unauthorized') authService.invalidateSession(error.status);
             setActionError(describeActionFailure('打开原文件', error));
         }
     };
@@ -424,17 +424,16 @@ export const PreviewModal = ({ file, onClose, onToggleFavorite, files = [], onNa
         );
     };
 
-    // 使用 Portal 渲染到 body，确保全屏覆盖不受父元素影响
+    if (!file) return null;
+
     const modalContent = (
-        <AnimatePresence>
-            {file && (
+        <Dialog open={Boolean(file)} onClose={onClose} labelledBy="preview-title" className="!max-h-none !max-w-none h-screen w-screen overflow-hidden bg-black p-0">
                 <motion.div
                     initial={{ opacity: 0 }}
                     animate={{ opacity: 1 }}
                     exit={{ opacity: 0 }}
                     transition={{ duration: 0.2 }}
-                    className="fixed top-0 left-0 right-0 bottom-0 bg-black flex flex-col"
-                    style={{ zIndex: 9999 }}
+                    className="h-screen w-screen bg-black flex flex-col"
                     onClick={handleBackdropClose}
                 >
                     {/* 顶部工具栏 */}
@@ -443,7 +442,7 @@ export const PreviewModal = ({ file, onClose, onToggleFavorite, files = [], onNa
                         onClick={(e) => e.stopPropagation()}
                     >
                         <div className="min-w-0 flex-1 text-white">
-                            <h3 className="max-w-[42vw] truncate text-sm font-medium sm:max-w-[50vw]">{file.name}</h3>
+                            <h3 id="preview-title" className="max-w-[42vw] truncate text-sm font-medium sm:max-w-[50vw]">{file?.name}</h3>
                         </div>
 
                         <div className="flex shrink-0 items-center gap-0.5 sm:gap-1">
@@ -649,10 +648,8 @@ export const PreviewModal = ({ file, onClose, onToggleFavorite, files = [], onNa
                         onClose={handleMobileMenuClose}
                     />
                 </motion.div>
-            )}
-        </AnimatePresence>
+        </Dialog>
     );
 
-    // 渲染到 document.body
-    return createPortal(modalContent, document.body);
+    return modalContent;
 };

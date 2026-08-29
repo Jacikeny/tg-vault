@@ -15,7 +15,7 @@ test('Bot startup errors are observable and required mode blocks readiness', () 
     assert.match(bot, /throw error/);
     assert.match(app, /telegramConfig\.required/);
     assert.match(app, /telegramBotBlocksReadiness\(bot\)/);
-    assert.match(app, /components: \{ telegramBot: bot \}/);
+    assert.match(app, /components: \{ dependencies, telegramBot: bot \}/);
 });
 
 test('optional Bot failure remains visible as degraded in Web settings and readiness', () => {

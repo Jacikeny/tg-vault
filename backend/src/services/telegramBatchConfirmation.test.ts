@@ -9,11 +9,11 @@ test('date and tag wizards require a final scope and target confirmation', () =>
     assert.match(bot, /step === 'confirm'/);
     assert.match(bot, /请确认任务范围/);
     assert.match(bot, /固定存储/);
-    assert.match(bot, /估计量将在扫描中实时更新/);
+    assert.match(bot, /扫描进度会实时更新/);
     assert.match(bot, /共 \$\{state\.dayCount/);
     assert.match(bot, /范围较大/);
     assert.match(bot, /parseTelegramDateRange\(state\.startDate!, input\)/);
-    assert.match(bot, /发送 `确认` 开始/);
+    assert.match(bot, /发送“确认”开始/);
 });
 
 test('confirmed channel jobs pass an immutable target snapshot to admission', () => {

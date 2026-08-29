@@ -10,9 +10,10 @@ import { pool, query } from '../db/index.js';
 import { getAuthToken } from './auth.js';
 import { storageManager } from '../services/storage.js';
 import { assertStorageTargetWritable, isStorageCooldownError, sendStorageCooldownHttpError } from '../services/storageCooldownGuard.js';
-import { generateThumbnail, getImageDimensions, generateMediaPreview } from '../utils/thumbnail.js';
+
 import { getSignedUrl } from '../middleware/signedUrl.js';
 import { getUniqueStoredName } from '../utils/fileUtils.js';
+import { getFileType } from '../utils/fileMetadata.js';
 import { buildStorageFolderWithRules, getStoragePathRules } from '../utils/storagePath.js';
 import { findDuplicateFile, getDuplicateMode } from '../utils/duplicatePolicy.js';
 import { acquireStorageAccountOperationLease, type StorageAccountOperationLease } from '../services/storageAccountOperation.js';
@@ -32,6 +33,7 @@ import {
     type ChunkUploadSession,
 } from '../services/chunkUploadSessions.js';
 import { normalizeFolderPath } from '../utils/folderPath.js';
+import { enqueueMediaDerivatives } from '../services/mediaDerivatives.js';
 
 const router = Router();
 const checkDiskSpace = (checkDiskSpaceModule as any).default || checkDiskSpaceModule;
@@ -113,13 +115,6 @@ function safeChunkPath(uploadId: string, chunkIndex: number): string {
     return path.join(path.resolve(CHUNK_DIR), uploadId, `chunk_${chunkIndex}`);
 }
 
-function getFileType(mimeType: string): string {
-    if (mimeType.startsWith('image/')) return 'image';
-    if (mimeType.startsWith('video/')) return 'video';
-    if (mimeType.startsWith('audio/')) return 'audio';
-    if (/pdf|document|text|word|excel|spreadsheet|powerpoint|presentation|markdown|json|xml|sql/i.test(mimeType)) return 'document';
-    return 'other';
-}
 
 function sendProtocolError(res: Response, error: unknown): Response {
     if (error instanceof ChunkUploadProtocolError) {
@@ -361,23 +356,8 @@ router.post('/complete', async (req: Request, res: Response) => {
             });
         }
 
-        let thumbnailPath: string | null = null;
-        let previewPath: string | null = null;
-        let width: number | null = null;
-        let height: number | null = null;
-        if (session.mimeType.startsWith('image/') || session.mimeType.startsWith('video/')) {
-            const thumbnail = await generateThumbnail(tempMergedPath, storedName, session.mimeType).catch(() => null);
-            thumbnailPath = thumbnail ? path.basename(thumbnail) : null;
-            const dimensions = await getImageDimensions(tempMergedPath, session.mimeType).catch(() => ({ width: null, height: null }));
-            width = dimensions.width;
-            height = dimensions.height;
-        }
-        if (session.mimeType.startsWith('image/')) {
-            const preview = await generateMediaPreview(tempMergedPath, storedName, session.mimeType).catch(() => null);
-            previewPath = preview ? path.basename(preview) : null;
-        }
-
         const type = getFileType(session.mimeType);
+        const derivativeStatus = type === 'image' || type === 'video' ? 'queued' : 'not_required';
         const operationId = await beginChunkCompletionReconciliation(pool, {
             uploadId,
             completionToken: token,
@@ -415,11 +395,14 @@ router.post('/complete', async (req: Request, res: Response) => {
             await markChunkReconciliationObjectPresent(pool, operationId, storedPath);
             const indexed = await query(
                 `INSERT INTO files
-                 (name, stored_name, type, mime_type, size, path, thumbnail_path, preview_path, width, height, source, folder, storage_account_id)
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+                 (name, stored_name, type, mime_type, size, path, source, folder, storage_account_id,
+                  derivative_status, derivative_source_path, derivative_cleanup_source)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
                  RETURNING id, created_at, name, type, size, source`,
-                [session.filename, storedName, type, session.mimeType, session.totalSize, storedPath, thumbnailPath, previewPath,
-                    width, height, target.provider.name, storageFolder, session.targetAccountId],
+                [session.filename, storedName, type, session.mimeType, session.totalSize, storedPath,
+                    target.provider.name, storageFolder, session.targetAccountId, derivativeStatus,
+                    derivativeStatus === 'queued' ? (target.provider.name === 'local' ? storedPath : tempMergedPath) : null,
+                    derivativeStatus === 'queued' && target.provider.name !== 'local'],
             );
             file = indexed.rows[0];
             await markChunkReconciliationIndexPresent(pool, operationId, String(file.id));
@@ -443,17 +426,14 @@ router.post('/complete', async (req: Request, res: Response) => {
         }
         await fsPromises.rm(path.join(CHUNK_DIR, uploadId), { recursive: true, force: true })
             .catch(error => console.error('清理已完成上传的分块失败:', error));
-        if (type === 'video') {
-            const previewSource = target.provider.name === 'local' ? storedPath : tempMergedPath;
-            void generateMediaPreview(previewSource, storedName, session.mimeType)
-                .then(async preview => { if (preview) await query('UPDATE files SET preview_path = $1 WHERE id = $2', [path.basename(preview), file.id]); })
-                .catch(error => console.error('异步生成视频预览失败:', error))
-                .finally(async () => {
-                    if (target.provider.name !== 'local') {
-                        await fsPromises.rm(tempMergedPath, { force: true })
-                            .catch(error => console.error('清理合并临时文件失败:', error));
-                    }
-                });
+        if (derivativeStatus === 'queued') {
+            enqueueMediaDerivatives({
+                fileId: String(file.id),
+                sourcePath: target.provider.name === 'local' ? storedPath : tempMergedPath,
+                storedName,
+                mimeType: session.mimeType,
+                cleanupSource: target.provider.name !== 'local',
+            });
         } else {
             await fsPromises.rm(tempMergedPath, { force: true }).catch(error => console.error('清理合并临时文件失败:', error));
         }
@@ -464,7 +444,7 @@ router.post('/complete', async (req: Request, res: Response) => {
                 name: file.name,
                 type: file.type,
                 size: file.size,
-                thumbnailUrl: thumbnailPath ? getSignedUrl(file.id, 'thumbnail') : undefined,
+                derivativeStatus,
                 previewUrl: getSignedUrl(file.id, 'preview'),
                 date: file.created_at,
                 source: target.provider.name,

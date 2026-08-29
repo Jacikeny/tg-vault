@@ -30,3 +30,9 @@ test('rename handlers surface failures in the modal instead of swallowing them',
     assert.match(app, /handleFileRename[\s\S]*setNotification\([\s\S]*throw error;/);
     assert.match(app, /handleFolderRename[\s\S]*setNotification\([\s\S]*throw error;/);
 });
+
+test('rename modal uses the shared accessible dialog shell', () => {
+    assert.match(modal, /<Dialog/);
+    assert.match(modal, /labelledBy="rename-modal-title"/);
+    assert.doesNotMatch(modal, /fixed inset-0 z-\[9999\]/);
+});

@@ -22,5 +22,6 @@ test('file card and preview render actionable classified failure copy', () => {
 test('unauthorized action errors trigger the shared logout path', () => {
     assert.match(card, /error instanceof ApiActionError && error.kind === 'unauthorized'/);
     assert.match(preview, /error instanceof ApiActionError && error.kind === 'unauthorized'/);
-    assert.match(card, /authService\.clearToken/);
+    assert.match(card, /authService\.invalidateSession/);
+    assert.match(preview, /authService\.invalidateSession/);
 });

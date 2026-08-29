@@ -13,7 +13,7 @@ test('task success feedback auto-dismisses while retaining a manual close contro
     assert.match(tasks, /useEffect\(\(\) => \{\s*if \(!notice\) return;[\s\S]*setTimeout\(\(\) => setNotice\(null\), 4_000\)/);
     assert.match(tasks, /\}, \[notice\?\.sequence\]\);/);
     assert.match(tasks, /aria-live="polite"/);
-    assert.match(tasks, /aria-label="关闭提示"/);
+    assert.match(tasks, /aria-label=\{t\('tasks\.actions\.closeNotice'\)\}/);
 });
 
 test('the global header owns the theme switch on every page', () => {

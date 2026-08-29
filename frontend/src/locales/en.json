@@ -41,6 +41,47 @@
     "loading": "Loading…",
     "noOtherFolders": "No other folders"
   },
+  "login": {
+    "setupTitle": "First launch: create the administrator account",
+    "passwordTitle": "Enter your access password",
+    "totpTitle": "Two-factor authentication",
+    "passwordLabel": "Access password",
+    "adminPasswordLabel": "Administrator password",
+    "passwordPlaceholder": "Enter your password",
+    "adminPasswordPlaceholder": "At least 8 characters; use a strong password",
+    "confirmPasswordLabel": "Confirm administrator password",
+    "confirmPasswordPlaceholder": "Enter the administrator password again",
+    "telegramPinLabel": "Telegram Bot PIN (4 digits)",
+    "telegramPinHint": "The Bot is configured. The PIN must be exactly four digits and is stored encrypted.",
+    "create": "Create administrator and continue",
+    "signIn": "Sign in",
+    "signingIn": "Signing in",
+    "creating": "Creating administrator",
+    "totpHeading": "Enter the authentication code",
+    "totpHint": "Enter the six-digit code from your authenticator app.",
+    "verify": "Verify and sign in",
+    "verifying": "Verifying authentication code",
+    "back": "Back to password",
+    "setupFooter": "First production access requires an administrator password and, when the Bot is configured, a four-digit Telegram Bot PIN.",
+    "sessionFooter": "The sign-in session is kept for seven days.",
+    "showPassword": "Show password",
+    "hidePassword": "Hide password",
+    "errors": {
+      "passwordLength": "The administrator password must be at least 8 characters",
+      "passwordMismatch": "The administrator passwords do not match",
+      "pinFormat": "The Telegram Bot PIN must be exactly four digits",
+      "pinMatchesPassword": "The administrator password cannot match the four-digit Telegram Bot PIN",
+      "setupUnavailable": "The setup service is not ready",
+      "setupFailed": "Setup failed",
+      "setupRequestFailed": "The setup request failed",
+      "passwordRequired": "Enter your password",
+      "loginFailed": "Sign-in failed",
+      "loginRequestFailed": "The sign-in request failed",
+      "totpFormat": "Enter a six-digit authentication code",
+      "totpFailed": "Verification failed",
+      "totpRequestFailed": "The verification request failed"
+    }
+  },
   "sidebar": {
     "uploadCenter": "Upload center",
     "files": "My files",
@@ -107,13 +148,34 @@
   "empty": {
     "title": "No files found",
     "description": "Try dragging files here or check your filters.",
-    "root": { "title": "No files here yet", "description": "Upload a file or create a folder to start organizing your assets." },
-    "folder": { "title": "This folder is empty", "description": "Upload to this folder or return to its parent." },
-    "search": { "title": "No matching files", "description": "Try another keyword or clear the search." },
-    "filter": { "title": "No files in this category", "description": "Choose another category or upload a matching file." },
-    "offline": { "title": "Cannot reach the server", "description": "Check your network connection and try again." },
-    "error": { "title": "Could not load files", "description": "The service is temporarily unavailable. Try again shortly." },
-    "stale": { "title": "Showing previously loaded data", "description": "Refresh failed; this content may be out of date." },
+    "root": {
+      "title": "No files here yet",
+      "description": "Upload a file or create a folder to start organizing your assets."
+    },
+    "folder": {
+      "title": "This folder is empty",
+      "description": "Upload to this folder or return to its parent."
+    },
+    "search": {
+      "title": "No matching files",
+      "description": "Try another keyword or clear the search."
+    },
+    "filter": {
+      "title": "No files in this category",
+      "description": "Choose another category or upload a matching file."
+    },
+    "offline": {
+      "title": "Cannot reach the server",
+      "description": "Check your network connection and try again."
+    },
+    "error": {
+      "title": "Could not load files",
+      "description": "The service is temporarily unavailable. Try again shortly."
+    },
+    "stale": {
+      "title": "Showing previously loaded data",
+      "description": "Refresh failed; this content may be out of date."
+    },
     "clearSearch": "Clear search",
     "clearFilter": "View all files",
     "retry": "Retry"
@@ -201,6 +263,153 @@
       "notTested": "Not tested",
       "testing": "Testing storage connection",
       "test": "Test connection"
+    },
+    "security": {
+      "title": "Security settings",
+      "networkTitle": "Network and storage security"
+    },
+    "maintenance": {
+      "title": "Data maintenance",
+      "advancedTasks": "Advanced task settings"
+    },
+    "telegram": {
+      "botConnection": "Telegram Bot connection",
+      "permissions": "Telegram Bot user permissions",
+      "downloadSettings": "Telegram download settings"
+    },
+    "storageSources": {
+      "title": "Storage sources",
+      "aliyunTitle": "Aliyun OSS settings",
+      "s3Title": "S3-compatible storage settings",
+      "webdavTitle": "WebDAV storage settings"
+    }
+  },
+  "tasks": {
+    "title": "Task center",
+    "subtitle": "View and manage Web, Telegram, channel subscription, and yt-dlp tasks.",
+    "subtitleScoped": "Only tasks or Telegram targets that still reference the selected storage account are shown.",
+    "showAll": "Show all tasks",
+    "updated": "Updated: {{time}}",
+    "runningNotDismissible": "This task is running, so its record cannot be removed yet.",
+    "sources": {
+      "all": "All sources",
+      "webUpload": "Web upload",
+      "telegramFile": "Telegram file",
+      "channelDownload": "Channel download",
+      "telegramTarget": "Telegram conversation target",
+      "ytdlp": "yt-dlp",
+      "subscription": "Channel subscription"
+    },
+    "statuses": {
+      "all": "All statuses",
+      "pending": "Pending",
+      "running": "Running",
+      "paused": "Paused",
+      "waiting": "Waiting to resume",
+      "failed": "Failed",
+      "interrupted": "Interrupted",
+      "retryRequired": "Retry required",
+      "completed": "Completed",
+      "cancelled": "Cancelled",
+      "scheduled": "Scheduled",
+      "disabled": "Disabled"
+    },
+    "stages": {
+      "queued": "Queued",
+      "scanning": "Scanning messages",
+      "downloading": "Downloading source file",
+      "uploading": "Uploading to storage",
+      "processing": "Processing on server",
+      "awaitingFile": "Waiting for source file selection",
+      "resumable": "Upload session can resume",
+      "waitingForNextScan": "Waiting for next scan",
+      "waitingForNextTask": "Waiting for next task",
+      "completed": "Processing completed",
+      "failed": "Processing failed",
+      "interrupted": "Interrupted by server restart",
+      "retryRequired": "Manual retry required"
+    },
+    "target": {
+      "path": "{{storage}} / {{folder}}",
+      "unknownStorage": "Unknown storage",
+      "root": "Root",
+      "label": "Target: {{target}}"
+    },
+    "quickFilters": {
+      "all": "All",
+      "active": "Active",
+      "attention": "Needs attention",
+      "completed": "Completed"
+    },
+    "filters": {
+      "sourceAria": "Filter by task source",
+      "statusAria": "Filter by task status"
+    },
+    "selection": {
+      "enter": "Select tasks",
+      "exit": "Exit selection",
+      "count": "{{count}} selected",
+      "selectAll": "Select all removable",
+      "clear": "Clear",
+      "delete": "Delete selected",
+      "selectAria": "Select task",
+      "deselectAria": "Deselect task"
+    },
+    "actions": {
+      "resume": "Resume",
+      "retry": "Retry",
+      "followDefault": "Follow default",
+      "clearTarget": "Clear target",
+      "cancel": "Cancel",
+      "cleanTerminal": "Clean terminal records",
+      "refreshAria": "Refresh tasks",
+      "refresh": "Refresh",
+      "closeNotice": "Close notice",
+      "deleteRecord": "Delete record",
+      "copyId": "Copy task ID",
+      "back": "Back",
+      "close": "Close",
+      "confirmDeleteRecord": "Confirm deletion"
+    },
+    "loading": {
+      "refresh": "Refreshing tasks",
+      "initial": "Loading tasks",
+      "running": "Task is running",
+      "action": "Performing task action"
+    },
+    "empty": {
+      "title": "No matching tasks",
+      "description": "Adjust the source or status filter and try again."
+    },
+    "progress": {
+      "speed": "Speed {{speed}}",
+      "eta": "ETA {{eta}}",
+      "items": "Items {{completed}}/{{total}}",
+      "failed": ", {{count}} failed",
+      "data": "Data {{transferred}} / {{total}}"
+    },
+    "dialogs": {
+      "confirmAction": "Confirm {{action}}",
+      "retryTitle": "Confirm task retry",
+      "targetUnchanged": "Target remains: {{target}}",
+      "confirmRetry": "Confirm retry",
+      "dismissTitle": "Confirm removal from task center",
+      "dismissCount": "{{count}} terminal records will be removed.",
+      "dismissDescription": "This only hides records from the task center. It does not delete files, cloud objects, subscription configuration, or underlying task data. The record will reappear if its status changes."
+    },
+    "notices": {
+      "subscriptionDefault": "Channel subscription now follows the system default storage",
+      "targetCleared": "Telegram conversation target cleared",
+      "cancelled": "Task cancelled",
+      "resubmitted": "Task resubmitted",
+      "dismissPartial": "Removed {{dismissed}}; {{failed}} were not removed because their state changed",
+      "dismissed": "Removed {{count}} records from the task center"
+    },
+    "errors": {
+      "load": "Could not load tasks",
+      "action": "Task action failed",
+      "preview": "Could not create deletion preview",
+      "dismiss": "Could not delete task records"
     }
   }
 }

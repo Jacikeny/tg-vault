@@ -1,9 +1,9 @@
 import { useState } from "react";
-import { motion, AnimatePresence } from "framer-motion";
+import { motion } from "framer-motion";
 import { FolderPlus } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { Button } from "./Button";
-import { createPortal } from "react-dom";
+import { Dialog } from "./Dialog";
 
 interface FolderPromptModalProps {
     isOpen: boolean;
@@ -36,26 +36,13 @@ export const FolderPromptModal = ({ isOpen, onClose, onConfirm, onCancel, onRoot
     };
 
     const modalContent = (
-        <AnimatePresence>
-            <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
-                {/* Backdrop */}
-                <motion.div
-                    initial={{ opacity: 0 }}
-                    animate={{ opacity: 1 }}
-                    exit={{ opacity: 0 }}
-                    transition={{ duration: 0.2 }}
-                    className="absolute inset-0 bg-black/50 backdrop-blur-sm"
-                    onClick={onClose}
-                />
-
-                {/* Modal Container */}
+        <Dialog open={isOpen} onClose={onClose} labelledBy="folder-prompt-title" className="w-full max-w-md">
                 <motion.div
                     initial={{ scale: 0.95, opacity: 0, y: 10 }}
                     animate={{ scale: 1, opacity: 1, y: 0 }}
                     exit={{ scale: 0.95, opacity: 0, y: 10 }}
                     transition={{ type: "spring", stiffness: 350, damping: 25 }}
-                    className="relative w-full max-w-md bg-background border border-border rounded-xl shadow-2xl overflow-hidden z-[70] flex flex-col"
-                    onClick={(e) => e.stopPropagation()}
+                    className="w-full overflow-hidden rounded-xl border border-border bg-background shadow-2xl"
                 >
                     {/* Header */}
                     <div className="flex items-center gap-3 px-6 py-4 border-b border-border bg-muted/30">
@@ -63,7 +50,7 @@ export const FolderPromptModal = ({ isOpen, onClose, onConfirm, onCancel, onRoot
                             <FolderPlus className="h-5 w-5" />
                         </div>
                         <div className="flex flex-col">
-                            <h3 className="font-semibold text-lg leading-none tracking-tight">
+                            <h3 id="folder-prompt-title" className="font-semibold text-lg leading-none tracking-tight">
                                 是否创建文件夹？
                             </h3>
                             <p className="text-sm text-muted-foreground mt-1.5">
@@ -125,9 +112,8 @@ export const FolderPromptModal = ({ isOpen, onClose, onConfirm, onCancel, onRoot
                         )}
                     </div>
                 </motion.div>
-            </div>
-        </AnimatePresence>
+        </Dialog>
     );
 
-    return createPortal(modalContent, document.body);
+    return modalContent;
 };

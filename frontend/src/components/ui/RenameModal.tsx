@@ -3,6 +3,7 @@ import { useState, useEffect, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { Pencil } from "lucide-react";
 import { Button } from "./Button";
+import { Dialog } from "./Dialog";
 
 interface RenameModalProps {
     isOpen: boolean;
@@ -90,23 +91,21 @@ export const RenameModal = ({ isOpen, onClose, onConfirm, currentName, type }: R
     return (
         <AnimatePresence>
             {isOpen && (
-                <div className="fixed inset-0 z-[9999] flex items-center justify-center">
-                    {/* Backdrop */}
-                    <motion.div
-                        initial={{ opacity: 0 }}
-                        animate={{ opacity: 1 }}
-                        exit={{ opacity: 0 }}
-                        className="absolute inset-0 bg-black/50 backdrop-blur-sm"
-                        onClick={isSubmitting ? undefined : onClose}
-                    />
-
-                    {/* Modal */}
+                <Dialog
+                    open={isOpen}
+                    onClose={onClose}
+                    closeOnEscape={!isSubmitting}
+                    closeOnBackdrop={!isSubmitting}
+                    labelledBy="rename-modal-title"
+                    describedBy={error ? "rename-modal-error" : undefined}
+                    className="w-full max-w-md"
+                >
                     <motion.div
                         initial={{ opacity: 0, scale: 0.95, y: 10 }}
                         animate={{ opacity: 1, scale: 1, y: 0 }}
                         exit={{ opacity: 0, scale: 0.95, y: 10 }}
                         transition={{ duration: 0.15 }}
-                        className="relative z-10 w-full max-w-md mx-4 bg-white dark:bg-zinc-900 rounded-2xl shadow-2xl border border-border overflow-hidden"
+                        className="w-full bg-white dark:bg-zinc-900 rounded-2xl shadow-2xl border border-border overflow-hidden"
                     >
                         {/* Header */}
                         <div className="flex items-center gap-3 px-6 pt-6 pb-2">
@@ -114,7 +113,7 @@ export const RenameModal = ({ isOpen, onClose, onConfirm, currentName, type }: R
                                 <Pencil className="h-5 w-5 text-primary" />
                             </div>
                             <div>
-                                <h3 className="text-lg font-semibold text-foreground">
+                                <h3 id="rename-modal-title" className="text-lg font-semibold text-foreground">
                                     {t("file.renameTitle") || "重命名"}
                                 </h3>
                                 {type === "file" && extension && (
@@ -147,7 +146,7 @@ export const RenameModal = ({ isOpen, onClose, onConfirm, currentName, type }: R
                                 )}
                             </div>
                             {error && (
-                                <p className="mt-2 text-xs text-red-500 font-medium">{error}</p>
+                                <p id="rename-modal-error" className="mt-2 text-xs text-red-500 font-medium">{error}</p>
                             )}
                         </div>
 
@@ -170,7 +169,7 @@ export const RenameModal = ({ isOpen, onClose, onConfirm, currentName, type }: R
                             </Button>
                         </div>
                     </motion.div>
-                </div>
+                </Dialog>
             )}
         </AnimatePresence>
     );

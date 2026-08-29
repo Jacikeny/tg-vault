@@ -25,7 +25,7 @@ test('all known unknown-duration loading surfaces use the shared spinner', () =>
 test('loading spinners supply contextual accessible labels', () => {
     const combined = files.map(relative => fs.readFileSync(new URL(relative, import.meta.url), 'utf8')).join('\n');
     assert.match(combined, /label="正在验证登录状态"/);
-    assert.match(combined, /label="正在加载任务"/);
+    assert.match(combined, /label=\{t\('tasks\.loading\.initial'\)\}/);
     assert.match(combined, /label="正在加载预览"/);
     assert.match(combined, /label="正在处理上传"/);
 });

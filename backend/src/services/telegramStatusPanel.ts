@@ -22,22 +22,39 @@ function percent(used: number, total: number): number {
     return total > 0 ? Math.max(0, Math.min(100, Math.round((used / total) * 100))) : 0;
 }
 
+function formatBytesCompact(value: number): string {
+    if (!Number.isFinite(value) || value <= 0) return '0 B';
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    const index = Math.min(Math.floor(Math.log(value) / Math.log(1024)), units.length - 1);
+    const amount = value / (1024 ** index);
+    return `${amount >= 10 || index === 0 ? amount.toFixed(0) : amount.toFixed(1)} ${units[index]}`;
+}
+
+const STATUS_LABELS: Record<string, string> = {
+    ready: '正常', running: '运行中', connected: '已连接', disabled: '未启用', expired: '登录已过期',
+    failed: '异常', error: '异常', unknown: '未知', available: '正常', healthy: '正常', cooldown: '冷却中',
+};
+
+function statusLabel(value: string | null | undefined): string {
+    return STATUS_LABELS[String(value || 'unknown').toLowerCase()] || sanitizeTelegramStatusText(value || '未知');
+}
+
 export function buildTelegramStatusPanel(input: TelegramStatusPanelInput): string {
     const used = Math.max(0, input.disk.totalBytes - input.disk.freeBytes);
     return [
         '🩺 **TG Vault 诊断状态**',
         `操作 ID：${sanitizeTelegramStatusText(input.requestId)}`,
         '',
-        `Bot：${input.bot.status}${input.bot.degraded ? '（降级）' : ''} · 重连 ${input.bot.reconnectCount || 0}`,
-        `账号下载器：${input.userClient.status}${input.userClient.username ? ` / @${sanitizeTelegramStatusText(input.userClient.username)}` : ''}`,
+        `Bot：${statusLabel(input.bot.status)}${input.bot.degraded ? '（降级）' : ''} · 重连 ${input.bot.reconnectCount || 0} 次`,
+        `账号下载器：${statusLabel(input.userClient.status)}${input.userClient.username ? ` · @${sanitizeTelegramStatusText(input.userClient.username)}` : ''}`,
         input.userClient.action ? `账号恢复：${sanitizeTelegramStatusText(input.userClient.action)}` : null,
         '',
-        `Target：${input.target.provider} / ${sanitizeTelegramStatusText(input.target.accountName)}`,
-        `Probe：${input.target.probeStatus || 'unknown'}`,
-        input.target.cooldownUntil ? `Cooldown：${sanitizeTelegramStatusText(input.target.cooldownUntil)}` : 'Cooldown：无',
-        input.target.probeError ? `Probe 错误：${sanitizeTelegramStatusText(input.target.probeError)}` : null,
+        `当前存储：${input.target.provider} · ${sanitizeTelegramStatusText(input.target.accountName)}`,
+        `连接检查：${statusLabel(input.target.probeStatus)}`,
+        input.target.cooldownUntil ? `恢复时间：${sanitizeTelegramStatusText(input.target.cooldownUntil)}` : null,
+        input.target.probeError ? `存储错误：${sanitizeTelegramStatusText(input.target.probeError)}` : null,
         '',
-        `临时磁盘：${input.disk.freeBytes}/${input.disk.totalBytes} bytes 可用 · 已用 ${percent(used, input.disk.totalBytes)}%`,
+        `临时磁盘：可用 ${formatBytesCompact(input.disk.freeBytes)} / ${formatBytesCompact(input.disk.totalBytes)} · 已用 ${percent(used, input.disk.totalBytes)}%`,
         `队列：活跃 ${input.queue.active} · 等待 ${input.queue.pending} · 失败 ${input.queue.failed}${input.queue.paused ? ' · 已暂停' : ''}`,
         `订阅：启用 ${input.subscriptions.enabled} · 最近扫描 ${sanitizeTelegramStatusText(input.subscriptions.lastScanAt || '无')}`,
         input.subscriptions.lastError ? `订阅错误：${sanitizeTelegramStatusText(input.subscriptions.lastError)}` : null,

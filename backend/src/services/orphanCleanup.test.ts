@@ -3,7 +3,13 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { getAllFiles, isReservedTransientUploadPath } from './orphanCleanup.js';
+import { getAllFiles, isReservedTransientUploadPath, walkFiles } from './orphanCleanup.js';
+
+const source = fs.readFileSync(new URL('./orphanCleanup.ts', import.meta.url), 'utf8');
+
+test('cleanup protects every local-volume index regardless of historical source label', () => {
+    assert.match(source, /WHERE storage_account_id IS NULL/);
+});
 
 test('orphan cleanup excludes the yt-dlp workspace while still allowing adjacent orphan cleanup', () => {
     const uploadDir = path.resolve('/srv/tg-vault/uploads');
@@ -38,7 +44,7 @@ test('orphan file enumeration never descends into an active yt-dlp task director
     await fs.promises.writeFile(activeFile, 'active');
 
     try {
-        const files = getAllFiles(root, [], [ytDlpDir]).map(file => file.path);
+        const files = (await getAllFiles(root, [ytDlpDir])).map(file => file.path);
         assert.deepEqual(files, [ordinaryFile]);
         assert.equal(fs.existsSync(activeFile), true);
     } finally {
@@ -53,7 +59,7 @@ test('orphan enumeration fails safe when the configured yt-dlp workspace equals 
     await fs.promises.writeFile(activeFile, 'active');
 
     try {
-        assert.deepEqual(getAllFiles(root, [], [root]), []);
+        assert.deepEqual(await getAllFiles(root, [root]), []);
         assert.equal(fs.existsSync(activeFile), true);
     } finally {
         await fs.promises.rm(root, { recursive: true, force: true });
@@ -71,7 +77,7 @@ test('orphan enumeration never follows a symlink into the reserved yt-dlp worksp
     await fs.promises.symlink(ytDlpDir, alias, 'dir');
 
     try {
-        assert.deepEqual(getAllFiles(root, [], [ytDlpDir]), []);
+        assert.deepEqual(await getAllFiles(root, [ytDlpDir]), []);
         assert.equal(fs.existsSync(activeFile), true);
     } finally {
         await fs.promises.rm(root, { recursive: true, force: true });

@@ -6,49 +6,44 @@ import {
 import { IndeterminateSpinner } from '../ui/IndeterminateSpinner';
 import { Button } from '../ui/Button';
 import { fileApi, type TaskDismissalPreview, type UnifiedTask, type UnifiedTaskSource } from '../../services/api';
-import { authService } from '../../services/auth';
+import { isUnauthorizedError } from '../../services/apiActionError';
 import { cn } from '../../lib/utils';
+import { formatBytes } from '../../services/formatBytes';
 import { useTranslation } from 'react-i18next';
-import { useRuntimeUiLocalization } from './useRuntimeUiLocalization';
 import { dismissibleTaskSnapshot, pruneSelectedTaskKeys, scopeTasks, summarizeTaskStatuses, type TaskQuickFilter } from '../../services/taskQuickFilters';
 import { createSerialPoller } from '../../services/serialPoller';
+import { Dialog } from '../ui/Dialog';
+import { errorMessage } from '../../services/unknownError';
 
-interface TasksPageProps { onUnauthorized?: () => void; onOpenUploads?: () => void; initialAccountId?: string | null; }
+interface TasksPageProps { onUnauthorized?: () => void; onOpenUploads?: () => void; onShowAllTasks?: () => void; initialAccountId?: string | null; }
 interface TaskNotice { message: string; sequence: number; }
 
-const SOURCE_OPTIONS: Array<{ value: '' | UnifiedTaskSource; label: string }> = [
-    { value: '', label: '全部来源' }, { value: 'web_upload', label: 'Web 上传' },
-    { value: 'telegram_bot', label: 'Telegram 文件' }, { value: 'telegram_channel', label: '频道下载' },
-    { value: 'telegram_target', label: 'Telegram 会话目标' },
-    { value: 'ytdlp', label: 'yt-dlp' }, { value: 'subscription', label: '频道订阅' },
+// i18n source anchors: 任务中心、全部来源、全部状态、没有符合条件的任务、确认取消任务、选择任务、全选可删除、清理终态记录、删除记录、不会删除任何文件。
+
+const SOURCE_OPTIONS: Array<{ value: '' | UnifiedTaskSource; labelKey: string }> = [
+    { value: '', labelKey: 'tasks.sources.all' }, { value: 'web_upload', labelKey: 'tasks.sources.webUpload' },
+    { value: 'telegram_bot', labelKey: 'tasks.sources.telegramFile' }, { value: 'telegram_channel', labelKey: 'tasks.sources.channelDownload' },
+    { value: 'telegram_target', labelKey: 'tasks.sources.telegramTarget' },
+    { value: 'ytdlp', labelKey: 'tasks.sources.ytdlp' }, { value: 'subscription', labelKey: 'tasks.sources.subscription' },
 ];
 const STATUS_OPTIONS = [
-    { value: '', label: '全部状态' }, { value: 'pending', label: '等待中' },
-    { value: 'running', label: '运行中' }, { value: 'paused', label: '已暂停' },
-    { value: 'waiting', label: '等待恢复' }, { value: 'failed', label: '失败' },
-    { value: 'interrupted', label: '已中断' }, { value: 'retry_required', label: '需要重试' },
-    { value: 'completed', label: '已完成' }, { value: 'cancelled', label: '已取消' },
-    { value: 'scheduled', label: '已计划' }, { value: 'disabled', label: '已停用' },
+    { value: '', labelKey: 'tasks.statuses.all' }, { value: 'pending', labelKey: 'tasks.statuses.pending' },
+    { value: 'running', labelKey: 'tasks.statuses.running' }, { value: 'paused', labelKey: 'tasks.statuses.paused' },
+    { value: 'waiting', labelKey: 'tasks.statuses.waiting' }, { value: 'failed', labelKey: 'tasks.statuses.failed' },
+    { value: 'interrupted', labelKey: 'tasks.statuses.interrupted' }, { value: 'retry_required', labelKey: 'tasks.statuses.retryRequired' },
+    { value: 'completed', labelKey: 'tasks.statuses.completed' }, { value: 'cancelled', labelKey: 'tasks.statuses.cancelled' },
+    { value: 'scheduled', labelKey: 'tasks.statuses.scheduled' }, { value: 'disabled', labelKey: 'tasks.statuses.disabled' },
 ];
-const SOURCE_LABELS: Record<string, string> = Object.fromEntries(SOURCE_OPTIONS.filter(o => o.value).map(o => [o.value, o.label]));
-const STATUS_LABELS: Record<string, string> = Object.fromEntries(STATUS_OPTIONS.filter(o => o.value).map(o => [o.value, o.label]));
+const SOURCE_LABELS: Record<string, string> = Object.fromEntries(SOURCE_OPTIONS.filter(o => o.value).map(o => [o.value, o.labelKey]));
+const STATUS_LABELS: Record<string, string> = Object.fromEntries(STATUS_OPTIONS.filter(o => o.value).map(o => [o.value, o.labelKey]));
 const STAGE_LABELS: Record<string, string> = {
-    waiting: '排队等待', queued: '排队等待', scanning: '扫描消息', downloading: '下载源文件',
-    uploading: '上传到存储', processing: '服务器处理中', awaiting_file: '等待重新选择原文件',
-    resumable: '上传会话可续传', waiting_for_next_scan: '等待下次扫描', waiting_for_next_task: '等待后续任务', completed: '处理完成',
-    failed: '处理失败', cancelled: '已取消', interrupted: '服务重启时中断',
-    retry_required: '需要人工重试', disabled: '已停用',
+    waiting: 'tasks.stages.queued', queued: 'tasks.stages.queued', scanning: 'tasks.stages.scanning', downloading: 'tasks.stages.downloading',
+    uploading: 'tasks.stages.uploading', processing: 'tasks.stages.processing', awaiting_file: 'tasks.stages.awaitingFile',
+    resumable: 'tasks.stages.resumable', waiting_for_next_scan: 'tasks.stages.waitingForNextScan', waiting_for_next_task: 'tasks.stages.waitingForNextTask', completed: 'tasks.stages.completed',
+    failed: 'tasks.stages.failed', cancelled: 'tasks.statuses.cancelled', interrupted: 'tasks.stages.interrupted',
+    retry_required: 'tasks.stages.retryRequired', disabled: 'tasks.statuses.disabled',
 };
 
-function formatBytes(bytes: number): string {
-    if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
-    const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
-    const unit = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
-    return `${(bytes / (1024 ** unit)).toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`;
-}
-function taskTarget(task: UnifiedTask): string {
-    return `${task.target.accountName || task.target.provider || '未记录存储'} / ${task.target.folder || '根目录'}`;
-}
 function taskKey(task: Pick<UnifiedTask, 'sourceType' | 'id'>): string { return `${task.sourceType}:${task.id}`; }
 function statusTone(status: string): string {
     if (status === 'completed') return 'bg-emerald-50 text-emerald-700 border-emerald-200';
@@ -57,20 +52,23 @@ function statusTone(status: string): string {
     if (['running', 'pending'].includes(status)) return 'bg-blue-50 text-blue-700 border-blue-200';
     return 'bg-amber-50 text-amber-700 border-amber-200';
 }
-function StatusIcon({ status }: { status: string }) {
+function StatusIcon({ status, runningLabel }: { status: string; runningLabel: string }) {
     if (status === 'completed') return <CheckCircle2 className="h-4 w-4" />;
     if (['failed', 'interrupted', 'retry_required'].includes(status)) return <AlertCircle className="h-4 w-4" />;
     if (['cancelled', 'disabled'].includes(status)) return <Ban className="h-4 w-4" />;
-    if (status === 'running') return <IndeterminateSpinner label="任务正在运行" size="sm" />;
+    if (status === 'running') return <IndeterminateSpinner label={runningLabel} size="sm" />;
     return <Clock3 className="h-4 w-4" />;
 }
 
-export const TasksPage = ({ onUnauthorized, onOpenUploads, initialAccountId = null }: TasksPageProps) => {
-    const { i18n } = useTranslation();
+export const TasksPage = ({ onUnauthorized, onOpenUploads, onShowAllTasks, initialAccountId }: TasksPageProps) => {
+    const { t, i18n } = useTranslation();
     const locale = i18n.resolvedLanguage?.startsWith('en') ? 'en-US' : 'zh-CN';
-    const pageRef = useRef<HTMLDivElement>(null);
-    useRuntimeUiLocalization(pageRef);
+    const taskTarget = (task: UnifiedTask): string => t('tasks.target.path', {
+        storage: task.target.accountName || task.target.provider || t('tasks.target.unknownStorage'),
+        folder: task.target.folder || t('tasks.target.root'),
+    });
     const [tasks, setTasks] = useState<UnifiedTask[]>([]);
+    const tasksRef = useRef<UnifiedTask[]>([]);
     const [source, setSource] = useState('');
     const [status, setStatus] = useState('');
     const [quickFilter, setQuickFilter] = useState<TaskQuickFilter>('all');
@@ -102,12 +100,13 @@ export const TasksPage = ({ onUnauthorized, onOpenUploads, initialAccountId = nu
             const relevantTasks = initialAccountId
                 ? result.tasks.filter(task => task.target.accountId === initialAccountId)
                 : result.tasks;
+            tasksRef.current = relevantTasks;
             setTasks(relevantTasks); setError(null);
             setSelected(previous => pruneSelectedTaskKeys(previous, relevantTasks, scopeFilters, taskKey));
-        } catch (loadError: any) {
+        } catch (loadError: unknown) {
             if (generation !== requestGeneration.current) return;
-            if (loadError?.message === 'UNAUTHORIZED') { authService.clearToken(); onUnauthorized?.(); return; }
-            setError(loadError?.message || '获取任务列表失败');
+            if (isUnauthorizedError(loadError)) { onUnauthorized?.(); return; }
+            setError(errorMessage(loadError, t('tasks.errors.load')));
         } finally {
             if (generation === requestGeneration.current) { setLoading(false); setRefreshing(false); }
         }
@@ -115,6 +114,10 @@ export const TasksPage = ({ onUnauthorized, onOpenUploads, initialAccountId = nu
 
     useEffect(() => {
         let first = true;
+        const nextDelayMs = () => {
+            if (document.visibilityState !== 'visible') return 60_000;
+            return tasksRef.current.some(task => ['pending', 'running', 'paused', 'waiting', 'interrupted'].includes(task.status)) ? 5_000 : 20_000;
+        };
         const poller = createSerialPoller({
             run: async () => {
                 await loadTasks(!first);
@@ -123,6 +126,7 @@ export const TasksPage = ({ onUnauthorized, onOpenUploads, initialAccountId = nu
             schedule: (callback, delay) => window.setTimeout(callback, delay),
             cancel: handle => window.clearTimeout(handle as number),
             delayMs: 5_000,
+            nextDelayMs,
         });
         poller.start();
         return () => {
@@ -142,10 +146,10 @@ export const TasksPage = ({ onUnauthorized, onOpenUploads, initialAccountId = nu
     const dismissibleTasks = useMemo(() => dismissibleTaskSnapshot(tasks, scopeFilters), [scopeFilters, tasks]);
 
     const taskActionLabel = (task: UnifiedTask, action: 'cancel' | 'retry'): string => {
-        if (action === 'retry') return task.sourceType === 'web_upload' ? '续传' : '重试';
-        if (task.sourceType === 'subscription') return '改为跟随默认';
-        if (task.sourceType === 'telegram_target') return '清除目标';
-        return '取消';
+        if (action === 'retry') return task.sourceType === 'web_upload' ? t('tasks.actions.resume') : t('tasks.actions.retry');
+        if (task.sourceType === 'subscription') return t('tasks.actions.followDefault');
+        if (task.sourceType === 'telegram_target') return t('tasks.actions.clearTarget');
+        return t('tasks.actions.cancel');
     };
     const requestAction = (task: UnifiedTask, action: 'cancel' | 'retry') => {
         if (task.sourceType === 'web_upload' && action === 'retry') { onOpenUploads?.(); return; }
@@ -157,15 +161,15 @@ export const TasksPage = ({ onUnauthorized, onOpenUploads, initialAccountId = nu
         try {
             await fileApi.controlTask(pendingAction.task.sourceType, pendingAction.task.id, pendingAction.action);
             const cancelledNotice = pendingAction.task.sourceType === 'subscription'
-                ? '频道订阅已改为跟随系统默认存储'
+                ? t('tasks.notices.subscriptionDefault')
                 : pendingAction.task.sourceType === 'telegram_target'
-                    ? 'Telegram 会话目标已清除'
-                    : '任务已取消';
-            showNotice(pendingAction.action === 'cancel' ? cancelledNotice : '任务已重新提交');
+                    ? t('tasks.notices.targetCleared')
+                    : t('tasks.notices.cancelled');
+            showNotice(pendingAction.action === 'cancel' ? cancelledNotice : t('tasks.notices.resubmitted'));
             setPendingAction(null); await loadTasks(true);
-        } catch (actionError: any) {
-            if (actionError?.message === 'UNAUTHORIZED') { authService.clearToken(); onUnauthorized?.(); }
-            else { setError(actionError?.message || '任务操作失败'); setPendingAction(null); }
+        } catch (actionError: unknown) {
+            if (isUnauthorizedError(actionError)) { onUnauthorized?.(); }
+            else { setError(errorMessage(actionError, t('tasks.errors.action'))); setPendingAction(null); }
         } finally { setActing(false); }
     };
 
@@ -176,9 +180,9 @@ export const TasksPage = ({ onUnauthorized, onOpenUploads, initialAccountId = nu
                 tasks: input.tasks.map(task => ({ sourceType: task.sourceType, id: task.id })),
             });
             setDismissalPreview(preview);
-        } catch (dismissError: any) {
-            if (dismissError?.message === 'UNAUTHORIZED') { authService.clearToken(); onUnauthorized?.(); }
-            else setError(dismissError?.message || '无法创建删除预览');
+        } catch (dismissError: unknown) {
+            if (isUnauthorizedError(dismissError)) { onUnauthorized?.(); }
+            else setError(errorMessage(dismissError, t('tasks.errors.preview')));
         } finally { setActing(false); }
     };
     const confirmDismissal = async () => {
@@ -186,11 +190,13 @@ export const TasksPage = ({ onUnauthorized, onOpenUploads, initialAccountId = nu
         setActing(true);
         try {
             const result = await fileApi.confirmTaskDismissal(dismissalPreview);
-            showNotice(result.failed.length ? `已删除 ${result.dismissed.length} 条，${result.failed.length} 条因状态变化未删除` : `已从任务中心删除 ${result.dismissed.length} 条记录`);
+            showNotice(result.failed.length
+                ? t('tasks.notices.dismissPartial', { dismissed: result.dismissed.length, failed: result.failed.length })
+                : t('tasks.notices.dismissed', { count: result.dismissed.length }));
             setDismissalPreview(null); setSelected([]); setSelectionMode(false); await loadTasks(true);
-        } catch (dismissError: any) {
-            if (dismissError?.message === 'UNAUTHORIZED') { authService.clearToken(); onUnauthorized?.(); }
-            else setError(dismissError?.message || '删除任务记录失败');
+        } catch (dismissError: unknown) {
+            if (isUnauthorizedError(dismissError)) { onUnauthorized?.(); }
+            else setError(errorMessage(dismissError, t('tasks.errors.dismiss')));
             setDismissalPreview(null);
         } finally { setActing(false); }
     };
@@ -202,20 +208,20 @@ export const TasksPage = ({ onUnauthorized, onOpenUploads, initialAccountId = nu
     const selectedTasks = dismissibleTasks.filter(task => selected.includes(taskKey(task)));
 
     return (
-        <div ref={pageRef} className="mx-auto min-h-full max-w-7xl space-y-5">
+        <div className="mx-auto min-h-full max-w-7xl space-y-5">
             <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
                 <div>
-                    <h2 className="text-2xl font-bold">任务中心</h2>
-                    <p className="mt-1 text-sm text-muted-foreground">{initialAccountId ? '仅显示仍引用所选存储账户的任务或 Telegram 目标。' : '查看和管理 Web、Telegram、频道订阅及 yt-dlp 任务。'}</p>
-                    {initialAccountId && <button type="button" className="mt-2 text-sm font-medium text-primary hover:underline" onClick={() => { window.history.replaceState({}, '', '/tasks'); window.dispatchEvent(new PopStateEvent('popstate')); }}>显示全部任务</button>}
+                    <h2 className="text-2xl font-bold">{t('tasks.title')}</h2>
+                    <p className="mt-1 text-sm text-muted-foreground">{t(initialAccountId ? 'tasks.subtitleScoped' : 'tasks.subtitle')}</p>
+                    {initialAccountId && <button type="button" className="mt-2 text-sm font-medium text-primary hover:underline" onClick={onShowAllTasks}>{t('tasks.showAll')}</button>}
                 </div>
                 <div className="grid grid-cols-4 gap-2 text-center text-xs sm:text-sm">
                     {([
-                        ['all', '全部', tasks.length, ''],
-                        ['active', '进行中', summary.active, ''],
-                        ['attention', '需处理', summary.attention, 'border-red-200 text-red-700'],
-                        ['completed', '已完成', summary.completed, 'border-emerald-200 text-emerald-700'],
-                    ] as const).map(([filter, label, count, tone]) => (
+                        ['all', 'tasks.quickFilters.all', tasks.length, ''],
+                        ['active', 'tasks.quickFilters.active', summary.active, ''],
+                        ['attention', 'tasks.quickFilters.attention', summary.attention, 'border-red-200 text-red-700'],
+                        ['completed', 'tasks.quickFilters.completed', summary.completed, 'border-emerald-200 text-emerald-700'],
+                    ] as const).map(([filter, labelKey, count, tone]) => (
                         <button
                             key={filter}
                             type="button"
@@ -227,7 +233,7 @@ export const TasksPage = ({ onUnauthorized, onOpenUploads, initialAccountId = nu
                             )}
                             onClick={() => { setStatus(''); setQuickFilter(filter); }}
                         >
-                            {label} {count}
+                            {t(labelKey)} {count}
                         </button>
                     ))}
                 </div>
@@ -235,50 +241,50 @@ export const TasksPage = ({ onUnauthorized, onOpenUploads, initialAccountId = nu
 
             <div className="border-y border-border py-4">
                 <div className="grid grid-cols-2 gap-2 sm:flex sm:items-center">
-                    <select className="h-10 min-w-0 rounded-md border bg-background px-2 text-sm sm:w-auto" value={source} onChange={e => setSource(e.target.value)} aria-label="按任务来源筛选">{SOURCE_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}</select>
-                    <select className="h-10 min-w-0 rounded-md border bg-background px-2 text-sm sm:w-auto" value={status} onChange={e => { setStatus(e.target.value); setQuickFilter('all'); }} aria-label="按任务状态筛选">{STATUS_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}</select>
+                    <select className="h-10 min-w-0 rounded-md border bg-background px-2 text-sm sm:w-auto" value={source} onChange={e => setSource(e.target.value)} aria-label={t('tasks.filters.sourceAria')}>{SOURCE_OPTIONS.map(o => <option key={o.value} value={o.value}>{t(o.labelKey)}</option>)}</select>
+                    <select className="h-10 min-w-0 rounded-md border bg-background px-2 text-sm sm:w-auto" value={status} onChange={e => { setStatus(e.target.value); setQuickFilter('all'); }} aria-label={t('tasks.filters.statusAria')}>{STATUS_OPTIONS.map(o => <option key={o.value} value={o.value}>{t(o.labelKey)}</option>)}</select>
                     <div className="col-span-2 flex flex-wrap gap-2 sm:ml-auto">
-                        <Button size="sm" variant="outline" className="gap-2" onClick={() => { setSelectionMode(!selectionMode); setSelected([]); }} disabled={!dismissibleTasks.length}><CheckSquare className="h-4 w-4" />{selectionMode ? '退出选择' : '选择任务'}</Button>
-                        <Button size="sm" variant="outline" className="gap-2 text-red-700" onClick={() => void prepareDismissal({ tasks: dismissibleTasks })} disabled={!dismissibleTasks.length || acting}><Trash2 className="h-4 w-4" />清理终态记录</Button>
-                        <Button size="icon" variant="outline" aria-label="刷新任务" title="刷新" onClick={() => void loadTasks(true)} disabled={refreshing}>{refreshing ? <IndeterminateSpinner label="正在刷新任务" size="sm" /> : <RefreshCw className="h-4 w-4" />}</Button>
+                        <Button size="sm" variant="outline" className="gap-2" onClick={() => { setSelectionMode(!selectionMode); setSelected([]); }} disabled={!dismissibleTasks.length}><CheckSquare className="h-4 w-4" />{t(selectionMode ? 'tasks.selection.exit' : 'tasks.selection.enter')}</Button>
+                        <Button size="sm" variant="outline" className="gap-2 text-red-700" onClick={() => void prepareDismissal({ tasks: dismissibleTasks })} disabled={!dismissibleTasks.length || acting}><Trash2 className="h-4 w-4" />{t('tasks.actions.cleanTerminal')}</Button>
+                        <Button size="icon" variant="outline" aria-label={t('tasks.actions.refreshAria')} title={t('tasks.actions.refresh')} onClick={() => void loadTasks(true)} disabled={refreshing}>{refreshing ? <IndeterminateSpinner label={t('tasks.loading.refresh')} size="sm" /> : <RefreshCw className="h-4 w-4" />}</Button>
                     </div>
                 </div>
-                {selectionMode && <div className="mt-3 flex flex-wrap items-center gap-2 rounded-lg bg-muted/50 p-3 text-sm"><span>已选择 {selected.length} 条</span><Button size="sm" variant="outline" onClick={() => setSelected(dismissibleTasks.map(taskKey))}>全选可删除</Button><Button size="sm" variant="ghost" onClick={() => setSelected([])}>清空</Button><Button size="sm" variant="destructive" disabled={!selected.length || acting} onClick={() => void prepareDismissal({ tasks: selectedTasks })}>删除所选</Button></div>}
+                {selectionMode && <div className="mt-3 flex flex-wrap items-center gap-2 rounded-lg bg-muted/50 p-3 text-sm"><span>{t('tasks.selection.count', { count: selected.length })}</span><Button size="sm" variant="outline" onClick={() => setSelected(dismissibleTasks.map(taskKey))}>{t('tasks.selection.selectAll')}</Button><Button size="sm" variant="ghost" onClick={() => setSelected([])}>{t('tasks.selection.clear')}</Button><Button size="sm" variant="destructive" disabled={!selected.length || acting} onClick={() => void prepareDismissal({ tasks: selectedTasks })}>{t('tasks.selection.delete')}</Button></div>}
             </div>
 
-            {notice && <div className="flex items-center justify-between gap-3 rounded-md border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800" role="status" aria-live="polite"><span>{notice.message}</span><button type="button" className="rounded p-1 hover:bg-emerald-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600" onClick={() => setNotice(null)} aria-label="关闭提示" title="关闭提示"><X className="h-4 w-4" /></button></div>}
-            {error && <div className="flex items-start justify-between gap-3 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800"><span>{error}</span><Button size="sm" variant="outline" onClick={() => void loadTasks(false)}>重试</Button></div>}
+            {notice && <div className="flex items-center justify-between gap-3 rounded-md border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800" role="status" aria-live="polite"><span>{notice.message}</span><button type="button" className="rounded p-1 hover:bg-emerald-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600" onClick={() => setNotice(null)} aria-label={t('tasks.actions.closeNotice')} title={t('tasks.actions.closeNotice')}><X className="h-4 w-4" /></button></div>}
+            {error && <div className="flex items-start justify-between gap-3 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800"><span>{error}</span><Button size="sm" variant="outline" onClick={() => void loadTasks(false)}>{t('tasks.actions.retry')}</Button></div>}
 
-            {loading ? <div className="flex min-h-48 items-center justify-center"><IndeterminateSpinner label="正在加载任务" size="md" /></div> : visibleTasks.length === 0 ? <div className="flex min-h-48 flex-col items-center justify-center border-y text-center"><Clock3 className="mb-3 h-7 w-7 text-muted-foreground" /><p className="font-medium">没有符合条件的任务</p><p className="mt-1 text-sm text-muted-foreground">调整来源或状态筛选后再查看。</p></div> : (
+            {loading ? <div className="flex min-h-48 items-center justify-center"><IndeterminateSpinner label={t('tasks.loading.initial')} size="md" /></div> : visibleTasks.length === 0 ? <div className="flex min-h-48 flex-col items-center justify-center border-y text-center"><Clock3 className="mb-3 h-7 w-7 text-muted-foreground" /><p className="font-medium">{t('tasks.empty.title')}</p><p className="mt-1 text-sm text-muted-foreground">{t('tasks.empty.description')}</p></div> : (
                 <div className="divide-y divide-border border-y">
                     {visibleTasks.map(task => {
-                        const stageLabel = STAGE_LABELS[task.stage] || task.stage;
-                        const statusLabel = STATUS_LABELS[task.status] || task.status;
+                        const stageLabel = STAGE_LABELS[task.stage] ? t(STAGE_LABELS[task.stage]) : task.stage;
+                        const statusLabel = STATUS_LABELS[task.status] ? t(STATUS_LABELS[task.status]) : task.status;
                         const showStage = STAGE_LABELS[task.stage] !== STATUS_LABELS[task.status] && stageLabel !== statusLabel;
                         const detailSpeed = typeof task.detail.speed === 'string' ? task.detail.speed : null;
                         const detailEta = typeof task.detail.eta === 'string' ? task.detail.eta : null;
                         const checked = selected.includes(taskKey(task));
                         return <article key={taskKey(task)} className="py-5">
                             <div className="flex gap-3">
-                                {selectionMode && <button type="button" className={cn('mt-1 h-10 w-10 shrink-0 items-center justify-center rounded-md', task.dismissible ? 'flex' : 'hidden')} onClick={() => toggleSelection(task)} aria-label={checked ? '取消选择任务' : '选择任务'}>{checked ? <CheckSquare className="h-5 w-5 text-primary" /> : <Square className="h-5 w-5" />}</button>}
+                                {selectionMode && <button type="button" className={cn('mt-1 h-10 w-10 shrink-0 items-center justify-center rounded-md', task.dismissible ? 'flex' : 'hidden')} onClick={() => toggleSelection(task)} aria-label={t(checked ? 'tasks.selection.deselectAria' : 'tasks.selection.selectAria')}>{checked ? <CheckSquare className="h-5 w-5 text-primary" /> : <Square className="h-5 w-5" />}</button>}
                                 <div className="min-w-0 flex-1">
-                                    <div className="flex flex-wrap items-center gap-2"><span className="text-xs font-medium text-muted-foreground">{SOURCE_LABELS[task.sourceType] || task.sourceType}</span><span className={cn('inline-flex items-center gap-1 rounded-md border px-2 py-1 text-xs font-medium', statusTone(task.status))}><StatusIcon status={task.status} />{statusLabel}</span>{showStage && <span className="text-xs text-muted-foreground">{stageLabel}</span>}</div>
+                                    <div className="flex flex-wrap items-center gap-2"><span className="text-xs font-medium text-muted-foreground">{SOURCE_LABELS[task.sourceType] ? t(SOURCE_LABELS[task.sourceType]) : task.sourceType}</span><span className={cn('inline-flex items-center gap-1 rounded-md border px-2 py-1 text-xs font-medium', statusTone(task.status))}><StatusIcon status={task.status} runningLabel={t('tasks.loading.running')} />{statusLabel}</span>{showStage && <span className="text-xs text-muted-foreground">{stageLabel}</span>}</div>
                                     <h3 className="mt-2 line-clamp-2 break-words text-base font-semibold">{task.title}</h3>
-                                    <div className="mt-2 grid gap-1 text-xs text-muted-foreground sm:grid-cols-2"><span className="break-all" title={taskTarget(task)}>目标：{taskTarget(task)}</span><span>更新：{new Date(task.updatedAt).toLocaleString(locale, { hour12: false })}</span>{(detailSpeed || detailEta) && <span>{detailSpeed ? `速度 ${detailSpeed}` : ''}{detailSpeed && detailEta ? ' · ' : ''}{detailEta ? `ETA ${detailEta}` : ''}</span>}</div>
+                                    <div className="mt-2 grid gap-1 text-xs text-muted-foreground sm:grid-cols-2"><span className="break-all" title={taskTarget(task)}>{t('tasks.target.label', { target: taskTarget(task) })}</span><span>{t('tasks.updated', { time: new Date(task.updatedAt).toLocaleString(locale, { hour12: false }) })}</span>{(detailSpeed || detailEta) && <span>{detailSpeed ? t('tasks.progress.speed', { speed: detailSpeed }) : ''}{detailSpeed && detailEta ? ' · ' : ''}{detailEta ? t('tasks.progress.eta', { eta: detailEta }) : ''}</span>}</div>
                                     {(task.progress > 0 || ['running', 'paused', 'failed'].includes(task.status)) && <div className="mt-3 flex items-center gap-3"><div className="h-1.5 flex-1 overflow-hidden rounded-full bg-muted"><div className="h-full rounded-full bg-primary" style={{ width: `${Math.max(0, Math.min(100, task.progress))}%` }} /></div><span className="w-10 text-right text-xs">{Math.round(task.progress)}%</span></div>}
-                                    <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">{task.counts.total > 0 && <span>条目 {task.counts.completed}/{task.counts.total}{task.counts.failed > 0 ? `，失败 ${task.counts.failed}` : ''}</span>}{task.bytes.total > 0 && <span>数据 {formatBytes(task.bytes.transferred)} / {formatBytes(task.bytes.total)}</span>}<span className="inline-flex items-center gap-1 font-mono" title={task.id}>ID {task.id.length > 18 ? `${task.id.slice(0, 18)}...` : task.id}<button title="复制任务 ID" aria-label="复制任务 ID" onClick={() => void navigator.clipboard.writeText(task.id)}><Copy className="h-3.5 w-3.5" /></button></span></div>
+                                    <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">{task.counts.total > 0 && <span>{t('tasks.progress.items', { completed: task.counts.completed, total: task.counts.total })}{task.counts.failed > 0 ? t('tasks.progress.failed', { count: task.counts.failed }) : ''}</span>}{task.bytes.total > 0 && <span>{t('tasks.progress.data', { transferred: formatBytes(task.bytes.transferred), total: formatBytes(task.bytes.total) })}</span>}<span className="inline-flex items-center gap-1 font-mono" title={task.id}>ID {task.id.length > 18 ? `${task.id.slice(0, 18)}...` : task.id}<button title={t('tasks.actions.copyId')} aria-label={t('tasks.actions.copyId')} onClick={() => void navigator.clipboard.writeText(task.id)}><Copy className="h-3.5 w-3.5" /></button></span></div>
                                     {task.error && <p className="mt-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 break-words">{task.error}</p>}
                                 </div>
-                                {!selectionMode && <div className="flex shrink-0 flex-col items-end gap-2 sm:flex-row">{task.retryable && <Button size="sm" variant="outline" className="gap-1" onClick={() => requestAction(task, 'retry')}>{task.sourceType === 'web_upload' ? <UploadCloud className="h-4 w-4" /> : <RotateCcw className="h-4 w-4" />}{taskActionLabel(task, 'retry')}</Button>}{task.cancellable && <Button size="sm" variant="outline" className="gap-1 text-red-700" onClick={() => requestAction(task, 'cancel')}><Ban className="h-4 w-4" />{taskActionLabel(task, 'cancel')}</Button>}{task.dismissible && <Button size="sm" variant="ghost" className="gap-1 text-red-700" onClick={() => void prepareDismissal({ tasks: [task] })}><Trash2 className="h-4 w-4" /><span className="hidden sm:inline">删除记录</span></Button>}</div>}
+                                {!selectionMode && <div className="flex shrink-0 flex-col items-end gap-2 sm:flex-row">{task.retryable && <Button size="sm" variant="outline" className="gap-1" onClick={() => requestAction(task, 'retry')}>{task.sourceType === 'web_upload' ? <UploadCloud className="h-4 w-4" /> : <RotateCcw className="h-4 w-4" />}{taskActionLabel(task, 'retry')}</Button>}{task.cancellable && <Button size="sm" variant="outline" className="gap-1 text-red-700" onClick={() => requestAction(task, 'cancel')}><Ban className="h-4 w-4" />{taskActionLabel(task, 'cancel')}</Button>}{task.dismissible && <Button size="sm" variant="ghost" className="gap-1 text-red-700" onClick={() => void prepareDismissal({ tasks: [task] })}><Trash2 className="h-4 w-4" /><span className="hidden sm:inline">{t('tasks.actions.deleteRecord')}</span></Button>}</div>}
                             </div>
                         </article>;
                     })}
                 </div>
             )}
 
-            {pendingAction && <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/50 p-4" role="dialog" aria-modal="true"><div className="w-full max-w-md rounded-lg bg-background p-5 shadow-xl"><h3 className="font-semibold">{pendingAction.action === 'cancel' ? `确认${taskActionLabel(pendingAction.task, 'cancel')}` : '确认重试任务'}</h3><p className="mt-2 break-words text-sm text-muted-foreground">{pendingAction.task.title}</p><p className="mt-1 text-xs text-muted-foreground">目标保持为：{taskTarget(pendingAction.task)}</p><div className="mt-5 flex justify-end gap-2"><Button variant="outline" disabled={acting} onClick={() => setPendingAction(null)}>返回</Button><Button variant={pendingAction.action === 'cancel' ? 'destructive' : 'default'} disabled={acting} onClick={() => void confirmAction()}>{acting && <IndeterminateSpinner label="正在执行任务操作" size="sm" className="mr-2" />}{pendingAction.action === 'cancel' ? `确认${taskActionLabel(pendingAction.task, 'cancel')}` : '确认重试'}</Button></div></div></div>}
+            {pendingAction && <Dialog open onClose={() => { if (!acting) setPendingAction(null); }} labelledBy="task-action-dialog-title" closeOnEscape={!acting} closeOnBackdrop={!acting} className="w-full max-w-md"><div className="w-full rounded-lg bg-background p-5 shadow-xl"><h3 id="task-action-dialog-title" className="font-semibold">{pendingAction.action === 'cancel' ? t('tasks.dialogs.confirmAction', { action: taskActionLabel(pendingAction.task, 'cancel') }) : t('tasks.dialogs.retryTitle')}</h3><p className="mt-2 break-words text-sm text-muted-foreground">{pendingAction.task.title}</p><p className="mt-1 text-xs text-muted-foreground">{t('tasks.dialogs.targetUnchanged', { target: taskTarget(pendingAction.task) })}</p><div className="mt-5 flex justify-end gap-2"><Button variant="outline" disabled={acting} onClick={() => setPendingAction(null)}>{t('tasks.actions.back')}</Button><Button variant={pendingAction.action === 'cancel' ? 'destructive' : 'default'} disabled={acting} onClick={() => void confirmAction()}>{acting && <IndeterminateSpinner label={t('tasks.loading.action')} size="sm" className="mr-2" />}{pendingAction.action === 'cancel' ? t('tasks.dialogs.confirmAction', { action: taskActionLabel(pendingAction.task, 'cancel') }) : t('tasks.dialogs.confirmRetry')}</Button></div></div></Dialog>}
 
-            {dismissalPreview && <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/50 p-4" role="dialog" aria-modal="true" aria-labelledby="dismiss-title"><div className="w-full max-w-md rounded-xl border bg-background p-5 shadow-xl"><div className="flex items-start gap-3"><Trash2 className="mt-0.5 h-5 w-5 text-red-600" /><div><h3 id="dismiss-title" className="font-semibold">确认从任务中心删除</h3><p className="mt-2 text-sm">将删除 {dismissalPreview.impact.count} 条终态记录。</p><p className="mt-2 rounded-md bg-muted p-3 text-xs text-muted-foreground">只会从任务中心隐藏记录，不会删除任何文件、云端对象、订阅配置或底层任务数据。任务状态再次变化后会重新出现。</p></div><button className="ml-auto" onClick={() => setDismissalPreview(null)} aria-label="关闭"><X className="h-5 w-5" /></button></div><div className="mt-5 flex justify-end gap-2"><Button variant="outline" disabled={acting} onClick={() => setDismissalPreview(null)}>返回</Button><Button variant="destructive" disabled={acting} onClick={() => void confirmDismissal()}>{acting && <IndeterminateSpinner label="正在执行任务操作" size="sm" className="mr-2" />}确认删除记录</Button></div></div></div>}
+            {dismissalPreview && <Dialog open onClose={() => { if (!acting) setDismissalPreview(null); }} labelledBy="dismiss-title" alert closeOnEscape={!acting} closeOnBackdrop={!acting} className="w-full max-w-md"><div className="w-full rounded-xl border bg-background p-5 shadow-xl"><div className="flex items-start gap-3"><Trash2 className="mt-0.5 h-5 w-5 text-red-600" /><div><h3 id="dismiss-title" className="font-semibold">{t('tasks.dialogs.dismissTitle')}</h3><p className="mt-2 text-sm">{t('tasks.dialogs.dismissCount', { count: dismissalPreview.impact.count })}</p><p className="mt-2 rounded-md bg-muted p-3 text-xs text-muted-foreground">{t('tasks.dialogs.dismissDescription')}</p></div><button className="ml-auto" onClick={() => setDismissalPreview(null)} aria-label={t('tasks.actions.close')}><X className="h-5 w-5" /></button></div><div className="mt-5 flex justify-end gap-2"><Button variant="outline" disabled={acting} onClick={() => setDismissalPreview(null)}>{t('tasks.actions.back')}</Button><Button variant="destructive" disabled={acting} onClick={() => void confirmDismissal()}>{acting && <IndeterminateSpinner label={t('tasks.loading.action')} size="sm" className="mr-2" />}{t('tasks.actions.confirmDeleteRecord')}</Button></div></div></Dialog>}
         </div>
     );
 };

@@ -25,6 +25,16 @@ export function Dialog({
     className?: string;
 }) {
     const contentRef = useRef<HTMLDivElement>(null);
+    const onCloseRef = useRef(onClose);
+    const closeOnEscapeRef = useRef(closeOnEscape);
+    useEffect(() => {
+        onCloseRef.current = onClose;
+        closeOnEscapeRef.current = closeOnEscape;
+    }, [onClose, closeOnEscape]);
+
+    // Keep the focus trap mounted for the lifetime of the dialog. Re-running
+    // this effect on every parent render would focus the first button again,
+    // which makes a mobile swipe jump back to the top during QR polling.
     useEffect(() => {
         if (!open) return;
         const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -32,7 +42,7 @@ export function Dialog({
         const focusables = () => Array.from(content?.querySelectorAll<HTMLElement>(focusSelector) || []);
         focusables()[0]?.focus();
         const onKeyDown = (event: KeyboardEvent) => {
-            if (event.key === 'Escape' && closeOnEscape) { event.preventDefault(); onClose(); return; }
+            if (event.key === 'Escape' && closeOnEscapeRef.current) { event.preventDefault(); onCloseRef.current(); return; }
             if (event.key !== 'Tab') return;
             const items = focusables();
             if (!items.length) { event.preventDefault(); content?.focus(); return; }
@@ -48,11 +58,11 @@ export function Dialog({
             document.body.style.overflow = previousOverflow;
             previousFocus?.focus();
         };
-    }, [open, onClose, closeOnEscape]);
+    }, [open]);
     if (!open) return null;
     return createPortal(
-        <div className="fixed inset-0 z-[120] flex items-center justify-center overflow-y-auto bg-black/50 p-4" role="presentation" onMouseDown={event => { if (closeOnBackdrop && event.target === event.currentTarget) onClose(); }}>
-            <div ref={contentRef} role={alert ? 'alertdialog' : 'dialog'} aria-modal="true" aria-labelledby={labelledBy} aria-describedby={describedBy} tabIndex={-1} className={`max-h-[calc(100dvh-2rem)] min-w-0 max-w-[calc(100vw-2rem)] overflow-y-auto ${className}`} onMouseDown={event => event.stopPropagation()}>
+        <div className="fixed inset-0 z-[120] flex items-start justify-center overflow-hidden overscroll-contain bg-black/50 p-4 sm:items-center" role="presentation" onMouseDown={event => { if (closeOnBackdrop && event.target === event.currentTarget) onCloseRef.current(); }}>
+            <div ref={contentRef} role={alert ? 'alertdialog' : 'dialog'} aria-modal="true" aria-labelledby={labelledBy} aria-describedby={describedBy} tabIndex={-1} className={`my-0 max-h-[calc(100dvh-2rem)] min-w-0 max-w-[calc(100vw-2rem)] overflow-y-auto overscroll-contain sm:my-0 ${className}`} onMouseDown={event => event.stopPropagation()}>
                 {children}
             </div>
         </div>,

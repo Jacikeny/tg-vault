@@ -28,6 +28,10 @@ export class ApiActionError extends Error {
     }
 }
 
+export function isUnauthorizedError(error: unknown): error is ApiActionError {
+    return error instanceof ApiActionError && error.kind === 'unauthorized';
+}
+
 export async function apiActionErrorFromResponse(response: Response, fallback: string, now = Date.now()): Promise<ApiActionError> {
     const payload = await response.json().catch(() => ({})) as ApiErrorPayload;
     const code = typeof payload.code === 'string' ? payload.code : undefined;
@@ -45,7 +49,7 @@ export async function apiActionErrorFromResponse(response: Response, fallback: s
 }
 
 export function describeActionFailure(action: string, error: unknown): string {
-    if (error instanceof ApiActionError) return error.kind === 'unauthorized' ? `登录会话已失效，已为你退出，请重新登录后${action}` : `${action}失败：${error.message}`;
+    if (error instanceof ApiActionError) return error.kind === 'unauthorized' ? `登录会话已失效，请重新登录后${action}` : `${action}失败：${error.message}`;
     if (error instanceof DOMException && ['NotAllowedError', 'SecurityError'].includes(error.name)) return `${action}失败，请检查浏览器剪贴板权限后重试，也可手动选择内容复制`;
     return error instanceof Error && error.message ? `${action}失败：${error.message}` : `${action}失败，请稍后重试`;
 }

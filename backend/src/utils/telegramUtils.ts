@@ -1,13 +1,5 @@
 import path from 'path';
-
-// Format bytes
-export function formatBytes(bytes: number): string {
-    if (bytes === 0) return '0 B';
-    const k = 1024;
-    const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
-}
+export { formatBytes, getFileType } from './fileMetadata.js';
 
 // Get file type emoji
 export function getTypeEmoji(mimeType: string): string {
@@ -31,19 +23,6 @@ export function getTypeEmoji(mimeType: string): string {
     return '📁';
 }
 
-// Determine broad file type
-export function getFileType(mimeType: string): string {
-    if (!mimeType) return 'other';
-    if (mimeType.startsWith('image/')) return 'image';
-    if (mimeType.startsWith('video/')) return 'video';
-    if (mimeType.startsWith('audio/')) return 'audio';
-    if (mimeType.includes('pdf') || mimeType.includes('document') || mimeType.includes('text') ||
-        mimeType.includes('word') || mimeType.includes('excel') || mimeType.includes('spreadsheet') ||
-        mimeType.includes('powerpoint') || mimeType.includes('presentation') ||
-        mimeType.includes('markdown') || mimeType.includes('json') || mimeType.includes('xml') ||
-        mimeType.includes('sql') || mimeType.includes('javascript') || mimeType.includes('typescript')) return 'document';
-    return 'other';
-}
 
 // Get MIME type from filename
 export function getMimeTypeFromFilename(filename: string): string {
