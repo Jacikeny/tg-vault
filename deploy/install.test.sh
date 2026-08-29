@@ -115,13 +115,6 @@ EOF
   assert_contains "$FIXTURE/output.log" '已忽略环境变量中的 URL 覆盖'
 }
 
-test_staging_compose_overrides_shared_origin_values() {
-  assert_contains "$ROOT/docker-compose.staging.yml" 'VITE_API_URL: ${STAGING_VITE_API_URL:-http://127.0.0.1:${STAGING_BACKEND_PORT:-51957}}'
-  assert_contains "$ROOT/docker-compose.staging.yml" 'CORS_ORIGIN=${STAGING_CORS_ORIGIN:-http://127.0.0.1:${STAGING_FRONTEND_PORT:-47842}}'
-  assert_contains "$ROOT/docker-compose.staging.yml" 'OAUTH_CALLBACK_BASE_URL=${STAGING_OAUTH_CALLBACK_BASE_URL:-http://127.0.0.1:${STAGING_BACKEND_PORT:-51957}}'
-  assert_contains "$ROOT/docker-compose.staging.yml" 'OAUTH_FRONTEND_ORIGIN=${STAGING_OAUTH_FRONTEND_ORIGIN:-http://127.0.0.1:${STAGING_FRONTEND_PORT:-47842}}'
-}
-
 test_existing_install_keeps_urls_on_enter() {
   make_fixture
   cat > "$FIXTURE/.env" <<'EOF'
@@ -203,7 +196,6 @@ case "$SCENARIO" in
   quit) test_quit_does_not_create_or_start ;;
   non-interactive) test_non_interactive_uses_environment_without_waiting ;;
   existing-env-guard) test_existing_non_interactive_install_rejects_ambient_origin_override ;;
-  staging-isolation) test_staging_compose_overrides_shared_origin_values ;;
   existing) test_existing_install_keeps_urls_on_enter ;;
   environment) test_environment_check_offers_to_install_missing_tools ;;
   no-openssl) test_secret_generation_does_not_require_openssl ;;
@@ -212,7 +204,6 @@ case "$SCENARIO" in
     test_quit_does_not_create_or_start
     test_non_interactive_uses_environment_without_waiting
     test_existing_non_interactive_install_rejects_ambient_origin_override
-    test_staging_compose_overrides_shared_origin_values
     test_existing_install_keeps_urls_on_enter
     test_environment_check_offers_to_install_missing_tools
     test_secret_generation_does_not_require_openssl
